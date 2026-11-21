@@ -248,7 +248,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
           ? 'Sprawdzaj pole `stop_hook_active` z JSON na stdin na początku hooka `Stop` i zwracaj kod 0, gdy ma wartość true, aby uniknąć pętli nieskończonej.'
           : 'Dodaj deterministyczne hooki w `.claude/settings.json` (`PostToolUse` / zabezpieczony `Stop`) oraz/lub `lefthook.yml` / `.husky/` dla szybkich sprawdzeń przed commitem.',
       },
-      docsPath: 'workflows/harness/',
+      docsPath: 'workflows/harness/agent-hooks/',
     });
   }
 

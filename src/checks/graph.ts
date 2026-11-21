@@ -49,7 +49,7 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
         en: 'Add a lightweight worktree helper script (or document `git worktree` / `--worktree` conventions plus `.worktreeinclude` for local untracked config) in `AGENTS.md`.',
         pl: 'Dodaj prosty skrypt pomocniczy do worktree (lub opisz konwencję `git worktree` / `--worktree` wraz z `.worktreeinclude`) w `AGENTS.md`.',
       },
-      docsPath: 'ladder/level-5-run-the-factory/',
+      docsPath: 'workflows/harness/git-worktrees/',
     });
   }
 

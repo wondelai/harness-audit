@@ -167,7 +167,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
         en: 'Enable strict typechecking (`strict: true` in `tsconfig.json`, `pyright`/`mypy` for Python, `phpstan` for PHP) and wire it into your verify command and CI.',
         pl: 'Włącz ścisłe typowanie (`strict: true` w `tsconfig.json`, `pyright`/`mypy` w Pythonie, `phpstan` w PHP) i podepnij je do komendy weryfikacji oraz CI.',
       },
-      docsPath: 'workflows/test/code-quality/',
+      docsPath: 'workflows/test/',
     });
   }
 
@@ -230,7 +230,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
         en: 'Configure a fast linter and formatter (e.g., Biome, oxlint + dprint/Prettier, Ruff, golangci-lint) and run them in your local verify script and CI.',
         pl: 'Skonfiguruj szybki linter i formatter (np. Biome, oxlint + dprint/Prettier, Ruff, golangci-lint) i uruchamiaj je w lokalnym skrypcie weryfikacji oraz CI.',
       },
-      docsPath: 'workflows/test/code-quality/',
+      docsPath: 'workflows/test/',
     });
   }
 

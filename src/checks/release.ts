@@ -71,7 +71,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
         en: 'Add a CI workflow triggered on `pull_request` that installs from the lockfile and runs lint, typecheck, and tests before merge.',
         pl: 'Dodaj workflow CI wyzwalany na `pull_request`, który instaluje zależności z lockfile’a i uruchamia lint, typecheck oraz testy przed scaleniem.',
       },
-      docsPath: 'workflows/ship/ci-cd-pipelines/',
+      docsPath: 'method/lifecycle/deploy/',
     });
   }
 
@@ -234,7 +234,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
         en: 'Wire error tracking/telemetry (Sentry, OpenTelemetry, or structured logs), a healthcheck endpoint, and versioned database migrations with rollback notes.',
         pl: 'Podepnij śledzenie błędów/telemetrię (Sentry, OpenTelemetry lub logi strukturalne), endpoint healthcheck oraz wersjonowane migracje bazy z opisem wycofania.',
       },
-      docsPath: 'workflows/ship/progressive-delivery/',
+      docsPath: 'workflows/operate/codebase-health/',
     });
   }
 
@@ -292,7 +292,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
         en: 'Gate CI deploy jobs behind verification jobs (`needs: [test, lint, typecheck]`) and add local deploy commands to `.claude/settings.json` `permissions.deny`.',
         pl: 'Uzależnij zadania deploy w CI od zielonej weryfikacji (`needs: [test, lint, typecheck]`) i dodaj lokalne komendy deploy do `permissions.deny` w `.claude/settings.json`.',
       },
-      docsPath: 'workflows/ship/progressive-delivery/',
+      docsPath: 'workflows/operate/codebase-health/',
     });
   }
 

@@ -43,7 +43,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         en: 'Add fast deterministic unit/integration tests covering core business logic and edge cases, and wire them to your verify command.',
         pl: 'Dodaj szybkie, deterministyczne testy jednostkowe i integracyjne dla kluczowej logiki oraz przypadków brzegowych i podepnij je pod komendę weryfikacji.',
       },
-      docsPath: 'workflows/test/unit-testing/',
+      docsPath: 'workflows/test/',
     });
   }
 
@@ -102,7 +102,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         en: 'Add a focused must-have E2E or runtime contract tier (e.g., Playwright, Workers pool, or HTTP contract tests) covering critical user/API flows.',
         pl: 'Dodaj szybki zestaw krytycznych testów E2E lub kontraktowych runtime (np. Playwright, Workers pool lub testy HTTP) pokrywający kluczowe ścieżki użytkownika/API.',
       },
-      docsPath: 'workflows/test/e2e-testing/',
+      docsPath: 'workflows/test/oracle-strength/',
     });
   }
 
