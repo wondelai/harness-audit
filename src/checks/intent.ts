@@ -1,0 +1,481 @@
+import type { RepoContext } from '../fs-scanner.js';
+import type { CheckResult } from '../types.js';
+
+const BOILERPLATE_PATTERNS: Array<{ label: string; regex: RegExp }> = [
+  { label: 'generic "write clean code"', regex: /\bwrite clean(,|\s+and)?\s+(maintainable\s+)?code\b/i },
+  { label: 'generic "follow best practices"', regex: /\bfollow (industry\s+)?best practices\b/i },
+  { label: 'generic "ensure high quality"', regex: /\bensure high[- ]quality\b/i },
+  { label: 'generic "be helpful and concise"', regex: /\bbe (helpful|concise|thorough)\b/i },
+  { label: 'generic "always test your changes"', regex: /\balways test your (changes|code)\b/i },
+];
+
+/**
+ * Checks whether a markdown file contains a bare `@AGENTS.md` import line
+ * outside fenced code blocks and outside inline backticks (Claude Code only
+ * imports bare `@AGENTS.md`).
+ */
+export function hasBareAgentsImport(content: string): { bare: boolean; backticked: boolean } {
+  const lines = content.split(/\r?\n/);
+  let inFence = false;
+  let bare = false;
+  let backticked = false;
+
+  for (const rawLine of lines) {
+    const trimmed = rawLine.trim();
+    if (/^```/.test(trimmed)) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence) {
+      if (/@AGENTS\.md\b/.test(trimmed)) backticked = true;
+      continue;
+    }
+    if (/^@AGENTS\.md\s*$/.test(trimmed)) {
+      bare = true;
+      continue;
+    }
+    // Check inline bare @AGENTS.md not wrapped in backticks
+    const withoutBackticks = trimmed.replace(/`[^`]*`/g, '');
+    if (/(^|\s)@AGENTS\.md(\s|$)/.test(withoutBackticks)) {
+      bare = true;
+    } else if (/`[^`]*@AGENTS\.md[^`]*`/.test(trimmed)) {
+      backticked = true;
+    }
+  }
+
+  return { bare, backticked };
+}
+
+function countLines(text: string): number {
+  if (!text) return 0;
+  return text.replace(/\r?\n$/, '').split(/\r?\n/).length;
+}
+
+export function runIntentChecks(ctx: RepoContext): CheckResult[] {
+  const results: CheckResult[] = [];
+
+  const hasAgentsMd = ctx.hasFile('AGENTS.md');
+  const hasClaudeMd = ctx.hasFile('CLAUDE.md');
+  const hasCopilot = ctx.hasFile('.github/copilot-instructions.md');
+  const hasLegacyCursorRules = ctx.hasFile('.cursorrules');
+  const cursorMdcFiles = ctx.findFiles((f) => /^\.cursor\/rules\/.+\.mdc$/.test(f));
+  const cursorPlainMdFiles = ctx.findFiles((f) => /^\.cursor\/rules\/.+\.md$/.test(f));
+  const claudeRuleFiles = ctx.findFiles((f) => /^\.claude\/rules\/.+\.md$/.test(f));
+
+  // 1. intent.instructions-file
+  {
+    const found: string[] = [];
+    if (hasAgentsMd) found.push('AGENTS.md');
+    if (hasClaudeMd) found.push('CLAUDE.md');
+    if (cursorMdcFiles.length > 0) found.push(`.cursor/rules/*.mdc (${cursorMdcFiles.length})`);
+    if (claudeRuleFiles.length > 0) found.push(`.claude/rules/*.md (${claudeRuleFiles.length})`);
+    if (hasCopilot) found.push('.github/copilot-instructions.md');
+    if (hasLegacyCursorRules) found.push('.cursorrules (undocumented legacy format)');
+    if (cursorPlainMdFiles.length > 0) {
+      found.push(`.cursor/rules/*.md (${cursorPlainMdFiles.length} ignored — must be .mdc)`);
+    }
+
+    const hasPrimary = hasAgentsMd || hasClaudeMd || cursorMdcFiles.length > 0 || hasCopilot;
+    let status: CheckResult['status'] = 'fail';
+    if (hasPrimary && cursorPlainMdFiles.length === 0 && !hasLegacyCursorRules) {
+      status = 'pass';
+    } else if (hasPrimary || hasLegacyCursorRules || claudeRuleFiles.length > 0) {
+      status = 'warn';
+    }
+
+    results.push({
+      id: 'intent.instructions-file',
+      station: 'intent',
+      weight: 30,
+      status,
+      severity: status === 'fail' ? 'critical' : status === 'warn' ? 'medium' : 'low',
+      title: {
+        en: 'Canonical project instructions file',
+        pl: 'Kanoniczny plik instrukcji projektu',
+      },
+      evidence: found.length > 0 ? found : ['No AGENTS.md, CLAUDE.md, .cursor/rules/*.mdc, or copilot-instructions.md found'],
+      why: {
+        en: 'Without versioned project instructions, every agent session guesses your build commands, architecture boundaries, and safety rules from scratch.',
+        pl: 'Bez wersjonowanych instrukcji projektu każda sesja agenta zgaduje komendy budowania, granice architektury i zasady bezpieczeństwa od zera.',
+      },
+      fix: {
+        en: hasLegacyCursorRules || cursorPlainMdFiles.length > 0
+          ? 'Consolidate into a root AGENTS.md (read natively by Codex, Cursor, and Copilot), keep a thin CLAUDE.md importing @AGENTS.md, and rename any .cursor/rules/*.md files to .mdc with frontmatter.'
+          : 'Add a concise root AGENTS.md (<= 150 lines) with real build/test commands and invariants, plus a thin CLAUDE.md containing `@AGENTS.md`.',
+        pl: hasLegacyCursorRules || cursorPlainMdFiles.length > 0
+          ? 'Skonsoliduj instrukcje do AGENTS.md w katalogu głównym (czytanym przez Codex, Cursor i Copilot), dodaj cienki CLAUDE.md z @AGENTS.md oraz zmień rozszerzenie plików .cursor/rules/*.md na .mdc z frontmatterem.'
+          : 'Dodaj zwięzły plik AGENTS.md (<= 150 linii) w katalogu głównym z realnymi komendami build/test i niezmiennikami oraz cienki CLAUDE.md zawierający `@AGENTS.md`.',
+      },
+      docsPath: 'workflows/harness/agent-ready-codebase/',
+    });
+  }
+
+  // 2. intent.single-source
+  {
+    const agentsText = hasAgentsMd ? (ctx.readText('AGENTS.md') ?? '') : '';
+    const claudeText = hasClaudeMd ? (ctx.readText('CLAUDE.md') ?? '') : '';
+    const agentsLines = countLines(agentsText);
+    const claudeLines = countLines(claudeText);
+
+    if (!hasAgentsMd && !hasClaudeMd) {
+      results.push({
+        id: 'intent.single-source',
+        station: 'intent',
+        weight: 20,
+        status: 'fail',
+        severity: 'high',
+        title: {
+          en: 'Single source of truth for agent instructions',
+          pl: 'Jedno źródło prawdy dla instrukcji agentów',
+        },
+        evidence: ['Neither AGENTS.md nor CLAUDE.md exists at repository root'],
+        why: {
+          en: 'Cross-tool teams need one canonical instruction file so Codex, Cursor, and Claude Code never follow contradicting rules.',
+          pl: 'Zespoły pracujące wieloma narzędziami potrzebują jednego kanonicznego pliku instrukcji, aby Codex, Cursor i Claude Code nie dostawały sprzecznych zasad.',
+        },
+        fix: {
+          en: 'Create AGENTS.md as the single canonical brief and add a 1-line CLAUDE.md containing `@AGENTS.md`.',
+          pl: 'Utwórz AGENTS.md jako jedno kanoniczne źródło i dodaj 1-liniowy plik CLAUDE.md zawierający `@AGENTS.md`.',
+        },
+        docsPath: 'workflows/harness/agent-ready-codebase/',
+      });
+    } else if (hasAgentsMd && hasClaudeMd) {
+      const imp = hasBareAgentsImport(claudeText);
+      if (imp.bare && claudeLines <= 45) {
+        results.push({
+          id: 'intent.single-source',
+          station: 'intent',
+          weight: 20,
+          status: 'pass',
+          severity: 'low',
+          title: {
+            en: 'Single source of truth for agent instructions',
+            pl: 'Jedno źródło prawdy dla instrukcji agentów',
+          },
+          evidence: [
+            `AGENTS.md (${agentsLines} lines) imported via bare @AGENTS.md in thin CLAUDE.md (${claudeLines} lines)`,
+          ],
+          why: {
+            en: 'AGENTS.md is read natively by Codex and Cursor while Claude Code pulls it cleanly via `@AGENTS.md` without duplicating policy.',
+            pl: 'AGENTS.md jest czytany natywnie przez Codex i Cursor, a Claude Code importuje go przez `@AGENTS.md` bez duplikowania zasad.',
+          },
+          fix: {
+            en: 'Keep editing AGENTS.md as the single source and keep CLAUDE.md reserved for Claude-only notes.',
+            pl: 'Edytuj zasady w AGENTS.md jako jedynym źródle i zostaw CLAUDE.md wyłącznie na notatki specyficzne dla Claude Code.',
+          },
+          docsPath: 'workflows/harness/agent-ready-codebase/',
+        });
+      } else if (imp.backticked && !imp.bare) {
+        results.push({
+          id: 'intent.single-source',
+          station: 'intent',
+          weight: 20,
+          status: 'fail',
+          severity: 'high',
+          title: {
+            en: 'Single source of truth for agent instructions',
+            pl: 'Jedno źródło prawdy dla instrukcji agentów',
+          },
+          evidence: [
+            `CLAUDE.md (${claudeLines} lines) wraps @AGENTS.md in backticks or a code fence — Claude Code does NOT import backticked @references`,
+          ],
+          why: {
+            en: 'Claude Code only expands a bare `@AGENTS.md` line; wrapping it in backticks turns the import into inert text so Claude never loads your brief.',
+            pl: 'Claude Code rozwija wyłącznie gołą linię `@AGENTS.md`; ujęcie jej w backticki zamienia import w zwykły tekst, przez co Claude nie ładuje instrukcji.',
+          },
+          fix: {
+            en: 'Put `@AGENTS.md` on its own unquoted line at the top of CLAUDE.md (remove backticks/fences around it).',
+            pl: 'Umieść `@AGENTS.md` w osobnej linii na początku CLAUDE.md bez backticków i bloków kodu.',
+          },
+          docsPath: 'workflows/harness/agent-ready-codebase/',
+        });
+      } else if (claudeLines > 35 && !imp.bare) {
+        results.push({
+          id: 'intent.single-source',
+          station: 'intent',
+          weight: 20,
+          status: 'fail',
+          severity: 'high',
+          title: {
+            en: 'Single source of truth for agent instructions',
+            pl: 'Jedno źródło prawdy dla instrukcji agentów',
+          },
+          evidence: [
+            `Policy by duplication: AGENTS.md (${agentsLines} lines) and CLAUDE.md (${claudeLines} lines) both exist, and CLAUDE.md does not import @AGENTS.md`,
+          ],
+          why: {
+            en: 'Maintaining parallel AGENTS.md and CLAUDE.md files causes silent drift the first time someone updates a command or rule in only one file.',
+            pl: 'Utrzymywanie równoległych plików AGENTS.md i CLAUDE.md powoduje cichy rozjazd przy pierwszej zmianie komendy lub zasady tylko w jednym z nich.',
+          },
+          fix: {
+            en: 'Merge shared project instructions into AGENTS.md and replace duplicated sections in CLAUDE.md with a bare `@AGENTS.md` import line.',
+            pl: 'Scal wspólne instrukcje projektu do AGENTS.md i zastąp zduplikowane sekcje w CLAUDE.md gołą linią importu `@AGENTS.md`.',
+          },
+          docsPath: 'workflows/harness/agent-ready-codebase/',
+        });
+      } else {
+        results.push({
+          id: 'intent.single-source',
+          station: 'intent',
+          weight: 20,
+          status: 'warn',
+          severity: 'medium',
+          title: {
+            en: 'Single source of truth for agent instructions',
+            pl: 'Jedno źródło prawdy dla instrukcji agentów',
+          },
+          evidence: [
+            imp.bare
+              ? `CLAUDE.md (${claudeLines} lines) imports @AGENTS.md but carries substantial extra text`
+              : `AGENTS.md (${agentsLines} lines) and short CLAUDE.md (${claudeLines} lines) exist without a bare @AGENTS.md import`,
+          ],
+          why: {
+            en: 'Claude Code ignores AGENTS.md whenever a CLAUDE.md file exists unless CLAUDE.md explicitly imports `@AGENTS.md`.',
+            pl: 'Claude Code ignoruje AGENTS.md, gdy istnieje CLAUDE.md — chyba że CLAUDE.md jawnie importuje `@AGENTS.md`.',
+          },
+          fix: {
+            en: 'Add a bare `@AGENTS.md` line at the top of CLAUDE.md and move general project rules into AGENTS.md.',
+            pl: 'Dodaj gołą linię `@AGENTS.md` na górze CLAUDE.md i przenieś ogólne zasady projektu do AGENTS.md.',
+          },
+          docsPath: 'workflows/harness/agent-ready-codebase/',
+        });
+      }
+    } else if (hasAgentsMd) {
+      results.push({
+        id: 'intent.single-source',
+        station: 'intent',
+        weight: 20,
+        status: 'pass',
+        severity: 'low',
+        title: {
+          en: 'Single source of truth for agent instructions',
+          pl: 'Jedno źródło prawdy dla instrukcji agentów',
+        },
+        evidence: [`Single canonical AGENTS.md (${agentsLines} lines) — no duplicated root brief`],
+        why: {
+          en: 'A single AGENTS.md avoids instruction drift across tools; modern Claude Code, Codex, and Cursor all support it.',
+          pl: 'Jeden plik AGENTS.md eliminuje rozjazd instrukcji między narzędziami — wspierają go nowoczesne Claude Code, Codex i Cursor.',
+        },
+        fix: {
+          en: 'Optionally add a 1-line CLAUDE.md with `@AGENTS.md` if teammates run older Claude Code versions.',
+          pl: 'Opcjonalnie dodaj 1-liniowy CLAUDE.md z `@AGENTS.md`, jeśli zespół używa starszych wersji Claude Code.',
+        },
+        docsPath: 'workflows/harness/agent-ready-codebase/',
+      });
+    } else {
+      // Only CLAUDE.md exists
+      results.push({
+        id: 'intent.single-source',
+        station: 'intent',
+        weight: 20,
+        status: 'warn',
+        severity: 'low',
+        title: {
+          en: 'Single source of truth for agent instructions',
+          pl: 'Jedno źródło prawdy dla instrukcji agentów',
+        },
+        evidence: [`Only CLAUDE.md (${claudeLines} lines) found — Codex and Cursor do not read CLAUDE.md natively`],
+        why: {
+          en: 'Putting shared instructions only in CLAUDE.md leaves Codex and Cursor users without project context.',
+          pl: 'Umieszczenie wspólnych instrukcji wyłącznie w CLAUDE.md pozbawia użytkowników Codexa i Cursora kontekstu projektu.',
+        },
+        fix: {
+          en: 'Move shared rules into AGENTS.md and make CLAUDE.md a thin adapter containing `@AGENTS.md`.',
+          pl: 'Przenieś wspólne zasady do AGENTS.md i zamień CLAUDE.md w cienki adapter zawierający `@AGENTS.md`.',
+        },
+        docsPath: 'workflows/harness/agent-ready-codebase/',
+      });
+    }
+  }
+
+  // 3. intent.instruction-budget
+  {
+    const primaryFile = hasAgentsMd ? 'AGENTS.md' : hasClaudeMd ? 'CLAUDE.md' : undefined;
+    if (!primaryFile) {
+      results.push({
+        id: 'intent.instruction-budget',
+        station: 'intent',
+        weight: 20,
+        status: 'fail',
+        severity: 'medium',
+        title: {
+          en: 'Root instruction budget & signal-to-noise',
+          pl: 'Budżet długości i jakość instrukcji głównych',
+        },
+        evidence: ['No root instruction file to measure'],
+        why: {
+          en: 'Every line of root instructions consumes context in every session. Concise, concrete commands outperform long essays.',
+          pl: 'Każda linia głównych instrukcji zajmuje okno kontekstowe w każdej sesji. Konkretne komendy działają lepiej niż długie eseje.',
+        },
+        fix: {
+          en: 'Author a root AGENTS.md under 150 lines focusing exclusively on commands, non-obvious invariants, and links to deeper docs.',
+          pl: 'Napisz plik AGENTS.md poniżej 150 linii zawierający wyłącznie komendy, nieoczywiste niezmienniki i linki do głębszej dokumentacji.',
+        },
+        docsPath: 'workflows/context/',
+      });
+    } else {
+      const text = ctx.readText(primaryFile) ?? '';
+      const lines = countLines(text);
+      const bytes = Buffer.byteLength(text, 'utf8');
+      const fillerHits = BOILERPLATE_PATTERNS.filter((p) => p.regex.test(text)).map((p) => p.label);
+
+      const evidence = [`${primaryFile}: ${lines} lines (${(bytes / 1024).toFixed(1)} KiB)`];
+      if (fillerHits.length > 0) {
+        evidence.push(`Generic filler detected: ${fillerHits.join(', ')}`);
+      }
+      if (bytes > 32 * 1024) {
+        evidence.push('Exceeds Codex default project_doc_max_bytes (32 KiB) — tail gets silently truncated');
+      }
+
+      let status: CheckResult['status'] = 'pass';
+      if (lines > 350 || bytes > 32 * 1024 || lines < 5) {
+        status = 'fail';
+      } else if (lines > 150 || fillerHits.length >= 2) {
+        status = 'warn';
+      }
+
+      results.push({
+        id: 'intent.instruction-budget',
+        station: 'intent',
+        weight: 20,
+        status,
+        severity: status === 'fail' ? 'high' : status === 'warn' ? 'medium' : 'low',
+        title: {
+          en: 'Root instruction budget & signal-to-noise',
+          pl: 'Budżet długości i jakość instrukcji głównych',
+        },
+        evidence,
+        why: {
+          en: 'Bloated root instruction files degrade agent task success and inflate token cost (>20% overhead on generic advice), and files >32 KiB truncate in Codex.',
+          pl: 'Rozbuchane instrukcje główne obniżają skuteczność agentów i podnoszą koszt tokenów (>20% narzutu przy ogólnikach), a pliki >32 KiB są ucinane w Codexie.',
+        },
+        fix: {
+          en: lines < 5
+            ? `Expand ${primaryFile} with concrete verify commands, architecture pointers, and hard constraints (target 40–150 lines).`
+            : `Trim ${primaryFile} to <= 150 lines by moving domain-specific guidance into path-scoped rules (.claude/rules/ or .cursor/rules/) or linked READMEs, and delete generic advice.`,
+          pl: lines < 5
+            ? `Rozbuduj ${primaryFile} o konkretne komendy weryfikacji, wskaźniki architektury i twarde ograniczenia (cel: 40–150 linii).`
+            : `Skróć ${primaryFile} do <= 150 linii, przenosząc zasady domenowe do reguł przypisanych do ścieżek (.claude/rules/ lub .cursor/rules/) albo linkowanych README i usuwając ogólniki.`,
+        },
+        docsPath: 'workflows/context/',
+      });
+    }
+  }
+
+  // 4. intent.scoped-rules
+  {
+    const nestedAgents = ctx.findFiles((f) => /\/AGENTS\.md$/.test(f) && !f.startsWith('docs-backup/'));
+    const claudeRulesWithoutPaths: string[] = [];
+    for (const rf of claudeRuleFiles) {
+      const content = ctx.readText(rf) ?? '';
+      if (!/^---[\s\S]*?\bpaths\s*:/m.test(content)) {
+        claudeRulesWithoutPaths.push(rf);
+      }
+    }
+
+    const totalScoped = cursorMdcFiles.length + claudeRuleFiles.length + nestedAgents.length;
+    const evidence: string[] = [];
+    if (claudeRuleFiles.length > 0) evidence.push(`.claude/rules/*.md: ${claudeRuleFiles.length}`);
+    if (cursorMdcFiles.length > 0) evidence.push(`.cursor/rules/*.mdc: ${cursorMdcFiles.length}`);
+    if (nestedAgents.length > 0) evidence.push(`Nested AGENTS.md: ${nestedAgents.slice(0, 5).join(', ')}`);
+    if (claudeRulesWithoutPaths.length > 0) {
+      evidence.push(`Warning: ${claudeRulesWithoutPaths.length} .claude/rules/*.md lack paths: frontmatter (loaded unconditionally)`);
+    }
+
+    const isLargeOrMono = ctx.stack.monorepo || ctx.sourceFiles.length >= 40;
+    let status: CheckResult['status'] = 'pass';
+    if (totalScoped === 0) {
+      status = isLargeOrMono ? 'warn' : 'info';
+      evidence.push(
+        isLargeOrMono
+          ? `No path-scoped rules found in a ${ctx.stack.monorepo ? 'monorepo' : `${ctx.sourceFiles.length}-file`} codebase`
+          : 'No path-scoped rules yet (optional for small repos; add as modules grow)',
+      );
+    } else if (claudeRulesWithoutPaths.length > 0 && claudeRulesWithoutPaths.length === claudeRuleFiles.length && cursorMdcFiles.length === 0 && nestedAgents.length === 0) {
+      status = 'warn';
+    }
+
+    results.push({
+      id: 'intent.scoped-rules',
+      station: 'intent',
+      weight: 15,
+      status,
+      severity: status === 'warn' ? 'medium' : 'low',
+      title: {
+        en: 'Path-scoped rules & nested context',
+        pl: 'Reguły przypisane do ścieżek i kontekst zagnieżdżony',
+      },
+      evidence,
+      why: {
+        en: 'Path-scoped rules load only when an agent touches matching files (tests, migrations, styles), preserving context budget while enforcing local invariants.',
+        pl: 'Reguły przypisane do ścieżek ładują się tylko wtedy, gdy agent dotyka pasujących plików (testy, migracje, style), oszczędzając budżet kontekstu.',
+      },
+      fix: {
+        en: claudeRulesWithoutPaths.length > 0
+          ? 'Add `paths:` YAML frontmatter to `.claude/rules/*.md` files so they load only on matching directories instead of every turn.'
+          : 'Add glob-scoped rules under `.claude/rules/*.md` (with `paths:`), `.cursor/rules/*.mdc` (with `globs:`), or nested `AGENTS.md` / `README.md` pointers for sensitive subdirectories.',
+        pl: claudeRulesWithoutPaths.length > 0
+          ? 'Dodaj nagłówek YAML `paths:` do plików `.claude/rules/*.md`, aby ładowały się tylko dla pasujących ścieżek, a nie w każdej sesji.'
+          : 'Dodaj reguły przypisane do ścieżek w `.claude/rules/*.md` (z `paths:`), `.cursor/rules/*.mdc` (z `globs:`) lub zagnieżdżone `AGENTS.md` dla wrażliwych modułów.',
+      },
+      docsPath: 'workflows/harness/',
+    });
+  }
+
+  // 5. intent.skills-and-specs
+  {
+    const skillFiles = ctx.findFiles((f) =>
+      /^(\.claude|\.agents|\.cursor)\/skills\/.+\/SKILL\.md$/i.test(f),
+    );
+    const prTemplate = ctx.hasAnyFile([
+      '.github/pull_request_template.md',
+      '.github/PULL_REQUEST_TEMPLATE.md',
+      'docs/pull_request_template.md',
+    ]) ?? ctx.findFiles((f) => /^\.github\/PULL_REQUEST_TEMPLATE\/.+\.md$/i.test(f))[0];
+    const issueTemplates = ctx.findFiles((f) => /^\.github\/ISSUE_TEMPLATE\/.+\.(md|ya?ml)$/i.test(f));
+    const specDocs = ctx.findFiles((f) =>
+      /^(DESIGN|PRODUCT|CODING_STANDARDS|TESTING|ARCHITECTURE)\.md$/i.test(f) ||
+      /^docs\/(adr|adrs|specs|rfcs|architecture)\//i.test(f),
+    );
+
+    const evidence: string[] = [];
+    if (skillFiles.length > 0) evidence.push(`Reusable skills: ${skillFiles.length} (${skillFiles.slice(0, 3).join(', ')})`);
+    if (prTemplate) evidence.push(`PR template: ${prTemplate}`);
+    if (issueTemplates.length > 0) evidence.push(`Issue templates: ${issueTemplates.length}`);
+    if (specDocs.length > 0) evidence.push(`Design/spec/standard docs: ${specDocs.slice(0, 5).join(', ')}`);
+
+    const categoriesHit =
+      (skillFiles.length > 0 ? 1 : 0) +
+      (prTemplate || issueTemplates.length > 0 ? 1 : 0) +
+      (specDocs.length > 0 ? 1 : 0);
+
+    const status: CheckResult['status'] = categoriesHit >= 2 ? 'pass' : categoriesHit === 1 ? 'warn' : 'fail';
+    if (evidence.length === 0) {
+      evidence.push('No project skills, spec/ADR/standards docs, or PR/issue templates found');
+    }
+
+    results.push({
+      id: 'intent.skills-and-specs',
+      station: 'intent',
+      weight: 15,
+      status,
+      severity: status === 'fail' ? 'medium' : 'low',
+      title: {
+        en: 'Reusable skills, specs & workflow templates',
+        pl: 'Wielokrotnego użytku skille, specyfikacje i szablony',
+      },
+      evidence,
+      why: {
+        en: 'Climbing past Level 2 requires reusable procedures (skills) and durable specification/standards artifacts rather than re-explaining requirements in chat.',
+        pl: 'Wejście powyżej Poziomu 2 wymaga wielokrotnego użytku procedur (skilli) i trwałych specyfikacji zamiast ciągłego tłumaczenia wymagań na czacie.',
+      },
+      fix: {
+        en: 'Commit a standards or testing doc (e.g., `TESTING.md` or `CODING_STANDARDS.md`), add a PR/issue template with acceptance criteria, and extract recurring procedures into `.claude/skills/` or `.agents/skills/`.',
+        pl: 'Dodaj do repozytorium dokument standardów lub testów (np. `TESTING.md` lub `CODING_STANDARDS.md`), szablon PR/zgłoszenia z kryteriami akceptacji oraz wyodrębnij powtarzalne procedury do `.claude/skills/` lub `.agents/skills/`.',
+      },
+      docsPath: 'method/',
+    });
+  }
+
+  return results;
+}
