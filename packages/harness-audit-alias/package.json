@@ -1,0 +1,50 @@
+{
+  "name": "harness-audit",
+  "version": "0.1.0",
+  "description": "Audit any repository's AI coding agent harness across the 6 Software Factory Stations and Autonomy Ladder (Level 0-5). Works with Claude Code, Codex, and Cursor.",
+  "license": "MIT",
+  "author": "Michal Jaskolski <michal@wondel.ai>",
+  "homepage": "https://developertoolkit.ai/en/harness-audit/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wondelai/harness-audit.git",
+    "directory": "packages/harness-audit-alias"
+  },
+  "bugs": {
+    "url": "https://github.com/wondelai/harness-audit/issues"
+  },
+  "keywords": [
+    "ai-coding",
+    "agentic-engineering",
+    "claude-code",
+    "codex",
+    "cursor",
+    "agents-md",
+    "claude-md",
+    "mcp",
+    "harness",
+    "audit",
+    "autonomy-ladder",
+    "developer-toolkit"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "harness-audit": "bin.js"
+  },
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "files": [
+    "bin.js",
+    "index.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "dependencies": {
+    "@wondelai/harness-audit": "^0.1.0"
+  }
+}
