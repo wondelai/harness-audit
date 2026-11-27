@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { localDeployCommands, minimalVerifySet } from './capabilities.js';
+import { allowedVerifySet, localDeployCommands, minimalVerifySet } from './capabilities.js';
 import { RepoContext } from './fs-scanner.js';
 import type { InitAction, InitOptions, InitResult, SupportedTool } from './types.js';
 
@@ -69,7 +69,7 @@ Do not copy stale server lists from blog posts. Discover verified official serve
  * that reach production or rewrite history are denied.
  */
 function buildClaudeSettings(ctx: RepoContext): string {
-  const allow = minimalVerifySet(ctx.verify).map((cmd) => `Bash(${cmd}:*)`);
+  const allow = allowedVerifySet(ctx).map((cmd) => `Bash(${cmd}:*)`);
   const deny: string[] = [];
   for (const command of localDeployCommands(ctx)) {
     deny.push(`Bash(${command}:*)`);

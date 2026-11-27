@@ -30,6 +30,8 @@ export interface BriefFacts {
   productionReach: BriefLine[];
   /** A section or table that maps areas of the codebase to rules or docs. */
   hasModuleMap: boolean;
+  /** Commands the brief tells agents not to run ("Never run `npm test` from the root"), as quoted. */
+  forbiddenCommands: string[];
 }
 
 // A boundary is one sentence that forbids or reserves an action on production: the production
@@ -58,11 +60,12 @@ const MAP_HEADING = /^#{2,4}\s+(architecture|directory|structure|project structu
 
 /** Whether a document has a section that maps the code: "Architecture", "Project structure", "Struktura". */
 export function hasMapSection(markdown: string): boolean {
-  return MAP_HEADING.test(markdown);
+  // By heading, or by shape: a drawn directory tree maps the code under any heading, in any language.
+  return MAP_HEADING.test(markdown) || (markdown.match(/^\s*[│|]?\s*[├└]──\s+\S/gm)?.length ?? 0) >= 3;
 }
 
 /** How plainly a rule forbids, and whether it names production: the clearest rule is the one to quote. */
-function ruleStrength(text: string): number {
+export function ruleStrength(text: string): number {
   // An instruction: "Never …" / "Do not …" opening a sentence, or a modal prohibition anywhere.
   const words = text.replace(/[*_`>]/g, '');
   const forbids =
@@ -153,6 +156,16 @@ export function readBrief(ctx: RepoContext): BriefFacts {
   }
   boundaryRules.sort((a, b) => ruleStrength(b.text) - ruleStrength(a.text));
 
+  // "Never run `npm run build`", "Do NOT run `npm test` unless asked": the backticked commands of
+  // a sentence that forbids running something.
+  const forbiddenCommands: string[] = [];
+  for (const line of text.split(/\r?\n/)) {
+    for (const sentence of line.split(/(?<=[.!?;])\s+/)) {
+      if (!/\b(?:never|do not|don't|must not)\b[^`.]{0,30}\b(?:run|execute|invoke|call|use)\b/i.test(sentence)) continue;
+      for (const m of sentence.matchAll(/`([^`\n]{3,80})`/g)) forbiddenCommands.push(m[1]!.trim());
+    }
+  }
+
   const routedDocs = repoDocLinks(text, (p) => ctx.hasFile(p));
   // A table whose rows pair a path with something: three rows make it a map.
   const tableRowsWithPaths = text.split(/\r?\n/).filter((l) => /^\s*\|.*`[^`]*\/[^`]*`.*\|/.test(l)).length;
@@ -167,6 +180,7 @@ export function readBrief(ctx: RepoContext): BriefFacts {
     nestedBriefs: ctx.findFiles((f) => /\/(AGENTS|CLAUDE)\.md$/.test(f) && !f.startsWith('.')),
     boundaryRules,
     productionReach,
-    hasModuleMap: MAP_HEADING.test(text) || routedDocs.length >= 3 || tableRowsWithPaths >= 3,
+    hasModuleMap: hasMapSection(text) || routedDocs.length >= 3 || tableRowsWithPaths >= 3,
+    forbiddenCommands: [...new Set(forbiddenCommands)],
   };
 }

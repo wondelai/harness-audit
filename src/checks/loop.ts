@@ -306,6 +306,12 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       evidence.push('No recognized application language requiring separate static type config');
     }
 
+    // A strict configuration proves nothing until a command runs the checker.
+    if (status === 'pass' && tsconfigs.length > 0 && ctx.verify.commands.length > 0 && !ctx.verify.kinds.has('typecheck')) {
+      status = 'warn';
+      evidence.push('Strict mode is configured, but none of the verify commands runs the type checker (no `tsc`, `astro check` or similar in the scripts)');
+    }
+
     results.push({
       id: 'loop.static-types',
       station: 'loop',
@@ -613,6 +619,13 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       status = 'warn';
     } else {
       status = 'fail';
+    }
+
+    // Dependencies committed as source: the lockfile no longer decides what runs, and every bump
+    // rewrites thousands of files an agent then has to read past.
+    if (ctx.committedNodeModules > 0) {
+      evidence.push(`node_modules/ is committed (${ctx.committedNodeModules} tracked files): add it to .gitignore and \`git rm -r --cached node_modules\``);
+      if (status === 'pass' || status === 'info') status = 'warn';
     }
 
     const lockAdvice: LocalizedText = stack.languages.includes('Swift')

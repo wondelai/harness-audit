@@ -1,6 +1,6 @@
-import { localDeployCommands, minimalVerifySet } from '../capabilities.js';
-import { scanBoundaries } from '../brief.js';
-import { stripJsonComments, type RepoContext } from '../fs-scanner.js';
+import { allowedVerifySet, localDeployCommands } from '../capabilities.js';
+import { ruleStrength, scanBoundaries } from '../brief.js';
+import { isTestFilePath, stripJsonComments, type RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
 
 const ARCHIVED_OR_BROKEN_MCP_PACKAGES: Array<{ pkg: string; note: string }> = [
@@ -30,6 +30,16 @@ const SECRET_PATTERNS: Array<{ name: string; regex: RegExp }> = [
   { name: 'Polar webhook secret', regex: /\bpolar_whs_[A-Za-z0-9_-]{20,}\b/ },
   { name: 'Resend API key', regex: /\bre_[A-Za-z0-9]{24,}\b/ },
 ];
+
+/**
+ * The provider formats for `git grep`, a wide net over every file git can see: one
+ * Perl-compatible expression, and the literal prefixes for a git built without PCRE. Each hit is
+ * then confirmed with the precise pattern above.
+ */
+const SECRET_GREP = {
+  pcre: '\\bsk-ant-[A-Za-z0-9_-]{20,}|\\bsk-or-v1-[A-Za-z0-9]{32,}|\\b[sr]k_live_[A-Za-z0-9]{20,}|\\bsk-(?:proj-|live-|svcacct-)?[A-Za-z0-9_-]{32,}|\\bAIza[0-9A-Za-z_-]{35}|\\bnpm_[A-Za-z0-9]{36}|\\bphx_[A-Za-z0-9]{32,}|\\bghp_[A-Za-z0-9]{30,}|\\bgithub_pat_[A-Za-z0-9_]{30,}|\\bAKIA[0-9A-Z]{16}|\\bxox[baprs]-[A-Za-z0-9-]{16,}|-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----|\\bpolar_oat_[A-Za-z0-9_-]{20,}|\\bpolar_whs_[A-Za-z0-9_-]{20,}',
+  fixed: ['sk-ant-', 'sk-or-v1-', 'sk_live_', 'rk_live_', 'sk-proj-', 'sk-svcacct-', 'AIza', 'npm_', 'phx_', 'ghp_', 'github_pat_', 'AKIA', 'xoxb-', 'xoxa-', 'xoxp-', 'xoxr-', 'xoxs-', 'PRIVATE KEY-----', 'polar_oat_', 'polar_whs_'],
+};
 
 /**
  * A variable whose name says credential and whose value looks like one, whatever the provider:
@@ -141,7 +151,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     const evidence: string[] = [];
     const criticalErrors: string[] = [];
     let hasPolicy = false;
-    const verifyAllows = minimalVerifySet(ctx.verify).slice(0, 3).map((c) => `Bash(${c}:*)`);
+    const verifyAllows = allowedVerifySet(ctx).slice(0, 3).map((c) => `Bash(${c}:*)`);
     const allowExample = verifyAllows.length > 0 ? verifyAllows.map((a) => `\`${a}\``).join(', ') : '`Bash(<your test command>)`';
 
     if (claudeSettings) {
@@ -580,6 +590,8 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
           /^(AGENTS|CLAUDE|README)\.md$/i.test(f) ||
           /^\.(claude|codex|cursor|github)\//.test(f) ||
           /\.(json|jsonc|toml|ya?ml|sh|properties|xcconfig|plist|tfvars)$/.test(f) ||
+          // A backup copy of a credential file is the credential file.
+          /\.json\.(bak|old|orig|backup|save)$/.test(f) ||
           /(^|\/)\.?env(\.[\w.-]+)?$/.test(f) ||
           /(^|\/)\.dev\.vars(\.[\w.-]+)?$/.test(f)
         );
@@ -607,7 +619,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         // is not always an OpenAI key.
         const named = envLike ? NAMED_CREDENTIAL.exec(line) : null;
         const namedHit = named && !PUBLIC_BY_DESIGN.test(named[1]!) && !isPlaceholderToken(named[2]!) && !named[2]!.includes('${') && looksLikeCredential(named[2]!);
-        const json = /\.json$/.test(file) ? JSON_CREDENTIAL.exec(line) : null;
+        const json = /\.json(\.(bak|old|orig|backup|save))?$/.test(file) ? JSON_CREDENTIAL.exec(line) : null;
         const jsonHit = json !== null && !isPlaceholderToken(json[2]!) && /[A-Za-z]/.test(json[2]!) && /\d/.test(json[2]!) && !/^<|^your[-_ ]/i.test(json[2]!);
         if (!provider && !namedHit && !jsonHit) continue;
         const testMode = /\b[sr]k_test_[A-Za-z0-9]{10,}/.test(line) && !provider;
@@ -621,6 +633,37 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         // Outside a git work tree nothing is known about tracking: treat the file as shared.
         if (ctx.isTracked(file) === false) untrackedLeaks.push(`${file}:${i + 1} ${label} (untracked, not gitignored)`);
         else trackedLeaks.push(`${file}:${i + 1} ${label}${ctx.isTracked(file) ? ' (committed)' : ''}`);
+      }
+    }
+
+    // Provider keys anywhere git can see them: source files and scripts, not only configuration,
+    // and the last commit as well as the working copy. A key deleted locally but still in HEAD is
+    // still what the remote serves.
+    const reported = new Set([...trackedLeaks, ...untrackedLeaks].map((leak) => /^(.*?:\d+) /.exec(leak)?.[1] ?? ''));
+    // Tests, fixtures, examples and docs hold keys made up to look real: not what this net is for.
+    const notProduct = (path: string): boolean =>
+      isTestFilePath(path) ||
+      /(^|\/)(tests?|__tests__|e2e|specs?|fixtures?|mocks?|stubs?|testdata|snapshots?|examples?|samples?|docs?)\//.test(path) ||
+      /\.(example|sample|template|mdx?|rst|txt|adoc|snap)$/.test(path);
+    for (const where of ['worktree', 'head'] as const) {
+      for (const hit of ctx.grep(SECRET_GREP, where).slice(0, 500)) {
+        const at = `${hit.path}:${hit.line}`;
+        if (reported.has(at) || notProduct(hit.path)) continue;
+        const provider = SECRET_PATTERNS.find((sp) => {
+          const m = sp.regex.exec(hit.text);
+          return m !== null && !isPlaceholderToken(m[0]);
+        });
+        if (!provider) continue;
+        reported.add(at);
+        if (where === 'head') {
+          trackedLeaks.push(`${at} ${provider.name} (in the last commit; the working copy no longer has it)`);
+          liveCredentials++;
+        } else if (ctx.isTracked(hit.path) === false) {
+          untrackedLeaks.push(`${at} ${provider.name} (untracked, not gitignored)`);
+        } else {
+          trackedLeaks.push(`${at} ${provider.name} (committed)`);
+          liveCredentials++;
+        }
       }
     }
 
@@ -756,7 +799,8 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       evidence.push(`Boundary rule at ${rules[0]!.file}:${rules[0]!.line}: "${rules[0]!.text}"${rules.length > 1 ? ` (+${rules.length - 1} more)` : ''}`);
     } else {
       // A rule the README states is written down, but no agent loads the README on its own.
-      const readmeRule = brief.files.length === 0 ? scanBoundaries('README.md', ctx.readText('README.md') ?? '').rules[0] : undefined;
+      // Only a plain instruction ("Never …", "Do not …"): a README describes far more than it forbids.
+      const readmeRule = brief.files.length === 0 ? scanBoundaries('README.md', ctx.readText('README.md') ?? '').rules.find((r) => ruleStrength(r.text) >= 2) : undefined;
       evidence.push(
         brief.files.length > 0
           ? `Found no sentence in ${brief.files.join(' / ')} that forbids or reserves an action on production`

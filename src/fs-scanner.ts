@@ -153,9 +153,9 @@ export function isTestFilePath(relPath: string): boolean {
     SOURCE_EXTENSIONS.has(extname(normalized)) &&
     !name.endsWith('.d.ts') &&
     !ROUTE_ENTRY_NAME.test(name) &&
-    !/^(setup|helpers?|utils?|fixtures?|mocks?|factories?|conftest|index|preload)[.-]/.test(name) &&
+    !/^(setup|helpers?|utils?|fixtures?|mocks?|stubs?|factories?|conftest|index|preload)[.-]/.test(name) &&
     // Support code that lives beside the tests: preloads, fixtures, helpers, mocks.
-    !/(^|\/)(preload|setup|fixtures?|helpers?|mocks?|__mocks__|support|testdata|utils?)\//.test(normalized)
+    !/(^|\/)(preload|setup|fixtures?|helpers?|mocks?|stubs?|__mocks__|support|testdata|utils?)\//.test(normalized)
   ) {
     return true;
   }
@@ -196,6 +196,8 @@ export interface PackageJsonShape {
 }
 
 interface FileListing {
+  /** Files under `node_modules/` that git tracks: dependencies committed as source. */
+  committedNodeModules?: number;
   files: string[];
   /** Paths git tracks; undefined when the directory is not a git work tree. */
   tracked?: Set<string>;
@@ -244,12 +246,13 @@ function listGitFiles(root: string): FileListing | null {
     }
     const deleted = new Set(git(['--deleted']));
     const tracked = trackedAll.filter((p) => !deleted.has(p) && !pathIsVendored(p));
+    const committedNodeModules = trackedAll.filter((p) => !deleted.has(p) && /(^|\/)node_modules\//.test(p)).length;
     // An untracked nested repository or worktree is listed as "dir/": not this repo's files.
     const untracked = git(['--others', '--exclude-standard']).filter(
       (p) => !p.endsWith('/') && !pathIsVendored(p),
     );
     const capped = capFiles([...new Set([...tracked, ...untracked])]);
-    return { files: capped.files, tracked: new Set(tracked), mode: 'git', truncated: capped.truncated };
+    return { files: capped.files, tracked: new Set(tracked), mode: 'git', truncated: capped.truncated, committedNodeModules };
   } catch {
     return null;
   }
@@ -319,6 +322,9 @@ export class RepoContext {
   private workspaceCache: Array<{ path: string; manifest: PackageJsonShape }> | undefined = undefined;
   private suiteCache: string[] | undefined = undefined;
 
+  /** Files under `node_modules/` that git tracks. */
+  readonly committedNodeModules: number;
+
   constructor(repoPath: string) {
     this.root = resolve(repoPath);
     if (!existsSync(this.root)) {
@@ -334,8 +340,49 @@ export class RepoContext {
     this.fileSet = new Set(listing.files);
     this.trackedSet = listing.tracked;
     this.scan = { mode: listing.mode, fileCount: listing.files.length, truncated: listing.truncated };
+    this.committedNodeModules = listing.committedNodeModules ?? 0;
     this.testFiles = listing.files.filter(isTestFilePath);
     this.sourceFiles = listing.files.filter(isSourceFilePath);
+  }
+
+  /**
+   * Lines that match a pattern, in the files git can see (`worktree`: tracked
+   * and untracked-but-not-ignored, as they are on disk) or in the last commit (`head`). A key
+   * deleted from the working copy but not yet committed away is still in `head`, and still
+   * published. Empty outside a git work tree. Lockfiles, minified bundles and binaries are skipped.
+   */
+  grep(pattern: { pcre: string; fixed: string[] }, where: 'worktree' | 'head'): Array<{ path: string; line: number; text: string }> {
+    if (this.scan.mode !== 'git') return [];
+    const scope = [...(where === 'head' ? ['HEAD'] : []), '--', '.', ':!*.lock', ':!*lock.json', ':!*-lock.yaml', ':!*.min.js', ':!*.map', ':!node_modules'];
+    const run = (matcher: string[]): string =>
+      execFileSync('git', ['-c', 'core.quotepath=off', 'grep', '-I', '-n', '--no-color', ...(where === 'worktree' ? ['--untracked'] : []), ...matcher, ...scope], {
+        cwd: this.root,
+        env: GIT_ENV,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+        timeout: 20_000,
+        maxBuffer: 64 * 1024 * 1024,
+      });
+    let out = '';
+    try {
+      // One Perl-compatible pass: fast, and exact about word boundaries.
+      out = run(['-P', '-e', pattern.pcre]);
+    } catch (err) {
+      // Exit 1 is "no match". Anything else: a git built without PCRE, or a repository without a
+      // commit to search. Fixed strings need no regex engine; the caller confirms each hit.
+      if ((err as { status?: number }).status === 1) return [];
+      try {
+        out = run(['-F', ...pattern.fixed.flatMap((f) => ['-e', f])]);
+      } catch {
+        return [];
+      }
+    }
+    const hits: Array<{ path: string; line: number; text: string }> = [];
+    for (const row of out.split('\n')) {
+      const m = /^(?:HEAD:)?(.+?):(\d+):(.*)$/.exec(row);
+      if (m) hits.push({ path: m[1]!, line: Number(m[2]), text: m[3]!.slice(0, 2000) });
+    }
+    return hits;
   }
 
   /**

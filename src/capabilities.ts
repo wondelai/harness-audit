@@ -120,6 +120,11 @@ function kindsOfInvocation(program: string, args: string[]): VerifyKind[] {
     case 'ty':
       if (sub === 'check') add('typecheck');
       break;
+    case 'next':
+      // `next build` type-checks the project as part of the build.
+      if (sub === 'build') add('typecheck');
+      if (sub === 'lint') add('lint');
+      break;
     case 'turbo':
     case 'nx':
       for (const a of args) add(...kindsFromName(a));
@@ -718,6 +723,16 @@ export function minimalVerifySet(caps: VerifyCapabilities): string[] {
   return chosen.map((c) => c.command);
 }
 
+/**
+ * The verify commands to put on an allow list: the minimal set, minus what the brief itself tells
+ * agents not to run. Allowing `npm test` in a repository whose brief says "never run `npm test`"
+ * would have the harness contradict its own instructions.
+ */
+export function allowedVerifySet(ctx: RepoContext): string[] {
+  const forbidden = ctx.brief.forbiddenCommands;
+  return minimalVerifySet(ctx.verify).filter((cmd) => !forbidden.some((f) => cmd === f || cmd.startsWith(`${f} `)));
+}
+
 /** A step that refuses to continue: `assert-main-checkout.sh`, `bin/wt assert-primary`, `ensure-clean`, `preflight`. */
 const DEPLOY_GUARD = /\b(?:assert|ensure|preflight|guard)[\w.:-]*|\bcheck-(?:main|primary|clean|branch)[\w.-]*/i;
 
@@ -751,7 +766,8 @@ export function localDeployCommands(ctx: RepoContext): string[] {
   const scripts = ctx.packageJson?.scripts ?? {};
   const run = scriptRunner(ctx);
   const commands = Object.entries(scripts)
-    .filter(([, body]) => !refusesFirst(body) && classifier.deploys(body))
+    // What ships, and what writes the production data a remote binding points at.
+    .filter(([, body]) => !refusesFirst(body) && (classifier.deploys(body) || /\bwrangler\b[^\n&;|]*--remote\b/.test(body)))
     // Production first: when the list is cut for display, the dangerous one stays.
     .sort(([a], [b]) => Number(/prod/.test(b)) - Number(/prod/.test(a)))
     .slice(0, 5)

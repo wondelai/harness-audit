@@ -23,13 +23,18 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     const pkgScripts = Object.keys(ctx.packageJson?.scripts ?? {}).filter((k) =>
       /worktree|\bwt\b/i.test(k),
     );
-    const briefMentionsWorktree = /\bworktree\b/i.test(brief);
+    // A brief that has agents share one tree says the opposite of a worktree convention.
+    const sharesOneTree =
+      /\b(?:same|one|single|shared)\s+(?:git\s+)?worktree\b/i.test(brief) &&
+      !/\b(?:own|separate|dedicated|new|fresh|isolated|per[- ]task)\s+(?:git\s+)?worktree|git worktree add|--worktree\b|\bbin\/wt\b/i.test(brief);
+    const briefMentionsWorktree = /\bworktree\b/i.test(brief) && !sharesOneTree;
 
     const evidence: string[] = [];
     if (wtScripts.length > 0) evidence.push(`Worktree tooling: ${wtScripts.join(', ')}`);
     if (pkgScripts.length > 0) evidence.push(`Package scripts: ${pkgScripts.join(', ')}`);
     if (wtLocalOnly.length > 0) evidence.push(`Not committed yet, so no other checkout has it: ${wtLocalOnly.join(', ')}`);
     if (briefMentionsWorktree) evidence.push('Worktree workflow documented in root instructions');
+    if (sharesOneTree) evidence.push('The brief has several agents work in the same worktree: their edits, builds and test runs share one directory');
 
     // Two agents in one tree collide hardest on ports and local state. A repository with neither
     // (a CLI, a library, a mobile app) risks overlapping edits only, which a one-line convention covers.

@@ -1496,3 +1496,66 @@ describe('review fixes: what a command, a rule and a file really are', () => {
     expect(rule).toContain('**/*.test.*');
   });
 });
+
+describe('what the last fresh panel still got past the audit', () => {
+  it('finds a provider key in a source file, and one that only the working copy has lost', () => {
+    const live = `sk_live_${'Zz9'.repeat(9)}`;
+    const repo = temp('ha-source-key-');
+    repo.write('package.json', JSON.stringify({ name: 'ops' }));
+    repo.write('cancel-users.js', `const stripe = require('stripe')('${live}');\n`);
+    repo.write('names.js', `const stripe = require('stripe')('${live}');\n`);
+    repo.commit();
+    // Removed locally, never committed: the remote still serves it.
+    repo.write('names.js', "const stripe = require('stripe')(process.env.STRIPE_KEY);\n");
+    const report = auditRepo(repo.dir);
+    const secrets = check(report, 'harness.secret-hygiene');
+    expect(secrets.status).toBe('fail');
+    expect(secrets.severity).toBe('critical');
+    expect(secrets.evidence.join('\n')).toContain('cancel-users.js:1 Stripe secret key (committed)');
+    expect(secrets.evidence.join('\n')).toContain('names.js:1 Stripe secret key (in the last commit; the working copy no longer has it)');
+    expect(JSON.stringify(report)).not.toContain(live);
+    expect(report.level).toBeLessThanOrEqual(2);
+  });
+
+  it('treats a backup copy of a credential file as the credential file, and committed node_modules as a finding', () => {
+    const repo = temp('ha-bak-');
+    repo.write('package.json', JSON.stringify({ name: 'ops', dependencies: { left: '1.0.0' } }));
+    repo.write('package-lock.json', '{}\n');
+    repo.write('node_modules/left/index.js', 'module.exports = 1;\n');
+    repo.commit();
+    repo.write('gsc-tokens.json.bak', `{\n  "refresh_token": "1//0g${'Zz9'.repeat(10)}"\n}\n`);
+    const report = auditRepo(repo.dir);
+    expect(evidence(report, 'harness.secret-hygiene')).toContain('gsc-tokens.json.bak:2 OAuth refresh token (untracked, not gitignored)');
+    const lock = check(report, 'loop.lockfile-reproducibility');
+    expect(lock.status).toBe('warn');
+    expect(lock.evidence.join('\n')).toContain('node_modules/ is committed (1 tracked files)');
+  });
+
+  it('does not allow-list a command the brief forbids, and does not take "the same worktree" for a worktree convention', () => {
+    const repo = temp('ha-forbidden-');
+    repo.write('package.json', JSON.stringify({ name: 'mono', scripts: { test: 'vitest run', check: 'tsc --noEmit' }, dependencies: { vite: '^8.0.0' }, devDependencies: { typescript: '^6.0.0' } }));
+    repo.write('AGENTS.md', '# Mono\n\n- Never run `npm test` from the root; run the package you changed.\n- Multiple agents may work on different files in the same worktree simultaneously.\n- After code changes run `npm run check`.\nA\n');
+    for (let i = 0; i < 20; i++) repo.write(`src/m${i}.ts`, 'export const m = 1;\n');
+    const settings = initHarness(repo.dir, { dryRun: true, tools: ['claude-code'] }).actions.find((a) => a.path === '.claude/settings.json')!.content;
+    expect(settings).toContain('Bash(npm run check:*)');
+    expect(settings).not.toContain('Bash(npm test:*)');
+    const worktree = check(auditRepo(repo.dir), 'graph.worktree-isolation');
+    expect(worktree.status).not.toBe('pass');
+    expect(worktree.evidence.join('\n')).toContain('several agents work in the same worktree');
+  });
+
+  it('reads a drawn directory tree as a map, flags strict types nothing runs, and names a script that writes remote data', () => {
+    const repo = temp('ha-tree-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { lint: 'eslint .', 'dev:remote': 'wrangler dev --remote' }, devDependencies: { eslint: '^9.0.0', typescript: '^6.0.0' } }));
+    repo.write('tsconfig.json', JSON.stringify({ compilerOptions: { strict: true } }));
+    repo.write('wrangler.toml', 'name = "app"\n');
+    repo.write('src/a.ts', 'export const a = 1;\n');
+    repo.write('README.md', '# App\n\n## Stos\n\n```\napp/\n├── core/      domain\n├── data/      storage\n└── ui/        screens\n```\n');
+    const report = auditRepo(repo.dir);
+    expect(evidence(report, 'graph.workspace-boundaries')).toContain('README.md has an architecture / structure section');
+    const types = check(report, 'loop.static-types');
+    expect(types.status).toBe('warn');
+    expect(types.evidence.join('\n')).toContain('none of the verify commands runs the type checker');
+    expect(evidence(report, 'release.deploy-safety')).toContain('`npm run dev:remote`');
+  });
+});
