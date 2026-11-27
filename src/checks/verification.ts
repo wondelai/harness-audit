@@ -90,7 +90,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     } else if (bootsWorker.length > 0) {
       e2eSignals.push(`Cloudflare Workers runtime tests (${bootsWorker.length} file(s) boot the Worker in Miniflare/workerd, e.g. ${bootsWorker[0]})`);
     }
-    const callsHandler = jsTests.filter((f) => /\bapp\.request\(|\.fetch\(\s*new Request\(|\bSELF\.fetch\(/.test(ctx.readText(f) ?? '')).length;
+    const callsHandler = jsTests.filter((f) => /\bapp\.request\(|\.fetch\(\s*new Request\(|\bSELF\.fetch\(|\b(?:worker|app|handler|server)\.fetch\(/.test(ctx.readText(f) ?? '')).length;
     if (ctx.hasDependency('supertest') || ctx.hasDependency('httpx')) {
       e2eSignals.push('HTTP/API contract tests');
     } else if (callsHandler > 0 && bootsWorker.length === 0) {
@@ -121,10 +121,20 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     const e2eInCi = ctx.ci.workflows.some((w) => w.commands.some((c) => /playwright|e2e|cypress/i.test(c)));
     const liveOnly = e2eSignals.length > 0 && liveBase !== undefined && !e2eInCi && !/webServer\s*:/.test(pwConfig);
 
+    // A browser suite that CI never starts and the verify script never calls checks nothing on its own.
+    const browserSuite = e2eSignals.filter((s) => s === 'Playwright' || s === 'Cypress');
+    const scripts = ctx.packageJson?.scripts ?? {};
+    const e2eInVerify = ['verify', 'check', 'ci', 'validate', 'test'].some((n) => /playwright|cypress|e2e/i.test(scripts[n] ?? ''));
+    const neverRun = browserSuite.length > 0 && ctx.ci.files.length > 0 && !e2eInCi && !e2eInVerify && !liveOnly;
+    const otherTiers = e2eSignals.filter((s) => /runtime tests|contract tests|instrumented|XCUITest|Maestro|Detox|Flutter|Rendered-UI/.test(s)).length;
+    if (neverRun) e2eSignals.push(`${browserSuite.join(' / ')} is set up, but no CI job and no verify script runs it`);
+
     let status: CheckResult['status'] = 'pass';
     if (liveOnly) {
       status = 'warn';
       e2eSignals.push('The Playwright suite targets a deployed URL, starts no local server and is not run in CI: an agent cannot use it as a check');
+    } else if (neverRun && otherTiers === 0) {
+      status = 'warn';
     } else if (e2eSignals.length > 0) {
       status = 'pass';
     } else if (isWebOrService) {
@@ -181,7 +191,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         .split(/\r?\n/)
         .map((l) => l.trim())
         .filter((l) => l && !l.startsWith('#'))
-        .map((l) => l.split(/\s+/)[0]!);
+        .map((l) => l.split(/\s+/))
+        // A pattern with no owner after it assigns nobody: it protects nothing.
+        .filter((tokens) => tokens.slice(1).some((t) => t.includes('@')))
+        .map((tokens) => tokens[0]!);
       const catchAll = patterns.some((p) => p === '*' || p === '/' || p === '**');
       const guardsTests = catchAll || patterns.some((p) => /^\/?(\*\*\/)?(tests?|__tests__|e2e|specs?|Tests)(\/|\/\*\*?|$)/.test(p) || /\*\.(test|spec)\./.test(p));
       // The whole workflows directory, not one workflow file.
@@ -206,7 +219,8 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     // A CI job that fails (or flags) a change which weakens tests or edits protected paths
     const workflows = ctx.findFiles((f) => /^\.github\/workflows\/.+\.ya?ml$/.test(f));
     for (const wf of workflows) {
-      const body = ctx.readText(wf) ?? '';
+      // The workflow as it runs: a comment that plans a guard is not one.
+      const body = (ctx.readText(wf) ?? '').split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n');
       if (/protected[-_ ]paths?|oracle[-_ ]guard|test[-_ ]?(files?)?[-_ ](deleted|removed|weakened|guard)|guard[-_ ]tests/i.test(body)) {
         evidence.push(`${wf} guards protected paths / test changes`);
         protectsOracle = true;
@@ -473,7 +487,22 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     if (ctx.hasAnyFile(['.size-limit.json', '.size-limit.cjs']) || ctx.hasDependency('size-limit')) fitnessSignals.push('size-limit bundle budget');
 
     const pkg = ctx.packageJson;
+    const unwiredChecks: string[] = [];
     if (pkg?.scripts) {
+      // An invariant check counts when the loop runs it: another script calls it, or CI does. A
+      // script someone runs by hand to look at production jobs is a monitor, not a fitness function.
+      const ciText = ctx.ci.files.map((f) => ctx.readText(f) ?? '').join('\n');
+      const unwired = unwiredChecks;
+      const wired = (name: string): boolean => {
+        const call = new RegExp(`(?:^|[\\s"'])${name.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&')}(?:$|[\\s"'&;])`, 'm');
+        // Called by name, or the program it runs is also run by another script or by CI.
+        const programs = (pkg.scripts?.[name] ?? '').match(/\bscripts?\/[\w./-]+/g) ?? [];
+        // The scripts that make up the loop: an alias that runs the same program is not one of them.
+        const loop = Object.entries(pkg.scripts ?? {}).filter(([other]) => other !== name && /^(?:pre[\w:-]*|lint|check|verify|test|ci|validate|build|deploy)$/.test(other)).map(([, body]) => body);
+        const runs = /^(lint|check|verify|test|ci|validate)$/.test(name) || call.test(ciText) || loop.some((body) => call.test(body) || programs.some((p) => body.includes(p))) || programs.some((p) => ciText.includes(p));
+        if (!runs && /^(check|lint|verify|guard|validate)[:-]/.test(name) && !unwired.includes(name)) unwired.push(name);
+        return runs;
+      };
       for (const [k, v] of Object.entries(pkg.scripts)) {
         if (
           /(^|[:._-])(audit|seo|budget|links|size|architecture|arch|a11y|deps|boundaries|knip|deadcode)($|[:._-])/i.test(k) ||
@@ -482,12 +511,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
           fitnessSignals.push(`script: ${k}`);
         }
         // A repository's own invariant checks: `check:design`, or a lint script that runs scripts/check-*.mjs.
-        const ownChecks = v.match(/\bscripts\/check-[\w.-]+/g);
+        const ownChecks = wired(k) ? v.match(/\bscripts\/check-[\w.-]+/g) : null;
         if (ownChecks) fitnessSignals.push(`invariant checks in \`${k}\`: ${[...new Set(ownChecks)].slice(0, 3).join(', ')}`);
         // `check:design`, `lint:design`, `verify:deps`: a named check that runs the repository's own program.
-        else if (/^(check|lint|verify|guard|validate):(?!types?$|ts$|fix$)[\w-]+$/.test(k) && /\b(node|bun|tsx|deno|python3?)\s+\S*scripts?\//.test(v)) {
+        else if (wired(k) && /^(check|lint|verify|guard|validate):(?!types?$|ts$|fix$)[\w-]+$/.test(k) && /\b(node|bun|tsx|deno|python3?)\s+\S*scripts?\//.test(v)) {
           fitnessSignals.push(`invariant check: \`${k}\``);
-        } else if (/^check:(?!types?$|ts$)[\w-]+$/.test(k)) fitnessSignals.push(`script: ${k}`);
+        } else if (wired(k) && /^check:(?!types?$|ts$)[\w-]+$/.test(k)) fitnessSignals.push(`script: ${k}`);
       }
     }
     if (ctx.hasAnyFile(['knip.json', 'knip.jsonc', 'knip.ts', '.knip.json'])) fitnessSignals.push('Knip (unused code and dependencies)');
@@ -510,7 +539,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       }
     }
 
-    const status: CheckResult['status'] = fitnessSignals.length > 0 ? 'pass' : 'warn';
+    if (fitnessSignals.length === 0 && unwiredChecks.length > 0) {
+      fitnessSignals.push(`Defined but run by neither the verify script nor CI: ${unwiredChecks.slice(0, 4).map((n) => `\`${n}\``).join(', ')}`);
+    }
+    const status: CheckResult['status'] = fitnessSignals.length > 0 && unwiredChecks.length === 0 ? 'pass' : fitnessSignals.some((s) => !s.startsWith('Defined but')) ? 'pass' : 'warn';
 
     results.push({
       id: 'verification.fitness-functions',

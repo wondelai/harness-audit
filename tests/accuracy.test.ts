@@ -1302,3 +1302,197 @@ describe('claims about the running app', () => {
     expect(evidence(auditRepo(repo.dir), 'harness.sandbox-readiness')).toContain('Boundary rule at AGENTS.md:5: "Do not run `wrangler deploy` from a worktree."');
   });
 });
+
+describe('review fixes: what a command, a rule and a file really are', () => {
+  it('names a committed OAuth credential by path and key, and leaves design tokens and placeholders alone', () => {
+    const repo = temp('ha-oauth-');
+    repo.write('package.json', JSON.stringify({ name: 'ops' }));
+    repo.write('gsc-tokens.json', `{\n  "refresh_token": "1//0gZz9${'Zz9'.repeat(10)}",\n  "client_secret": "GOCSPX-${'Zz9'.repeat(8)}"\n}\n`);
+    repo.write('tokens.json', '{ "color": { "accent": "#ff4d00" }, "client_secret": "your-client-secret-goes-here-123" }\n');
+    repo.commit();
+    const report = auditRepo(repo.dir);
+    const secrets = check(report, 'harness.secret-hygiene');
+    expect(secrets.status).toBe('fail');
+    expect(secrets.severity).toBe('critical');
+    expect(secrets.evidence.join('\n')).toContain('gsc-tokens.json:2 OAuth refresh token (committed)');
+    expect(secrets.evidence.join('\n')).toContain('gsc-tokens.json:3 OAuth client secret (committed)');
+    expect(secrets.evidence.join('\n')).not.toContain('tokens.json:1');
+    expect(secrets.evidence.join('\n')).not.toContain('Zz9');
+    expect(report.level).toBeLessThanOrEqual(2);
+  });
+
+  it('flags an env file that git neither tracks nor ignores, and does not take a disabled sandbox for a sandbox', () => {
+    const repo = temp('ha-stray-env-');
+    repo.write('package.json', JSON.stringify({ name: 'site', dependencies: { astro: '^6.0.0' } }));
+    repo.write('wrangler.toml', 'name = "site"\n');
+    repo.write('.gitignore', '.dev.vars\nnode_modules\n');
+    repo.write('.claude/settings.json', JSON.stringify({ sandbox: { enabled: false }, permissions: { allow: ['Bash(npm test:*)'] } }));
+    repo.commit();
+    repo.write('.env.development', 'API_URL=http://localhost\n');
+    const report = auditRepo(repo.dir);
+    const secrets = check(report, 'harness.secret-hygiene');
+    expect(secrets.status).toBe('fail');
+    expect(secrets.evidence.join('\n')).toContain('Present and not ignored: .env.development');
+    expect(evidence(report, 'harness.sandbox-readiness')).toContain('No agent sandbox configured');
+    expect(evidence(report, 'harness.permissions-policy')).not.toContain('sandbox enabled');
+  });
+
+  it('holds a deny rule to the command it names', () => {
+    const repo = temp('ha-deny-exact-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { deploy: 'wrangler deploy', 'deploy:preview': 'wrangler versions upload' } }));
+    repo.write('wrangler.toml', 'name = "app"\n');
+    repo.write('.claude/settings.json', JSON.stringify({ permissions: { deny: ['Bash(npx wrangler deploy --dry-run)', 'Bash(npm run deploy:preview:*)'] } }));
+    const loose = check(auditRepo(repo.dir), 'release.deploy-safety');
+    expect(loose.status).toBe('warn');
+    expect(loose.evidence.join('\n')).toContain('Nothing stops an agent running `npm run deploy`, `npx wrangler deploy`');
+  });
+
+  it('does not credit a command whose failure is swallowed, a script that only prints, or an argument', () => {
+    const repo = temp('ha-swallowed-');
+    repo.write(
+      'package.json',
+      JSON.stringify({ name: 'app', scripts: { test: 'vitest run || true', build: 'echo "no build step"', check: 'npm run typecheck lint', typecheck: 'tsc --noEmit', lint: 'eslint .' }, devDependencies: { typescript: '^6.0.0', eslint: '^9.0.0' } }),
+    );
+    repo.write('src/a.test.ts', "it('adds', () => { expect(1 + 1).toBe(2); });\n");
+    const commands = auditRepo(repo.dir).stack.verifyCommands.join('\n');
+    expect(commands).not.toContain('`npm test`');
+    expect(commands).not.toContain('`npm run build`');
+    expect(commands).toContain('`npm run check` → typecheck');
+    expect(commands).not.toContain('`npm run check` → lint');
+  });
+
+  it('counts as a pull-request gate only a step that can fail the run and that runs for pull requests', () => {
+    const repo = temp('ha-ci-gates-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'vitest run', lint: 'eslint .', typecheck: 'tsc --noEmit' }, devDependencies: { eslint: '^9.0.0', typescript: '^6.0.0' } }));
+    repo.write(
+      '.github/workflows/ci.yml',
+      [
+        'on: [push, pull_request]',
+        'jobs:',
+        '  checks:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: npm run lint',
+        '      - name: tests (flaky)',
+        '        run: npm test',
+        '        continue-on-error: true',
+        '  release-checks:',
+        "    if: github.event_name == 'push'",
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: npm run typecheck',
+        '',
+      ].join('\n'),
+    );
+    expect(evidence(auditRepo(repo.dir), 'release.ci-pipeline')).toContain('tests: no · lint: yes · typecheck: no');
+  });
+
+  it('survives a malformed tsconfig and lets an earlier parent decide when a later one says nothing', () => {
+    const broken = temp('ha-tsconfig-null-');
+    broken.write('package.json', JSON.stringify({ name: 'app', devDependencies: { typescript: '^6.0.0' } }));
+    broken.write('tsconfig.json', 'null');
+    broken.write('src/a.ts', 'export const a = 1;\n');
+    expect(() => auditRepo(broken.dir)).not.toThrow();
+
+    const chain = temp('ha-tsconfig-chain-');
+    chain.write('package.json', JSON.stringify({ name: 'app', devDependencies: { typescript: '^6.0.0' } }));
+    chain.write('tsconfig.json', JSON.stringify({ extends: ['./base.json', './paths.json'] }));
+    chain.write('base.json', JSON.stringify({ compilerOptions: { strict: true } }));
+    chain.write('paths.json', JSON.stringify({ compilerOptions: { outDir: 'dist' } }));
+    chain.write('src/a.ts', 'export const a = 1;\n');
+    expect(check(auditRepo(chain.dir), 'loop.static-types').status).toBe('pass');
+
+    const bare = temp('ha-ts-no-config-');
+    bare.write('package.json', JSON.stringify({ name: 'ops' }));
+    bare.write('sync.ts', 'export const a: number = 1;\n');
+    const unchecked = check(auditRepo(bare.dir), 'loop.static-types');
+    expect(unchecked.status).toBe('warn');
+    expect(unchecked.evidence.join('\n')).toContain('TypeScript without a tsconfig.json');
+  });
+
+  it('does not follow a symlink out of the repository', () => {
+    const outside = temp('ha-outside-');
+    outside.write('notes.md', '# Private\n\nNever deploy to production without asking Zofia.\nA\nB\nC\n');
+    const repo = temp('ha-symlink-out-');
+    repo.write('package.json', JSON.stringify({ name: 'app' }));
+    repo.symlink('AGENTS.md', join(outside.dir, 'notes.md'));
+    repo.commit();
+    const report = auditRepo(repo.dir);
+    expect(JSON.stringify(report)).not.toContain('Zofia');
+  });
+
+  it('keeps git\'s ignore rules in a repository that has no commit yet', () => {
+    const repo = temp('ha-fresh-init-');
+    repo.write('package.json', JSON.stringify({ name: 'app' }));
+    repo.write('.gitignore', '.env\n');
+    repo.write('.env', `ANTHROPIC_API_KEY=${FAKE_KEY}\n`);
+    execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo.dir, stdio: 'ignore' });
+    const report = auditRepo(repo.dir);
+    expect(report.scan.mode).toBe('git');
+    expect(evidence(report, 'harness.secret-hygiene')).not.toContain('Anthropic');
+  });
+
+  it('reads telemetry from SDK families, contract tests from worker.fetch, and a mobile client is not its own health endpoint', () => {
+    const rn = temp('ha-rn-');
+    rn.write('package.json', JSON.stringify({ name: 'app', scripts: { 'update:prod': 'eas update --branch production' }, dependencies: { expo: '^55.0.0', '@sentry/react-native': '^7.0.0', 'posthog-react-native': '^4.0.0' } }));
+    rn.write('features/dev/ApiSwitcher.tsx', "export const ping = (base: string) => fetch(base + '/health');\n");
+    const report = auditRepo(rn.dir);
+    const observed = evidence(report, 'release.observability-and-safety');
+    expect(observed).toContain('Sentry');
+    expect(observed).toContain('PostHog');
+    expect(observed).not.toContain('Healthcheck endpoint');
+    expect(evidence(report, 'release.deploy-safety')).toContain('`npm run update:prod`');
+
+    const worker = temp('ha-worker-fetch-');
+    worker.write('package.json', JSON.stringify({ name: 'proxy', scripts: { test: 'node --test tests/' } }));
+    worker.write('wrangler.toml', 'name = "proxy"\n');
+    worker.write('src/worker.js', 'export default { fetch() { return new Response("ok"); } };\n');
+    worker.write('tests/worker.test.js', "import worker from '../src/worker.js';\nimport test from 'node:test';\ntest('answers', async () => { await worker.fetch(new Request('https://x.test/')); });\n");
+    const e2e = check(auditRepo(worker.dir), 'verification.e2e-tests');
+    expect(e2e.status).toBe('pass');
+    expect(e2e.evidence.join('\n')).toContain('HTTP contract tests (1 test file(s) call the app through its request handler)');
+  });
+
+  it('warns about a browser suite that nothing runs, and does not take an engines range for a pin', () => {
+    const repo = temp('ha-e2e-idle-');
+    repo.write('package.json', JSON.stringify({ name: 'site', engines: { node: '>=22.12.0' }, scripts: { 'test:e2e': 'playwright test', test: 'vitest run', verify: 'npm test' }, devDependencies: { '@playwright/test': '^1.50.0' }, dependencies: { astro: '^6.0.0' } }));
+    repo.write('playwright.config.ts', "export default { webServer: { command: 'npm run dev' } };\n");
+    repo.write('.github/workflows/ci.yml', 'on: [pull_request]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n');
+    const report = auditRepo(repo.dir);
+    const e2e = check(report, 'verification.e2e-tests');
+    expect(e2e.status).toBe('warn');
+    expect(e2e.evidence.join('\n')).toContain('Playwright is set up, but no CI job and no verify script runs it');
+    expect(evidence(report, 'loop.lockfile-reproducibility')).toContain('engines.node >=22.12.0 is a range, not a pin');
+  });
+
+  it('counts an invariant check when the loop runs it, not a monitor someone runs by hand', () => {
+    const repo = temp('ha-fitness-wired-');
+    repo.write('package.json', JSON.stringify({ name: 'jobs', scripts: { 'check-jobs': 'node scripts/check-unfinished-jobs.js', 'check-unfinished': 'node scripts/check-unfinished-jobs.js', test: 'vitest run' } }));
+    repo.write('scripts/check-unfinished-jobs.js', 'console.log("queue depth");\n');
+    const monitor = check(auditRepo(repo.dir), 'verification.fitness-functions');
+    expect(monitor.status).toBe('warn');
+    expect(monitor.evidence.join('\n')).toContain('Defined but run by neither the verify script nor CI');
+
+    repo.write('package.json', JSON.stringify({ name: 'ds', scripts: { lint: 'node scripts/lint-design.js', 'lint:design': 'node scripts/lint-design.js', test: 'vitest run' } }));
+    repo.write('scripts/lint-design.js', 'process.exit(0);\n');
+    const wired = check(auditRepo(repo.dir), 'verification.fitness-functions');
+    expect(wired.status).toBe('pass');
+    expect(wired.evidence.join('\n')).toContain('invariant check: `lint:design`');
+  });
+
+  it('denies a force push wherever the flag stands, and scopes test rules to every language in the repository', () => {
+    const repo = temp('ha-init-rules-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'vitest run' } }));
+    repo.write('src/a.ts', 'export const a = 1;\n');
+    repo.write('ios/App.xcodeproj/project.pbxproj', '// !$*UTF8*$!\n');
+    repo.write('ios/App/Main.swift', 'import SwiftUI\n');
+    repo.write('ios/App/View.swift', 'import SwiftUI\n');
+    const plan = initHarness(repo.dir, { dryRun: true, tools: ['claude-code'] });
+    const settings = plan.actions.find((a) => a.path === '.claude/settings.json')!.content;
+    expect(settings).toContain('Bash(git push * --force*)');
+    expect(settings).toContain('Bash(git push * -f*)');
+    const rule = plan.actions.find((a) => /rules\/testing/.test(a.path))!.content;
+    expect(rule).toContain('**/*Tests.swift');
+    expect(rule).toContain('**/*.test.*');
+  });
+});

@@ -225,6 +225,21 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     for (const [dep, label] of depsToCheck) {
       if (ctx.hasDependency(dep) && !signals.includes(label)) signals.push(label);
     }
+    // SDK families by name, in the root package and its workspace members: `@sentry/react-native`,
+    // `posthog-react-native`, `@opentelemetry/sdk-node`, `langsmith`.
+    const depNames = [ctx.packageJson, ...ctx.workspaceManifests.map((m) => m.manifest)].flatMap((p) => Object.keys({ ...p?.dependencies, ...p?.devDependencies }));
+    const depFamilies: Array<[RegExp, string]> = [
+      [/^@sentry\//, 'Sentry'],
+      [/^@opentelemetry\//, 'OpenTelemetry'],
+      [/^posthog-/, 'PostHog'],
+      [/^(dd-trace|@datadog\/.+)$/, 'Datadog'],
+      [/^@bugsnag\//, 'Bugsnag'],
+      [/crashlytics/, 'Firebase Crashlytics'],
+      [/^langsmith$/, 'LangSmith tracing'],
+    ];
+    for (const [family, label] of depFamilies) {
+      if (depNames.some((d) => family.test(d)) && !signals.includes(label)) signals.push(label);
+    }
 
     // Manifests of the non-Node stacks, where telemetry is a line in a build file.
     const manifestText = ctx
@@ -238,11 +253,11 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       .join('\n');
     const manifestSignals: Array<[RegExp, string]> = [
       [/sentry/i, 'Sentry'],
-      [/opentelemetry|otel/i, 'OpenTelemetry'],
+      [/opentelemetry|\botel\b/i, 'OpenTelemetry'],
       [/posthog/i, 'PostHog'],
       [/crashlytics/i, 'Firebase Crashlytics'],
       [/datadog|bugsnag|honeybadger|rollbar/i, 'Error tracking SDK'],
-      [/structlog|zerolog|\bzap\b|slog|timber/i, 'Structured logging'],
+      [/structlog|zerolog|\bzap\b|\bslog\b|\btimber\b/i, 'Structured logging'],
       [/schemaDirectory|room\.schemaLocation/i, 'Room schema export (versioned migrations)'],
       [/alembic/i, 'Alembic migrations'],
     ];
@@ -267,10 +282,13 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     }
     // A health route: a file named for it, or the path in the code that serves requests.
     const HEALTH_ROUTE = /['"`]\/(?:api\/)?(?:health|healthz|healthcheck|readyz|livez)['"`/]/;
-    const servesRequests = ctx.stack.frameworks.length > 0 || workerConfigs.length > 0 || ctx.hasFile('Dockerfile');
+    // A server, not a client that calls one: a mobile app's `fetch('/health')` is not its own endpoint.
+    const SERVER_FRAMEWORKS = ['Express', 'Fastify', 'Hono', 'NestJS', 'FastAPI', 'Django', 'Flask', 'Rails', 'Laravel', 'Phoenix', 'Spring Boot', 'Cloudflare Workers', 'Next.js', 'Nuxt', 'SvelteKit', 'Astro'];
+    const isMobileClient = ctx.stack.frameworks.some((fw) => ['Expo', 'Android', 'SwiftUI', 'Flutter'].includes(fw));
+    const servesRequests = !isMobileClient && (ctx.stack.frameworks.some((fw) => SERVER_FRAMEWORKS.includes(fw)) || workerConfigs.length > 0 || ctx.hasFile('Dockerfile'));
     const servesHealth =
-      ctx.findFiles((f) => /(^|\/)health(\.[a-z]+)?$/.test(f)).length > 0 ||
-      (servesRequests &&
+      servesRequests &&
+      (ctx.findFiles((f) => /(^|\/)health(\.[a-z]+)?$/.test(f)).length > 0 ||
         [...ctx.sourceFiles].sort((a, b) => a.split('/').length - b.split('/').length).slice(0, 300).some((f) => HEALTH_ROUTE.test(ctx.readText(f) ?? '')));
     if (servesHealth) {
       signals.push('Healthcheck endpoint');
@@ -350,7 +368,8 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     const GIT_DEPLOY = /\bWorkers Builds\b[^.\n]{0,40}\b(?:deploy\w*|ships?|builds? (?:every|each|on)|releases?)\b|\b(?:deploy\w*|ships?|merg\w+)\b[^.\n]{0,60}\bWorkers Builds\b|\bdeploy\w*\b[^.\n]{0,60}\b(?:on|after|upon)\s+(?:every\s+|each\s+)?(?:merge|push)\b/i;
     const platformLine = [...ctx.brief.files, ...ci.files, ...['README.md', 'wrangler.toml', 'wrangler.jsonc'].filter((f) => ctx.hasFile(f))]
       .flatMap((f) => (ctx.readText(f) ?? '').split(/\r?\n/).map((text, i) => ({ f, line: i + 1, text })))
-      .find((l) => GIT_DEPLOY.test(l.text));
+      // A line about `--dry-run` describes a check, not how the repository ships.
+      .find((l) => GIT_DEPLOY.test(l.text) && !/--dry-run\b/.test(l.text));
     const platform = platformLine !== undefined;
     if (platformLine && deployWorkflows.length === 0) {
       // Quote the sentence that says it, whole words only.
@@ -362,10 +381,17 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     // What can ship from a laptop, and which of it a committed deny rule stops.
     const localDeploys = localDeployCommands(ctx);
     const claudeDeny = ctx.readJson<{ permissions?: { deny?: string[] } }>('.claude/settings.json')?.permissions?.deny ?? [];
+    // `bun run deploy` is covered by a rule naming the script under any runner; `npx wrangler deploy`
+    // by one naming the CLI call. The rule has to be that command or a prefix of it: a rule for
+    // `wrangler deploy --dry-run` or for the script `deploy:preview` denies neither.
+    const bare = (command: string): string => command.replace(/^(npx|bunx)\s+/, '').replace(/^(?:npm|pnpm|bun|yarn|vp)\s+(?:run\s+)?/, '').trim();
+    const denyPatterns = claudeDeny
+      .map((rule) => /^Bash\((.*)\)$/.exec(rule)?.[1])
+      .filter((p): p is string => p !== undefined)
+      .map((p) => bare(p.replace(/^\*\s+/, '').replace(/(?::\*|\s*\*)$/, '')));
     const denied = (command: string): boolean => {
-      // `bun run deploy` is covered by a rule naming the script under any runner; `npx wrangler deploy` by one naming the CLI call.
-      const needle = command.replace(/^(npx|bunx)\s+/, '').replace(/^(?:npm|pnpm|bun|yarn|vp)\s+(?:run\s+)?/, '');
-      return claudeDeny.some((rule) => rule.includes(needle));
+      const needle = bare(command);
+      return denyPatterns.some((p) => p !== '' && (needle === p || needle.startsWith(`${p} `)));
     };
     const guards = guardHooks(ctx);
     // A deploy script that opens with its own guard decides for itself where it may run from.

@@ -33,7 +33,7 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
   );
   if (report.git.isGitRepo) {
     lines.push(
-      `| **Git Activity** | ${report.git.gitAuthors90d} ${t(UI.contributors90d, lang)} · ${report.git.commits30d} ${t(UI.commits30d, lang)} |`,
+      `| **Git Activity** | ${report.git.gitAuthors90d} ${t(report.git.gitAuthors90d === 1 ? UI.contributor90d : UI.contributors90d, lang)} · ${report.git.commits30d} ${t(UI.commits30d, lang)} |`,
     );
     const notes = branchNotes(report, lang);
     if (notes.length > 0) lines.push(`| **Branch** | ⚠ ${notes.join(' ')} |`);

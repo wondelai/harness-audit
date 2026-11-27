@@ -48,7 +48,8 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
       status = 'warn';
     } else {
       // In a repository of a handful of files, a second checkout is a rare need: advice, not a failure.
-      status = hasLocalState && ctx.sourceFiles.length >= 20 ? 'fail' : 'warn';
+      // The same goes for one person's repository: a failure is for a team whose agents share a dev server.
+      status = hasLocalState && ctx.sourceFiles.length >= 20 && !ctx.isSolo ? 'fail' : 'warn';
       evidence.push(
         hasLocalState
           ? 'No git worktree scripts, .worktreeinclude, or parallel checkout workflow documented'
@@ -195,7 +196,8 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     if (orchestrationDocs.length > 0) evidence.push(`Agent docs/workflows: ${orchestrationDocs.slice(0, 5).join(', ')}`);
 
     const status: CheckResult['status'] =
-      agentFiles.length > 0 ? 'pass' : orchestrationDocs.length > 0 ? 'warn' : 'info';
+      // Docs about orchestration are not definitions, and having them must not read worse than having nothing.
+      agentFiles.length > 0 ? 'pass' : 'info';
     if (evidence.length === 0) {
       evidence.push('No versioned subagent definitions (.claude/agents/, .cursor/agents/, .factory/, loops.yaml) yet');
     }

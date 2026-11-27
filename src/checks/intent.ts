@@ -139,12 +139,12 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         en: onlyLocalBrief
           ? `Commit ${localOnlyBriefs.join(' and ')}: remove the matching line from .gitignore so the brief is versioned and reaches teammates, CI agents and fresh worktrees.`
           : hasLegacyCursorRules || cursorPlainMdFiles.length > 0
-            ? 'Consolidate into a root AGENTS.md (read natively by Codex, Cursor, and Copilot), keep a thin CLAUDE.md importing @AGENTS.md, and rename any .cursor/rules/*.md files to .mdc with frontmatter.'
+            ? `Consolidate into a root AGENTS.md (read natively by Codex, Cursor, and Copilot) and keep a thin CLAUDE.md importing @AGENTS.md${cursorPlainMdFiles.length > 0 ? '; rename the .cursor/rules/*.md files to .mdc with frontmatter, or Cursor ignores them' : ''}.`
             : 'Add a concise root AGENTS.md (<= 150 lines) with real build/test commands and invariants, plus a thin CLAUDE.md containing `@AGENTS.md`. `npx harness-audit init` scaffolds both from the commands this audit detected.',
         pl: onlyLocalBrief
           ? `Dodaj ${localOnlyBriefs.join(' i ')} do repozytorium: usuń pasującą linię z .gitignore, aby instrukcje były wersjonowane i docierały do zespołu, agentów w CI i nowych worktree.`
           : hasLegacyCursorRules || cursorPlainMdFiles.length > 0
-            ? 'Skonsoliduj instrukcje do AGENTS.md w katalogu głównym (czytanym przez Codex, Cursor i Copilot), dodaj cienki CLAUDE.md z @AGENTS.md oraz zmień rozszerzenie plików .cursor/rules/*.md na .mdc z frontmatterem.'
+            ? `Skonsoliduj instrukcje do AGENTS.md w katalogu głównym (czytanym przez Codex, Cursor i Copilot) i dodaj cienki CLAUDE.md z @AGENTS.md${cursorPlainMdFiles.length > 0 ? '; zmień rozszerzenie plików .cursor/rules/*.md na .mdc z frontmatterem, inaczej Cursor je pomija' : ''}.`
             : 'Dodaj zwięzły plik AGENTS.md (<= 150 linii) w katalogu głównym z realnymi komendami build/test i niezmiennikami oraz cienki CLAUDE.md zawierający `@AGENTS.md`. `npx harness-audit init` utworzy oba pliki z komend wykrytych w tym audycie.',
       },
       docsPath: 'workflows/harness/agent-ready-codebase/',
@@ -579,7 +579,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
             // A named spec at the root: `forme-spec.md`, `MIGRATION.md`, `design-system.md`.
             (!f.includes('/') && /^(?:[\w.-]*[-_.])?(?:specs?|prd|requirements|migration|adr|design|plan|architecture|roadmap)(?:[-_.][\w.-]*)?\.mdx?$/i.test(f)) ||
             /^(plans|specs?|adr|adrs|rfcs?)\/.+\.mdx?$/i.test(f) ||
-            /^docs\/(?:[^/]+\/)*(adr|adrs|specs?|rfcs?|architecture|decisions|plans)\//i.test(f) ||
+            (/^docs\/(?:[^/]+\/)*(adr|adrs|specs?|rfcs?|architecture|decisions|plans)\//i.test(f) && /\.mdx?$/i.test(f)) ||
             (/^docs\/[^/]+\.mdx?$/i.test(f) && SPEC_NAME.test(f)),
         ),
         // Docs the brief or the README sends readers to are the repository's standing specs.

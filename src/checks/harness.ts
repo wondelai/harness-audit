@@ -39,6 +39,19 @@ const SECRET_PATTERNS: Array<{ name: string; regex: RegExp }> = [
 const NAMED_CREDENTIAL = /^\s*(?:export\s+)?["']?([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?))["']?\s*[:=]\s*["']?([^"'\s]{20,})["']?\s*,?\s*(?:#.*)?$/;
 const PUBLIC_BY_DESIGN = /PUBLIC|PUBLISHABLE|SITE_?KEY|CLIENT_?ID|ANON|PROJECT_?(API_)?KEY|WRITE_?KEY|DSN|KEY_?ID|ACCESS_KEY_ID/i;
 
+/**
+ * A JSON document that is itself a credential: an OAuth client secret, a refresh token, a
+ * service-account private key (`gsc-tokens.json`, `credentials.json`). Short-lived access tokens
+ * are named but are not what an attacker keeps.
+ */
+const JSON_CREDENTIAL = /"(client_secret|refresh_token|private_key|access_token)"\s*:\s*"([^"]{16,})"/;
+const JSON_CREDENTIAL_LABEL: Record<string, string> = {
+  client_secret: 'OAuth client secret',
+  refresh_token: 'OAuth refresh token',
+  private_key: 'private key',
+  access_token: 'access token',
+};
+
 function looksLikeCredential(value: string): boolean {
   if (/^(phc_|pk_(live|test)_|G-|UA-|GTM-|ca-pub-|https?:)/.test(value)) return false;
   // Letters and digits mixed, no spaces: a hash, a token. Plain words and paths are not.
@@ -86,6 +99,12 @@ export function guardHooks(ctx: RepoContext): string[] {
   return guards;
 }
 
+/** The tool sandbox is on only when the settings say so: `"sandbox": { "enabled": false }` isolates nothing. */
+function sandboxEnabled(settings: unknown): boolean {
+  const sandbox = (settings as { sandbox?: unknown } | null | undefined)?.sandbox;
+  return typeof sandbox === 'object' && sandbox !== null && (sandbox as { enabled?: unknown }).enabled === true;
+}
+
 /** Bindings that are a remote service with no local emulator and no stored data: running them remotely is the only way. */
 const SERVICE_BINDINGS = new Set(['ai', 'browser', 'images', 'send_email', 'version_metadata']);
 
@@ -129,10 +148,10 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       const allow = claudeSettings.permissions?.allow ?? [];
       const deny = claudeSettings.permissions?.deny ?? [];
       const defaultMode = claudeSettings.permissions?.defaultMode;
-      if (allow.length > 0 || deny.length > 0 || claudeSettings.sandbox) {
+      if (allow.length > 0 || deny.length > 0 || sandboxEnabled(claudeSettings)) {
         hasPolicy = true;
         evidence.push(
-          `.claude/settings.json: ${allow.length} allow rules, ${deny.length} deny rules${claudeSettings.sandbox ? ', sandbox configured' : ''}`,
+          `.claude/settings.json: ${allow.length} allow rules, ${deny.length} deny rules${sandboxEnabled(claudeSettings) ? ', sandbox enabled' : ''}`,
         );
       }
       if (defaultMode === 'bypassPermissions') {
@@ -196,7 +215,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       const hasCodexPolicy = Boolean(
         codexToml && /^\s*(approval_policy|sandbox_mode|default_permissions)\s*=/m.test(codexToml),
       );
-      status = hasDeny || hasCodexPolicy || Boolean(claudeSettings?.sandbox) ? 'pass' : 'warn';
+      status = hasDeny || hasCodexPolicy || sandboxEnabled(claudeSettings) ? 'pass' : 'warn';
       if (status === 'warn') {
         evidence.push('Allow rules exist, but no explicit deny rules or sandbox policy configured');
       }
@@ -588,11 +607,17 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         // is not always an OpenAI key.
         const named = envLike ? NAMED_CREDENTIAL.exec(line) : null;
         const namedHit = named && !PUBLIC_BY_DESIGN.test(named[1]!) && !isPlaceholderToken(named[2]!) && !named[2]!.includes('${') && looksLikeCredential(named[2]!);
-        if (!provider && !namedHit) continue;
+        const json = /\.json$/.test(file) ? JSON_CREDENTIAL.exec(line) : null;
+        const jsonHit = json !== null && !isPlaceholderToken(json[2]!) && /[A-Za-z]/.test(json[2]!) && /\d/.test(json[2]!) && !/^<|^your[-_ ]/i.test(json[2]!);
+        if (!provider && !namedHit && !jsonHit) continue;
         const testMode = /\b[sr]k_test_[A-Za-z0-9]{10,}/.test(line) && !provider;
         const specific = provider && provider.name !== 'OpenAI API key' ? provider.name : undefined;
-        const label = testMode ? 'Stripe test-mode secret key' : (specific ?? (named ? `credential in \`${named[1]}\`` : provider!.name));
-        if (provider && ctx.isTracked(file) !== false) liveCredentials++;
+        const label = testMode
+          ? 'Stripe test-mode secret key'
+          : (specific ?? (jsonHit ? JSON_CREDENTIAL_LABEL[json![1]!]! : named ? `credential in \`${named[1]}\`` : provider!.name));
+        // A long-lived OAuth or service-account credential is as certain as a provider's key format.
+        const longLived = jsonHit && json![1] !== 'access_token';
+        if ((provider || longLived) && ctx.isTracked(file) !== false) liveCredentials++;
         // Outside a git work tree nothing is known about tracking: treat the file as shared.
         if (ctx.isTracked(file) === false) untrackedLeaks.push(`${file}:${i + 1} ${label} (untracked, not gitignored)`);
         else trackedLeaks.push(`${file}:${i + 1} ${label}${ctx.isTracked(file) ? ' (committed)' : ''}`);
@@ -628,18 +653,28 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     if (envExamples.length > 0) evidence.push(`Template env files: ${envExamples.join(', ')}`);
     if (hasSecretScanner) evidence.push('Secret scanner configured (gitleaks/trufflehog/secretlint)');
 
+    // Signing keystores and key files committed as they are: named by path, never opened.
+    const keyFiles = ctx.findFiles(
+      (f) => /\.(p12|pfx|jks|keystore)$/i.test(f) && !/(^|\/)debug\.keystore$/i.test(f) && !/(^|\/)(tests?|fixtures?|testdata|examples?)\//.test(f) && ctx.isTracked(f) !== false,
+    );
+    if (keyFiles.length > 0) evidence.push(`Signing keystore(s) in the repository: ${keyFiles.slice(0, 4).join(', ')}${keyFiles.length > 4 ? ', …' : ''} (keep them in a secret store; CI can fetch them)`);
+
     // A missing ignore rule is a failure when the file it should cover is sitting in the tree,
-    // unignored; for a file that does not exist it is a precaution.
-    const exposed = missingIgnores.filter((p) => ctx.hasFile(p));
+    // unignored; for a file that does not exist it is a precaution. The same goes for any other
+    // env file that git neither tracks nor ignores: one `git add -A` commits it.
+    const strayEnv = ctx.findFiles(
+      (f) => /(^|\/)(\.env(\.[\w-]+)*|\.dev\.vars(\.[\w-]+)*)$/.test(f) && !/\.(example|sample|template|defaults?|dist)$/.test(f) && ctx.isTracked(f) === false,
+    );
+    const exposed = [...new Set([...missingIgnores.filter((p) => ctx.hasFile(p)), ...strayEnv])];
     if (exposed.length > 0) evidence.push(`Present and not ignored: ${exposed.join(', ')}`);
     let status: CheckResult['status'] = 'pass';
     if (trackedLeaks.length > 0 || untrackedLeaks.length > 0 || exposed.length > 0) {
       status = 'fail';
-    } else if (missingIgnores.length > 0) {
+    } else if (missingIgnores.length > 0 || keyFiles.length > 0) {
       status = 'warn';
     }
 
-    const ignoreLines = [...missingIgnores, ...missingAdvisory].join(', ');
+    const ignoreLines = [...new Set([...missingIgnores, ...strayEnv, ...missingAdvisory])].join(', ');
     // A committed file that .gitignore names: the rule came after the commit, and git still tracks it.
     const leakFiles = [...new Set(trackedLeaks.map((l) => /^(.*?):\d+ /.exec(l)?.[1] ?? '').filter(Boolean))];
     const trackedButIgnored = leakFiles.filter((f) => ctx.isTracked(f) === true && ctx.ignoredPaths([f]).size > 0);
@@ -664,14 +699,14 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
           ? `Rotate every credential listed above now (it is in git history even after you delete the line), move the values to your secret store (e.g. \`wrangler secret put\`, CI secrets, a gitignored env file), and add \`gitleaks\` to CI.${untrack}`
           : untrackedLeaks.length > 0
             ? 'Add the listed files to `.gitignore` before the next `git add`, or move the credentials out of the working tree.'
-            : missingIgnores.length > 0
+            : missingIgnores.length > 0 || strayEnv.length > 0
               ? `Append to \`.gitignore\`: ${ignoreLines}.`
               : 'Keep credentials in ignored env files or a secret store, and add `gitleaks` to CI as a backstop.',
         pl: trackedLeaks.length > 0
           ? 'Zrotuj teraz każdy wymieniony wyżej klucz (zostaje w historii gita nawet po usunięciu linii), przenieś wartości do magazynu sekretów (np. `wrangler secret put`, sekrety CI, ignorowany plik env) i dodaj `gitleaks` do CI.'
           : untrackedLeaks.length > 0
             ? 'Dodaj wymienione pliki do `.gitignore` przed kolejnym `git add` albo wynieś sekrety poza katalog roboczy.'
-            : missingIgnores.length > 0
+            : missingIgnores.length > 0 || strayEnv.length > 0
               ? `Dopisz do \`.gitignore\`: ${ignoreLines}.`
               : 'Trzymaj sekrety w ignorowanych plikach env lub magazynie sekretów i dodaj `gitleaks` do CI jako bezpiecznik.',
       },
@@ -690,7 +725,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     const sandboxes: string[] = [];
     if (ctx.findFiles((f) => /^\.devcontainer\//.test(f)).length > 0) sandboxes.push('.devcontainer/');
     if (ctx.hasAnyFile(['flake.nix', 'shell.nix'])) sandboxes.push('Nix shell');
-    if (claudeSettings?.sandbox) sandboxes.push('.claude/settings.json sandbox');
+    if (sandboxEnabled(claudeSettings)) sandboxes.push('.claude/settings.json sandbox');
     if (codexToml && /^\s*sandbox_mode\s*=/m.test(codexToml)) sandboxes.push('.codex/config.toml sandbox_mode');
 
     // Local work that reaches production: said in the brief, or wired into a dev script.

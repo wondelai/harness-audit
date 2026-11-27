@@ -9,7 +9,8 @@ interface TsConfigShape {
   references?: Array<{ path?: string }>;
 }
 
-type StrictVerdict = { strict: boolean; via: string } | { unresolved: string };
+/** `set`: a config in the chain wrote `strict` itself, as opposed to nobody mentioning it. */
+type StrictVerdict = { strict: boolean; via: string; set?: boolean } | { unresolved: string };
 
 /** Where an installed package's `exports` map sends a spec such as `agents/tsconfig`. */
 function packageExportTargets(ctx: RepoContext, spec: string): string[] {
@@ -46,11 +47,13 @@ function resolveStrict(ctx: RepoContext, file: string, depth = 0): StrictVerdict
     }
   }
 
+  // `null`, a number, an array: valid JSON, not a tsconfig.
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) return { unresolved: file };
   const own = config.compilerOptions?.['strict'];
-  if (typeof own === 'boolean') return { strict: own, via: file };
+  if (typeof own === 'boolean') return { strict: own, via: file, set: true };
   if (depth >= 6) return { strict: false, via: file };
 
-  const parents = config.extends === undefined ? [] : Array.isArray(config.extends) ? config.extends : [config.extends];
+  const parents = (config.extends === undefined ? [] : Array.isArray(config.extends) ? config.extends : [config.extends]).filter((p): p is string => typeof p === 'string');
   let open: string | undefined;
   // Later entries override earlier ones, so read them last-first.
   for (const spec of [...parents].reverse()) {
@@ -65,8 +68,10 @@ function resolveStrict(ctx: RepoContext, file: string, depth = 0): StrictVerdict
       continue;
     }
     const verdict = resolveStrict(ctx, target, depth + 1);
-    if ('strict' in verdict) return verdict;
-    open = verdict.unresolved;
+    // A parent that sets `strict` decides. One that leaves it unset (its verdict names itself, not
+    // a config that said `false`) does not shadow an earlier parent that sets it.
+    if ('strict' in verdict && (verdict.strict || verdict.set)) return verdict;
+    if ('unresolved' in verdict) open = verdict.unresolved;
   }
   return open ? { unresolved: open } : { strict: false, via: file };
 }
@@ -221,8 +226,10 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       // A solution-style root only points at the real configs.
       const targets =
         tsconfigs.length === 1 && root?.compilerOptions?.['strict'] === undefined && root?.extends === undefined && (root?.references?.length ?? 0) > 0
-          ? root!.references!.map((r) => (r.path ?? '').replace(/^\.\//, '')).filter(Boolean).map((p) => (p.endsWith('.json') ? p : `${p}/tsconfig.json`)).slice(0, 5)
+          ? root!.references!.map((r) => (typeof r?.path === 'string' ? r.path : '').replace(/^\.\//, '')).filter(Boolean).map((p) => (p.endsWith('.json') ? p : `${p}/tsconfig.json`)).slice(0, 5)
           : tsconfigs;
+      // References that name no path leave nothing to follow: judge the root itself.
+      if (targets.length === 0) targets.push(...tsconfigs);
       const verdicts = targets.map((t) => ({ file: t, verdict: resolveStrict(ctx, t) }));
       const strictOnes = verdicts.filter((v) => 'strict' in v.verdict && v.verdict.strict);
       // A referenced config that covers only build-tool config files (`vite.config.ts`) is not the application's type check.
@@ -259,6 +266,10 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
         const open = (openOnes[0]!.verdict as { unresolved: string }).unresolved;
         evidence.push(`${openOnes[0]!.file} extends \`${open}\`, which is not installed here — run the install step and re-audit to verify strict mode`);
       }
+    } else if (stack.languages.includes('TypeScript')) {
+      // bun, tsx and Node strip types without checking them: with no tsconfig nothing ever does.
+      status = 'warn';
+      evidence.push('TypeScript without a tsconfig.json: the files run, but nothing type-checks them');
     } else if (nativeTyped.length > 0) {
       status = 'pass';
       evidence.push(`Statically typed language(s): ${nativeTyped.join(', ')}`);
@@ -317,6 +328,11 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
               en: 'Set `"strict": true` in the tsconfig named above (fix what it surfaces one area at a time) and run the type check in your verify command and CI.',
               pl: 'Ustaw `"strict": true` we wskazanym wyżej tsconfig (poprawiaj zgłoszone błędy obszar po obszarze) i uruchamiaj sprawdzanie typów w komendzie weryfikacji oraz w CI.',
             }
+          : stack.languages.includes('TypeScript')
+            ? {
+                en: 'Add a `tsconfig.json` with `"strict": true` and `"noEmit": true`, and run `tsc --noEmit` in your verify command and CI.',
+                pl: 'Dodaj `tsconfig.json` z `"strict": true` i `"noEmit": true` oraz uruchamiaj `tsc --noEmit` w komendzie weryfikacji i w CI.',
+              }
           : stack.languages.includes('Python')
             ? {
                 en: 'Configure `pyright` or `mypy` in `pyproject.toml` (strict for new code) and run it in your verify command and CI.',
@@ -507,8 +523,13 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     }
     const pkg = ctx.packageJson;
     if (pkg?.packageManager) runtimePins.push(`package.json packageManager (${pkg.packageManager.split('+')[0]})`);
+    // `>=22` admits every later major: a floor, not a pin.
+    const engineRanges: string[] = [];
     for (const engine of ['node', 'bun']) {
-      if (pkg?.engines?.[engine]) runtimePins.push(`package.json engines.${engine} (${pkg.engines[engine]})`);
+      const wanted = pkg?.engines?.[engine];
+      if (typeof wanted !== 'string') continue;
+      if (/^[=v]?\d+(\.\d+){0,2}$/.test(wanted.trim())) runtimePins.push(`package.json engines.${engine} (${wanted})`);
+      else engineRanges.push(`engines.${engine} ${wanted}`);
     }
     const goMod = ctx.readText('go.mod');
     if (goMod && /^go\s+\d+\.\d+/m.test(goMod)) runtimePins.push('go.mod go directive');
@@ -571,7 +592,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     evidence.push(
       runtimePins.length > 0
         ? `Toolchain pin(s): ${runtimePins.slice(0, 5).join(', ')}`
-        : 'No pinned toolchain version (.node-version, packageManager, engines, .python-version, rust-toolchain.toml, Gradle wrapper, .xcode-version, mise.toml)',
+        : `No pinned toolchain version (.node-version, packageManager, engines, .python-version, rust-toolchain.toml, Gradle wrapper, .xcode-version, mise.toml)${engineRanges.length > 0 ? `; ${engineRanges.join(', ')} is a range, not a pin` : ''}`,
     );
 
     const locked = lockfiles.length > 0 || versionCatalog;

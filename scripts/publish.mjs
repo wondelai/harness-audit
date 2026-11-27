@@ -16,9 +16,9 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 const mode = process.argv.includes('--check') ? 'check' : process.argv.includes('--dry-run') ? 'dry-run' : 'publish';
 
-const capture = (cmd, args) => {
+const capture = (cmd, args, cwd = root) => {
   try {
-    return execFileSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+    return execFileSync(cmd, args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
   } catch {
     return '';
   }
@@ -30,7 +30,9 @@ if (mode === 'check') {
   for (const name of NAMES) {
     let served = '';
     for (let attempt = 0; attempt < 12 && served !== pkg.version; attempt++) {
-      served = capture('npx', ['-y', `${name}@${pkg.version}`, '--version']);
+      // From a neutral directory: inside this checkout npx finds a package.json with the same name
+      // and version and may resolve the request to it instead of the registry.
+      served = capture('npx', ['-y', `${name}@${pkg.version}`, '--version'], tmpdir());
       if (served !== pkg.version) await new Promise((r) => setTimeout(r, 10_000));
     }
     if (served !== pkg.version) {

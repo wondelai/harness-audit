@@ -54,20 +54,73 @@ interface Step {
   prCommand: string;
 }
 
-/** `run:` bodies of a GitHub Actions workflow, single-line and block scalars alike. */
+/** A condition that is false for a pull request: the step or job runs for pushes, schedules or releases only. */
+const OFF_PR = /github\.event_name\s*(?:!=\s*'pull_request'|==\s*'(?:push|schedule|workflow_dispatch|release)')|github\.ref\s*==\s*'refs\/heads\//;
+
+/**
+ * `run:` bodies of a GitHub Actions workflow, single-line and block scalars alike. A step or job
+ * marked `continue-on-error: true` cannot fail the run, so its commands gate nothing; one whose
+ * `if:` excludes pull requests is not part of what a pull request has to pass.
+ */
 function extractRunSteps(yaml: string): Step[] {
   const lines = yaml.split(/\r?\n/);
-  const steps: Step[] = [];
-  let pendingIfOffPr = false;
+  const indentOf = (line: string): number => line.length - line.trimStart().length;
+  const offPr = new Array<boolean>(lines.length).fill(false);
+  const nonBlocking = new Array<boolean>(lines.length).fill(false);
 
+  // Job level: `if:` and `continue-on-error:` written as direct keys of a job cover all its steps.
+  let jobsAt = -1;
+  let jobIndent = -1;
+  let keyIndent = -1;
+  let jobOffPr = false;
+  let jobNonBlocking = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    const stepStart = /^\s*-\s+\w/.test(line);
-    if (stepStart) pendingIfOffPr = false;
-    if (/^\s*(?:-\s+)?if:.*github\.event_name\s*!=\s*'pull_request'/.test(line)) pendingIfOffPr = true;
+    if (!line.trim()) continue;
+    const indent = indentOf(line);
+    if (/^jobs:\s*$/.test(line)) {
+      jobsAt = i;
+      jobIndent = -1;
+      continue;
+    }
+    if (jobsAt === -1) continue;
+    if (jobIndent === -1) jobIndent = indent;
+    if (indent === jobIndent && /^\s*[\w.-]+:\s*$/.test(line)) {
+      keyIndent = -1;
+      jobOffPr = false;
+      jobNonBlocking = false;
+      continue;
+    }
+    if (keyIndent === -1 && indent > jobIndent) keyIndent = indent;
+    if (indent === keyIndent) {
+      if (/^\s*if:/.test(line) && OFF_PR.test(line)) jobOffPr = true;
+      if (/^\s*continue-on-error:\s*true\b/.test(line)) jobNonBlocking = true;
+    }
+    offPr[i] = jobOffPr;
+    nonBlocking[i] = jobNonBlocking;
+  }
 
+  // Step level: the keys of one step, wherever they stand relative to its `run:`.
+  for (let start = 0; start < lines.length; start++) {
+    const dash = /^(\s*)-\s+\w/.exec(lines[start]!);
+    if (!dash) continue;
+    let end = start + 1;
+    while (end < lines.length && (!lines[end]!.trim() || indentOf(lines[end]!) > dash[1]!.length)) end++;
+    const block = lines.slice(start, end);
+    const stepOffPr = block.some((l) => /^\s*(?:-\s+)?if:/.test(l) && OFF_PR.test(l));
+    const stepNonBlocking = block.some((l) => /^\s*(?:-\s+)?continue-on-error:\s*true\b/.test(l));
+    for (let i = start; i < end; i++) {
+      offPr[i] ||= stepOffPr;
+      nonBlocking[i] ||= stepNonBlocking;
+    }
+  }
+
+  const steps: Step[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
     const m = /^(\s*)(?:-\s+)?run:\s*(.*)$/.exec(line);
     if (!m) continue;
+    const runAt = i;
     const indent = m[1]!.length + (/^\s*-\s+run:/.test(line) ? 2 : 0);
     let body = m[2]!.trim();
     if (/^[|>][+-]?\d*$/.test(body)) {
@@ -82,11 +135,12 @@ function extractRunSteps(yaml: string): Step[] {
     } else {
       body = body.replace(/^(['"])(.*)\1$/, '$2');
     }
+    if (nonBlocking[runAt]) continue;
     // An inline `${{ event != 'pull_request' && 'lint' || '' }}` adds its argument only off PRs.
     const offPrExpr = /\$\{\{[^}]*github\.event_name\s*!=\s*'pull_request'[^}]*\}\}/g;
     // Off a PR the expression yields its quoted argument; keep that word so the full command reads right.
     const full = body.replace(offPrExpr, (expr) => /&&\s*'([^']*)'/.exec(expr)?.[1] ?? '');
-    steps.push({ command: full, prCommand: pendingIfOffPr ? '' : body.replace(offPrExpr, '') });
+    steps.push({ command: full, prCommand: offPr[runAt] ? '' : body.replace(offPrExpr, '') });
   }
   return steps;
 }

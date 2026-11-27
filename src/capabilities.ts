@@ -224,9 +224,12 @@ const PM_BUILTINS: Record<string, ReadonlySet<string>> = {
   yarn: new Set(['install', 'add', 'dlx', 'exec', 'npm', 'workspaces']),
 };
 
+/** An own key, not an inherited one: `toString` is not a package manager and not a script. */
+const owns = (object: object, key: string): boolean => Object.prototype.hasOwnProperty.call(object, key);
+
 /** The script names a package-manager invocation asks for, whether or not this package defines them. */
 function scriptNamesIn(program: string, args: string[]): string[] {
-  if (!(program in PM_BUILTINS) && program !== 'vpr') return [];
+  if (!owns(PM_BUILTINS, program) && program !== 'vpr') return [];
   const positional = args.filter((a) => !a.startsWith('-'));
   if (program === 'vpr') return positional.slice(0, 1);
   const runIndex = positional.findIndex((a) => a === 'run' || a === 'run-script');
@@ -240,8 +243,10 @@ function scriptNamesIn(program: string, args: string[]): string[] {
 function scriptsCalledBy(command: string, scripts: Scripts): string[] {
   const tokens = command.trim().split(/\s+/);
   const runner = tokens[0] ?? '';
-  if (runner === 'vpr') return tokens.slice(1).filter((t) => t in scripts).slice(0, 1);
-  if (!(runner in PM_BUILTINS)) return [];
+  if (runner === 'vpr') return tokens.slice(1).filter((t) => owns(scripts, t)).slice(0, 1);
+  if (!owns(PM_BUILTINS, runner)) return [];
+  // `bun run --parallel a b c` names several scripts; `npm run build lint` passes `lint` to `build`.
+  const several = runner === 'bun' && tokens.some((t) => t === '--parallel' || t === '--sequential');
 
   let i = 1;
   while (i < tokens.length && tokens[i]!.startsWith('-')) i++;
@@ -257,11 +262,10 @@ function scriptsCalledBy(command: string, scripts: Scripts): string[] {
       continue;
     }
     if (tok.startsWith('-')) continue;
-    if (!(tok in scripts)) break;
+    if (!owns(scripts, tok)) break;
     if (!explicitRun && PM_BUILTINS[runner]!.has(tok)) break;
     names.push(tok);
-    // Only `run --parallel a b c` (bun) or `run-s`-style lists name several scripts.
-    if (!explicitRun) break;
+    if (!several) break;
   }
   return names;
 }
@@ -293,11 +297,36 @@ function parseRecipes(text: string, tool: RecipeBook['tool']): RecipeBook {
 /** A checked-in script a command line runs: `./scripts/ci.sh`, `bash scripts/test-kit.sh`, `node scripts/check.mjs`. */
 const SCRIPT_FILE = /(?:^|[\s"'=])(?:\.\/)?((?:scripts?|bin|ci|tools|\.github\/scripts)\/[\w./-]+)/;
 /** A script whose name says it verifies. `bin/wt` or `scripts/seed.sh` may run a build inside, but running them is not a check. */
-const VERIFY_NAMED = /(verify|check|test|lint|typecheck|preflight|validate|(^|[-_/])ci([-_.]|$))/i;
+const VERIFY_NAMED = /(verify|check|test|lint|typecheck|preflight|validate|guard|(^|[-_/])ci([-_.]|$))/i;
+
+/** The commands of a shell line whose failure fails the line: `vitest run || true` proves nothing. */
+function gatingParts(commandLine: string): string[] {
+  const tokens = commandLine.split(/(&&|\|\||;|\n)/);
+  const parts: string[] = [];
+  for (let i = 0; i < tokens.length; i += 2) {
+    const fallback = tokens[i + 1] === '||' ? (tokens[i + 2] ?? '').trim() : '';
+    if (/^(true|:|exit 0)(\s|$)/.test(fallback)) continue;
+    parts.push(tokens[i]!);
+  }
+  return parts;
+}
+
+/** A script that only prints or refuses (`echo "Use CI" && exit 1`): it runs no tool at all. */
+function onlyPrints(body: string): boolean {
+  const parts = body.split(/&&|\|\||;|\n/).map((p) => p.trim()).filter(Boolean);
+  return parts.length > 0 && parts.every((p) => /^(echo|printf|true|:|exit)(\s|$)/.test(p));
+}
+
+/** A script that refuses before it does anything: `echo "Deploys run in CI" && exit 1 && …`. */
+function refusesFirst(body: string): boolean {
+  const parts = body.split(/&&|;|\n/).map((p) => p.trim()).filter(Boolean);
+  const stop = parts.findIndex((p) => /^exit\s+[1-9]/.test(p));
+  return stop !== -1 && parts.slice(0, stop).every((p) => /^(echo|printf)(\s|$)/.test(p));
+}
 
 /** Tools that ship: a command that runs one is a deploy, not a check. */
 export const DEPLOY_TOOL =
-  /\b(?:wrangler\s+(?:deploy|publish|pages\s+deploy|versions\s+deploy|d1\s+migrations\s+apply\s+[^\n]*--remote)|opennextjs-cloudflare\s+deploy|vercel\s+(?:deploy|--prod)|netlify\s+deploy|flyctl\s+deploy|fly\s+deploy|gcloud\s+(?:run|app|functions)\s+deploy|kubectl\s+apply|helm\s+upgrade|terraform\s+apply|cdk\s+deploy|sst\s+deploy|serverless\s+deploy|firebase\s+deploy|npm\s+publish|pnpm\s+publish|bun\s+publish|cargo\s+publish|twine\s+upload|gh\s+release\s+create|aws\s+s3\s+sync|docker\s+push|eas\s+submit|fastlane\s+(?:\S+\s+)?(?:release|deploy|beta|upload\w*))\b/;
+  /\b(?:wrangler\s+(?:deploy|publish|pages\s+deploy|versions\s+deploy|d1\s+(?:migrations\s+apply|execute)\s+[^\n]*--remote)|opennextjs-cloudflare\s+deploy|vercel\s+(?:deploy|--prod)|netlify\s+deploy|flyctl\s+deploy|fly\s+deploy|gcloud\s+(?:run|app|functions)\s+deploy|kubectl\s+apply|helm\s+upgrade|terraform\s+apply|cdk\s+deploy|sst\s+deploy|serverless\s+deploy|firebase\s+deploy|npm\s+publish|pnpm\s+publish|bun\s+publish|cargo\s+publish|twine\s+upload|gh\s+release\s+create|aws\s+s3\s+sync|docker\s+push|eas\s+(?:submit|update(?![^\n&;|]*--(?:branch|channel)[= ](?:dev\w*|preview|staging|test\w*)))|fastlane\s+(?:\S+\s+)?(?:release|deploy|beta|upload\w*))\b/;
 
 /** The command line runs a deploy tool for real: not a dry run, not a tool name inside a quoted message. */
 export function runsDeployTool(cmd: string): boolean {
@@ -330,7 +359,7 @@ export class CommandClassifier {
   /** Everything a shell command line proves, following package scripts and make/just targets. */
   classify(commandLine: string, seen: Set<string> = new Set()): Set<VerifyKind> {
     const kinds = new Set<VerifyKind>();
-    for (const part of commandLine.split(/&&|\|\||;|\n/)) {
+    for (const part of gatingParts(commandLine)) {
       const cmd = part.trim().replace(/^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+/, '');
       // Printing or exporting a value runs nothing, even when it mentions a tool.
       if (!cmd || /^(#|echo\b|printf\b|export\b|cd\b|set\b)/.test(cmd)) continue;
@@ -393,7 +422,7 @@ export class CommandClassifier {
         if (seen.has(key)) continue;
         seen.add(key);
         const body = this.scripts[name]!;
-        if (!/\bexit\s+1\b/.test(body) && this.deploys(body, seen)) return true;
+        if (!refusesFirst(body) && this.deploys(body, seen)) return true;
       }
       const scriptFile = SCRIPT_FILE.exec(cmd)?.[1];
       if (scriptFile && /\.(sh|bash|zsh)$/.test(scriptFile) && !seen.has(scriptFile) && this.ctx.hasFile(scriptFile)) {
@@ -406,8 +435,11 @@ export class CommandClassifier {
 
   classifyScript(name: string, seen: Set<string> = new Set()): Set<VerifyKind> {
     const key = `script:${name}`;
-    const kinds = new Set<VerifyKind>(kindsFromName(name));
     const body = this.scripts[name];
+    // A name promises; the body delivers. `"build": "echo no build step"` builds nothing, and
+    // `"test": "vitest run || true"` cannot fail.
+    if (body !== undefined && (onlyPrints(body) || gatingParts(body).every((p) => onlyPrints(p) || p.trim() === ''))) return new Set();
+    const kinds = new Set<VerifyKind>(kindsFromName(name));
     if (body === undefined || seen.has(key)) return kinds;
     seen.add(key);
     for (const k of this.classify(body, seen)) kinds.add(k);
@@ -514,7 +546,7 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   const longRunning = (name: string): boolean =>
     /(^|[:._-])(watch|dev|serve|ui|debug|open)($|[:._-])/.test(name) || /--watch\b|\bnodemon\b/.test(scripts[name] ?? '');
   const scriptNames = [
-    ...SCRIPT_PRIORITY.filter((n) => n in scripts),
+    ...SCRIPT_PRIORITY.filter((n) => owns(scripts, n) && !longRunning(n)),
     ...Object.keys(scripts).filter((n) => /^test[:._-]/.test(n) && !longRunning(n)).slice(0, 4),
   ];
   for (const name of scriptNames) add(run(name), classifier.classifyScript(name), 'package.json');
@@ -525,7 +557,7 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
     const memberScripts = member.manifest.scripts ?? {};
     const dir = member.path.replace(/\/package\.json$/, '');
     const memberClassifier = new CommandClassifier(ctx, memberScripts);
-    for (const name of SCRIPT_PRIORITY.filter((n) => n in memberScripts)) {
+    for (const name of SCRIPT_PRIORITY.filter((n) => owns(memberScripts, n))) {
       const kinds = sortKinds(memberClassifier.classifyScript(name));
       const covered = new Set(commands.flatMap((c) => c.kinds));
       // A member's test script is always its own suite; other kinds only fill what is missing.
@@ -548,7 +580,7 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
 
   // 3. Checked-in verify scripts
   const scriptFiles = ctx.findFiles((f) =>
-    /^(scripts?|bin|ci|tools)\/(verify|check|test|tests|lint|ci|preflight|validate|typecheck)([-_][\w-]+)?(\.(sh|bash|zsh))?$/.test(f),
+    /^(scripts?|bin|ci|tools)\/(verify|check|test|tests|lint|ci|preflight|validate|typecheck|guard)([-_][\w-]+)?(\.(sh|bash|zsh))?$/.test(f),
   );
   for (const file of scriptFiles.slice(0, 6)) add(`./${file}`, classifier.classifyFile(file), file);
 
@@ -719,7 +751,7 @@ export function localDeployCommands(ctx: RepoContext): string[] {
   const scripts = ctx.packageJson?.scripts ?? {};
   const run = scriptRunner(ctx);
   const commands = Object.entries(scripts)
-    .filter(([, body]) => !/\bexit\s+1\b/.test(body) && classifier.deploys(body))
+    .filter(([, body]) => !refusesFirst(body) && classifier.deploys(body))
     // Production first: when the list is cut for display, the dangerous one stays.
     .sort(([a], [b]) => Number(/prod/.test(b)) - Number(/prod/.test(a)))
     .slice(0, 5)

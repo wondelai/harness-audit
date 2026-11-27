@@ -304,6 +304,7 @@ export const UI = {
   fail: { en: 'FAIL', pl: 'BŁĄD' },
   info: { en: 'INFO', pl: 'INFO' },
   contributors90d: { en: 'active contributors (90d)', pl: 'aktywnych autorów (90 dni)' },
+  contributor90d: { en: 'active contributor (90d)', pl: 'aktywny autor (90 dni)' },
   commits30d: { en: 'commits (30d)', pl: 'commitów (30 dni)' },
   generatedBy: {
     en: 'Generated locally by @wondelai/harness-audit — zero telemetry, zero network calls in default mode.',

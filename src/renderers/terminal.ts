@@ -116,7 +116,7 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
 
   if (report.git.isGitRepo) {
     lines.push(
-      `${c.bold}Git:${c.reset} ${report.git.branch ?? 'HEAD'} · ${report.git.gitAuthors90d} ${t(UI.contributors90d, lang)} · ${report.git.commits30d} ${t(UI.commits30d, lang)}`,
+      `${c.bold}Git:${c.reset} ${report.git.branch ?? 'HEAD'} · ${report.git.gitAuthors90d} ${t(report.git.gitAuthors90d === 1 ? UI.contributor90d : UI.contributors90d, lang)} · ${report.git.commits30d} ${t(UI.commits30d, lang)}`,
     );
     for (const note of branchNotes(report, lang)) lines.push(`${c.yellow}${c.bold}! ${note}${c.reset}`);
   }

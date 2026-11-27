@@ -125,8 +125,10 @@ export function assignImpact(checks: CheckResult[]): void {
       }
       const missing = c.status === 'fail' ? c.weight : c.weight * 0.5;
       const share = (missing / possible) * station.weight * 100;
-      // Fixing a critical finding also lifts its share of the critical penalty.
-      c.impact = Math.round((share + (penalty.perCheck.get(c.id) ?? 0)) * 10) / 10;
+      // Fixing a critical finding also lifts the critical penalty: by what the total really drops
+      // without it, which under the 20-point cap can be less than the finding's own share.
+      const lifted = penalty.perCheck.has(c.id) ? penalty.points - criticalPenalty(checks.filter((other) => other !== c)).points : 0;
+      c.impact = Math.round((share + lifted) * 10) / 10;
     }
   }
 }

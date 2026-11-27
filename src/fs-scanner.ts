@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, extname, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
 import { describeCommand, detectVerifyCapabilities, type VerifyCapabilities } from './capabilities.js';
 import { readBrief, type BriefFacts } from './brief.js';
 import { analyzeCi, type CiFacts } from './ci.js';
@@ -83,6 +83,17 @@ function pathIsVendored(rel: string): boolean {
   }
   return false;
 }
+
+/**
+ * git's own location variables, set when the audit runs from a git hook, would point every git call
+ * at the hook's repository instead of the audited one. They are dropped; the rest is kept.
+ */
+export function gitEnv(): NodeJS.ProcessEnv {
+  const env = { ...process.env };
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_PREFIX']) delete env[key];
+  return env;
+}
+const GIT_ENV = gitEnv();
 
 const MAX_SCAN_FILES = 60_000;
 const MAX_READ_BYTES = 512 * 1024; // 512 KiB per file safety bound
@@ -213,7 +224,7 @@ function capFiles(files: string[]): { files: string[]; truncated: boolean } {
 function listGitFiles(root: string): FileListing | null {
   const git = (args: string[]): string[] =>
     execFileSync('git', ['-c', 'core.quotepath=off', 'ls-files', '-z', ...args], {
-      cwd: root,
+      cwd: root, env: GIT_ENV,
       encoding: 'utf8',
       maxBuffer: 512 * 1024 * 1024,
       stdio: ['ignore', 'pipe', 'ignore'],
@@ -224,9 +235,13 @@ function listGitFiles(root: string): FileListing | null {
 
   try {
     const trackedAll = git(['--cached']);
-    // Nothing tracked under this path: a fresh `git init`, or a directory that merely sits inside
-    // someone else's work tree. The walk sees it as it is.
-    if (trackedAll.length === 0) return null;
+    if (trackedAll.length === 0) {
+      // Nothing tracked. At the top of its own repository this is a fresh `git init`, and git's
+      // ignore rules still say what a teammate would get. A directory that merely sits inside
+      // someone else's work tree is walked as it is.
+      const prefix = execFileSync('git', ['rev-parse', '--show-prefix'], { cwd: root, env: GIT_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim();
+      if (prefix !== '') return null;
+    }
     const deleted = new Set(git(['--deleted']));
     const tracked = trackedAll.filter((p) => !deleted.has(p) && !pathIsVendored(p));
     // An untracked nested repository or worktree is listed as "dir/": not this repo's files.
@@ -337,7 +352,8 @@ export class RepoContext {
   isLocalOnly(relPath: string): boolean {
     if (this.scan.mode !== 'git') return false;
     const clean = cleanRel(relPath);
-    return !this.fileSet.has(clean) && existsSync(join(this.root, clean));
+    // A tracked file that the scan cap left out is still part of the repository.
+    return !this.fileSet.has(clean) && this.trackedSet?.has(clean) !== true && existsSync(join(this.root, clean));
   }
 
   /**
@@ -374,6 +390,24 @@ export class RepoContext {
    * Text of a scanned file, following a symlink to its target. `null` for a file outside the scan
    * (ignored by git, vendored), a missing file, or one above the size bound.
    */
+  private realRoot: string | undefined;
+
+  /**
+   * The file's real path when it lies inside the repository. A symlink that leads out of the tree
+   * (`CLAUDE.md -> ~/notes.md`, `node_modules/x -> /etc`) is not followed: the audit quotes what it
+   * reads, and a repository must not be able to make it quote someone's home directory.
+   */
+  private contained(full: string): string | null {
+    try {
+      this.realRoot ??= realpathSync(this.root);
+      const real = realpathSync(full);
+      const rel = relative(this.realRoot, real);
+      return rel.startsWith('..') || isAbsolute(rel) ? null : real;
+    } catch {
+      return null;
+    }
+  }
+
   readText(relPath: string): string | null {
     const clean = cleanRel(relPath);
     const cached = this.textCache.get(clean);
@@ -382,9 +416,9 @@ export class RepoContext {
     let content: string | null = null;
     if (this.fileSet.has(clean)) {
       try {
-        const full = join(this.root, clean);
-        const stat = statSync(full);
-        if (stat.isFile() && stat.size <= MAX_READ_BYTES) {
+        const full = this.contained(join(this.root, clean));
+        const stat = full ? statSync(full) : undefined;
+        if (full && stat?.isFile() && stat.size <= MAX_READ_BYTES) {
           content = readFileSync(full, 'utf8');
         }
       } catch {
@@ -483,7 +517,7 @@ export class RepoContext {
     if (this.scan.mode === 'git') {
       try {
         const out = execFileSync('git', ['check-ignore', '--no-index', '--', ...candidates], {
-          cwd: this.root,
+          cwd: this.root, env: GIT_ENV,
           encoding: 'utf8',
           stdio: ['ignore', 'pipe', 'ignore'],
           timeout: 5000,
@@ -564,8 +598,10 @@ export class RepoContext {
    * tsconfig preset inside `node_modules`. For resolving references only, never for findings.
    */
   readUnscannedText(relPath: string): string | null {
-    const full = resolve(this.root, relPath);
-    if (relative(this.root, full).startsWith('..')) return null;
+    const lexical = resolve(this.root, relPath);
+    if (relative(this.root, lexical).startsWith('..')) return null;
+    const full = this.contained(lexical);
+    if (!full) return null;
     try {
       const stat = statSync(full);
       return stat.isFile() && stat.size <= MAX_READ_BYTES ? readFileSync(full, 'utf8') : null;
@@ -670,7 +706,8 @@ function detectStack(ctx: RepoContext): StackInfo {
     // typescript dependency in its packages.
     const tsFiles = ctx.sourceFiles.filter((f) => /\.(ts|tsx|mts|cts)$/.test(f)).length;
     const jsFiles = ctx.sourceFiles.filter((f) => /\.(js|jsx|mjs|cjs)$/.test(f)).length;
-    const isTs = ctx.hasFile('tsconfig.json') || ctx.hasDependency('typescript') || (tsFiles >= 5 && tsFiles >= jsFiles * 0.25);
+    // A handful of `.ts` files and no JavaScript is TypeScript too, tsconfig or not.
+    const isTs = ctx.hasFile('tsconfig.json') || ctx.hasDependency('typescript') || (tsFiles >= 5 && tsFiles >= jsFiles * 0.25) || (tsFiles > 0 && jsFiles === 0);
     if (isTs) languages.add('TypeScript');
     if (!isTs || (jsFiles >= 20 && jsFiles >= tsFiles * 0.3)) languages.add('JavaScript');
 
@@ -919,12 +956,13 @@ function detectStack(ctx: RepoContext): StackInfo {
 }
 
 const AUTOMATION_EMAIL = /\[bot\]|noreply@anthropic\.com|@cursor\.com$|^cursoragent@|copilot|devin-ai|github-actions|dependabot|renovate|(^|[-.+_])bot([-.+_]|@)|^action@github\.com$|^codex@|noreply@openai\.com/;
-const AUTOMATION_NAME = /^(claude|codex|cursor agent|copilot|devin|github-actions|dependabot|renovate|semantic-release)\b|\[bot\]|(^|[-_ ])bot$/;
+// The whole name, not a prefix: "Claude Martin" is a person.
+const AUTOMATION_NAME = /^(claude( code)?|codex|cursor agent|copilot|devin( ai)?|github-actions|dependabot|renovate|semantic-release)$|\[bot\]|(^|[-_ ])bot$/;
 
 function detectGitStats(root: string): GitStats {
   try {
     execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
-      cwd: root,
+      cwd: root, env: GIT_ENV,
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 3000,
     });
@@ -935,7 +973,7 @@ function detectGitStats(root: string): GitStats {
   let branch: string | undefined;
   try {
     branch = execFileSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
-      cwd: root,
+      cwd: root, env: GIT_ENV,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 3000,
@@ -949,7 +987,7 @@ function detectGitStats(root: string): GitStats {
   const countPeople = (args: string[]): number => {
     try {
       const out = execFileSync('git', ['log', ...args, '--format=%ae%x09%an'], {
-        cwd: root,
+        cwd: root, env: GIT_ENV,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
         timeout: 5000,
@@ -971,7 +1009,7 @@ function detectGitStats(root: string): GitStats {
 
   const count = (args: string[]): number => {
     try {
-      return Number.parseInt(execFileSync('git', ['rev-list', '--count', ...args, 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim(), 10) || 0;
+      return Number.parseInt(execFileSync('git', ['rev-list', '--count', ...args, 'HEAD'], { cwd: root, env: GIT_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim(), 10) || 0;
     } catch {
       return 0;
     }
@@ -980,7 +1018,7 @@ function detectGitStats(root: string): GitStats {
   // The branch pull requests target: origin's HEAD when a remote is known, else the checked-out branch.
   let defaultBranch: string | undefined;
   try {
-    defaultBranch = execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim().replace(/^origin\//, '');
+    defaultBranch = execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: root, env: GIT_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim().replace(/^origin\//, '');
   } catch {
     defaultBranch = branch && branch !== 'HEAD' ? branch : undefined;
   }
@@ -990,7 +1028,7 @@ function detectGitStats(root: string): GitStats {
   let behindDefault: number | undefined;
   let defaultBranchOnly: string[] | undefined;
   if (defaultBranch && branch && branch !== 'HEAD' && branch !== defaultBranch) {
-    const git = (args: string[]): string => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 });
+    const git = (args: string[]): string => execFileSync('git', args, { cwd: root, env: GIT_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 });
     for (const ref of [`refs/remotes/origin/${defaultBranch}`, `refs/heads/${defaultBranch}`]) {
       try {
         behindDefault = Number.parseInt(git(['rev-list', '--count', `HEAD..${ref}`]).trim(), 10) || 0;
@@ -1008,7 +1046,7 @@ function detectGitStats(root: string): GitStats {
   let commits30d = 0;
   try {
     const out = execFileSync('git', ['rev-list', '--count', '--since=30 days ago', 'HEAD'], {
-      cwd: root,
+      cwd: root, env: GIT_ENV,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 3000,

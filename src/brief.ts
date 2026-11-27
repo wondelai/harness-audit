@@ -68,7 +68,7 @@ function ruleStrength(text: string): number {
   const forbids =
     /(?:^|[.:;!?—–]\s+|^[-\d.\s]+)(?:never|do not|don't)\b/im.test(words) ||
     /\b(?:must not|mustn't|must never|should never|may not|forbidden|not allowed|off-limits)\b|nigdy|nie wolno|zabronion|zakaz/i.test(words);
-  const names = /\bproduction\b|\bprod\b|--remote\b|\blive\b|\bcustomer|produkc/i.test(text);
+  const names = /\bproduction\b|\bprod\b|--remote\b|\blive\b|\bcustomer|\breal (?:data|users|customers)\b|produkc/i.test(text);
   return (forbids ? 2 : 0) + (names ? 1 : 0);
 }
 

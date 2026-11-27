@@ -25,8 +25,11 @@ export interface TempRepo {
 export function createTempRepo(prefix = 'harness-audit-test-'): TempRepo {
   const dir = mkdtempSync(join(tmpdir(), prefix));
   let initialised = false;
+  // Run from a git hook, the caller's GIT_DIR and author variables would otherwise win over the fixture's.
+  const env = { ...process.env };
+  for (const key of Object.keys(env)) if (/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|COMMON_DIR|PREFIX|AUTHOR_|COMMITTER_)/.test(key)) delete env[key];
   const git = (...args: string[]): void => {
-    execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
+    execFileSync('git', args, { cwd: dir, stdio: 'ignore', env });
   };
   return {
     dir,
@@ -51,7 +54,7 @@ export function createTempRepo(prefix = 'harness-audit-test-'): TempRepo {
       execFileSync(
         'git',
         ['-c', `user.email=${author}`, '-c', `user.name=${name}`, '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'snapshot', ...(date ? ['--date', date] : [])],
-        { cwd: dir, stdio: 'ignore', env: { ...process.env, ...(date ? { GIT_COMMITTER_DATE: date } : {}) } },
+        { cwd: dir, stdio: 'ignore', env: { ...env, ...(date ? { GIT_COMMITTER_DATE: date } : {}) } },
       );
     },
     cleanup() {

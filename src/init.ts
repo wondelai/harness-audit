@@ -77,12 +77,13 @@ function buildClaudeSettings(ctx: RepoContext): string {
     const bare = /^npx (.+)$/.exec(command)?.[1];
     if (bare) deny.push(`Bash(${bare}:*)`, `Bash(bunx ${bare}:*)`);
   }
-  deny.push('Bash(git push --force:*)', 'Bash(git push -f:*)');
+  // A rule matches from its first word on, so the flag is denied in front of the remote and after it.
+  deny.push('Bash(git push --force*)', 'Bash(git push * --force*)', 'Bash(git push -f*)', 'Bash(git push * -f*)');
   // The local secret files of this stack, so an agent cannot read them into its context.
   // Named files, not `.env.*`: an agent has to be able to read `.env.example`.
   const secretFiles = ['.env', '.env.local', '.env.*.local', '.env.production', '.env.development'];
   if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json'])) secretFiles.push('.dev.vars');
-  if (ctx.stack.frameworks.includes('Android')) secretFiles.push('local.properties', 'secrets.properties');
+  if (ctx.stack.frameworks.includes('Android')) secretFiles.push('local.properties', 'secrets.properties', 'keystore.properties');
   for (const f of secretFiles) deny.push(`Read(./${f})`);
 
   return `${JSON.stringify(
@@ -112,14 +113,17 @@ function oracleRule(ctx: RepoContext): string {
 
 /** Where this stack keeps its tests, as globs for a path-scoped rule. */
 function testGlobs(ctx: RepoContext): string[] {
+  // Every language the repository is written in: a Swift app with a TypeScript backend has both.
   const langs = ctx.stack.languages;
-  if (langs.includes('Swift')) return ['Tests/**', '**/*Tests.swift', '**/*UITests/**'];
-  if (langs.includes('Kotlin') || langs.includes('Java')) return ['**/src/test/**', '**/src/androidTest/**'];
-  if (langs.includes('Go')) return ['**/*_test.go'];
-  if (langs.includes('Python') && !ctx.packageJson) return ['tests/**', '**/test_*.py', '**/*_test.py'];
-  if (langs.includes('Rust')) return ['tests/**', 'src/**/tests.rs'];
-  if (langs.includes('Dart')) return ['test/**', 'integration_test/**'];
-  return ['**/*.test.*', '**/*.spec.*', 'tests/**', '__tests__/**'];
+  const globs: string[] = [];
+  if (langs.includes('Swift')) globs.push('Tests/**', '**/*Tests.swift', '**/*UITests/**');
+  if (langs.includes('Kotlin') || langs.includes('Java')) globs.push('**/src/test/**', '**/src/androidTest/**');
+  if (langs.includes('Go')) globs.push('**/*_test.go');
+  if (langs.includes('Python')) globs.push('tests/**', '**/test_*.py', '**/*_test.py');
+  if (langs.includes('Rust')) globs.push('tests/**', 'src/**/tests.rs');
+  if (langs.includes('Dart')) globs.push('test/**', 'integration_test/**');
+  if (langs.includes('TypeScript') || langs.includes('JavaScript') || globs.length === 0) globs.push('**/*.test.*', '**/*.spec.*', 'tests/**', '__tests__/**');
+  return [...new Set(globs)];
 }
 
 function buildClaudeTestingRule(ctx: RepoContext): string {
