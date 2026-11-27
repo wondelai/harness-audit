@@ -308,9 +308,10 @@ export class CommandClassifier {
   private readonly books: RecipeBook[] = [];
   private readonly ctx: RepoContext;
 
-  constructor(ctx: RepoContext) {
+  /** `scripts`: the package scripts commands resolve against; the root package's by default. */
+  constructor(ctx: RepoContext, scripts?: Scripts) {
     this.ctx = ctx;
-    this.scripts = ctx.packageJson?.scripts ?? {};
+    this.scripts = scripts ?? ctx.packageJson?.scripts ?? {};
     const makefile = ctx.readText('Makefile') ?? ctx.readText('makefile');
     if (makefile) this.books.push(parseRecipes(makefile, 'make'));
     const justfile = ctx.readText('justfile') ?? ctx.readText('Justfile');
@@ -511,6 +512,24 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
     ...Object.keys(scripts).filter((n) => /^test[:._-]/.test(n) && !longRunning(n)).slice(0, 4),
   ];
   for (const name of scriptNames) add(run(name), classifier.classifyScript(name), 'package.json');
+
+  // 1b. Scripts of workspace members, for the kinds the root does not offer: a repository whose
+  // packages live in subfolders verifies there.
+  for (const member of ctx.workspaceManifests.slice(0, 6)) {
+    const memberScripts = member.manifest.scripts ?? {};
+    const dir = member.path.replace(/\/package\.json$/, '');
+    const memberClassifier = new CommandClassifier(ctx, memberScripts);
+    for (const name of SCRIPT_PRIORITY.filter((n) => n in memberScripts)) {
+      const kinds = sortKinds(memberClassifier.classifyScript(name));
+      const covered = new Set(commands.flatMap((c) => c.kinds));
+      if (kinds.length === 0 || kinds.every((k) => covered.has(k))) continue;
+      if (memberClassifier.deploys(memberScripts[name]!)) continue;
+      const runIn = run(name).replace(/^(bun run|pnpm run|yarn|npm run|npm)\b/, (runner) =>
+        runner.startsWith('bun') ? `bun run --cwd ${dir}` : runner.startsWith('pnpm') ? `pnpm --dir ${dir} run` : runner.startsWith('yarn') ? `yarn --cwd ${dir}` : `npm --prefix ${dir} run`,
+      );
+      commands.push({ command: runIn.replace(/run test$/, 'run test'), kinds, source: member.path });
+    }
+  }
 
   // 2. Makefile / justfile targets
   for (const tool of ['make', 'just'] as const) {

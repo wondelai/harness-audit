@@ -612,6 +612,10 @@ const LANGUAGE_BY_EXT: Record<string, string> = {
   '.js': 'JavaScript',
   '.mjs': 'JavaScript',
   '.ts': 'TypeScript',
+  '.tsx': 'TypeScript',
+  '.mts': 'TypeScript',
+  '.jsx': 'JavaScript',
+  '.cjs': 'JavaScript',
   '.go': 'Go',
   '.rs': 'Rust',
   '.java': 'Java',
@@ -634,7 +638,7 @@ function detectStack(ctx: RepoContext): StackInfo {
   const verifyScripts: string[] = [];
   const detectedTools = new Set<SupportedTool>();
 
-  const pkg = ctx.packageJson;
+  const pkg = ctx.packageJson ?? (ctx.workspaceManifests.length > 0 ? {} : null);
   if (pkg) {
     // By what the files are, not only by the root manifest: a workspace keeps tsconfig and the
     // typescript dependency in its packages.

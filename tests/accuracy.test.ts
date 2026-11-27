@@ -721,6 +721,18 @@ describe('weak evidence is no claim', () => {
     expect(check(report, 'graph.port-and-state-isolation').status).not.toBe('info');
   });
 
+  it('finds the stack and the verify commands of a repository whose packages live in subfolders', () => {
+    const repo = temp('ha-nested-');
+    repo.write('micro/package.json', JSON.stringify({ name: 'micro', scripts: { test: 'vitest run', lint: 'eslint .' }, dependencies: { hono: '^5.0.0' }, devDependencies: { typescript: '^6.0.0' } }));
+    repo.write('micro/package-lock.json', '{}\n');
+    for (let i = 0; i < 8; i++) repo.write(`micro/src/m${i}.tsx`, 'export {};\n');
+    const report = auditRepo(repo.dir);
+    expect(report.stack.languages).toContain('TypeScript');
+    expect(report.stack.frameworks).toContain('Hono');
+    expect(report.stack.verifyCommands).toContain('`npm --prefix micro run test` → test');
+    expect(report.stack.verifyCommands).toContain('`npm --prefix micro run lint` → lint');
+  });
+
   it('does not pass Swift reproducibility while remote packages float', () => {
     const repo = temp('ha-xcodegen-');
     repo.write('project.yml', 'name: App\npackages:\n  Analytics:\n    url: https://github.com/example/analytics-ios\n    from: 3.9.0\ntargets:\n  App:\n    type: application\n');
