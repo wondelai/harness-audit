@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { describeCommand, detectVerifyCapabilities, type VerifyCapabilities } from './capabilities.js';
+import { readBrief, type BriefFacts } from './brief.js';
 import { analyzeCi, type CiFacts } from './ci.js';
 import type { GitStats, ScanInfo, StackInfo, SupportedTool } from './types.js';
 
@@ -297,6 +298,7 @@ export class RepoContext {
   private gitCache: GitStats | undefined = undefined;
   private verifyCache: VerifyCapabilities | undefined = undefined;
   private ciCache: CiFacts | undefined = undefined;
+  private briefCache: BriefFacts | undefined = undefined;
 
   constructor(repoPath: string) {
     this.root = resolve(repoPath);
@@ -477,9 +479,26 @@ export class RepoContext {
     return new Set(candidates.filter((candidate) => patterns.some((p) => gitignorePatternMatches(p, candidate))));
   }
 
-  /** One human contributor in the last 90 days: there is nobody to be a second reviewer. */
+  /** What the root AGENTS.md / CLAUDE.md say. */
+  get brief(): BriefFacts {
+    if (this.briefCache) return this.briefCache;
+    this.briefCache = readBrief(this);
+    return this.briefCache;
+  }
+
+  /**
+   * How many people work here: `solo` (one human in 90 days, nobody to be a second reviewer),
+   * `inactive` (no commits in 90 days), `team`, or `unknown` outside a git work tree.
+   */
+  get team(): 'solo' | 'inactive' | 'team' | 'unknown' {
+    if (!this.git.isGitRepo) return 'unknown';
+    if (this.git.gitAuthors90d === 0) return 'inactive';
+    return this.git.gitAuthors90d === 1 ? 'solo' : 'team';
+  }
+
+  /** No second human to review: advice that needs a reviewer does not apply. */
   get isSolo(): boolean {
-    return this.git.isGitRepo && this.git.gitAuthors90d <= 1;
+    return this.team === 'solo' || this.team === 'inactive';
   }
 
   /**
@@ -585,11 +604,13 @@ function detectStack(ctx: RepoContext): StackInfo {
 
   const pkg = ctx.packageJson;
   if (pkg) {
-    if (ctx.hasFile('tsconfig.json') || ctx.hasDependency('typescript')) {
-      languages.add('TypeScript');
-    } else {
-      languages.add('JavaScript');
-    }
+    // By what the files are, not only by the root manifest: a workspace keeps tsconfig and the
+    // typescript dependency in its packages.
+    const tsFiles = ctx.sourceFiles.filter((f) => /\.(ts|tsx|mts|cts)$/.test(f)).length;
+    const jsFiles = ctx.sourceFiles.filter((f) => /\.(js|jsx|mjs|cjs)$/.test(f)).length;
+    const isTs = ctx.hasFile('tsconfig.json') || ctx.hasDependency('typescript') || (tsFiles >= 5 && tsFiles >= jsFiles * 0.25);
+    if (isTs) languages.add('TypeScript');
+    if (!isTs || (jsFiles >= 20 && jsFiles >= tsFiles * 0.3)) languages.add('JavaScript');
 
     if (ctx.hasFile('bun.lock') || ctx.hasFile('bun.lockb') || pkg.packageManager?.startsWith('bun')) {
       packageManagers.add('bun');
@@ -821,6 +842,9 @@ function detectStack(ctx: RepoContext): StackInfo {
   };
 }
 
+const AUTOMATION_EMAIL = /\[bot\]|noreply@anthropic\.com|@cursor\.com$|^cursoragent@|copilot|devin-ai|github-actions|dependabot|renovate|^bot@|[-.]bot@|^action@github\.com$|^codex@|noreply@openai\.com/;
+const AUTOMATION_NAME = /^(claude|codex|cursor agent|copilot|devin|github-actions|dependabot|renovate|semantic-release)\b/;
+
 function detectGitStats(root: string): GitStats {
   try {
     execFileSync('git', ['rev-parse', '--is-inside-work-tree'], {
@@ -848,7 +872,7 @@ function detectGitStats(root: string): GitStats {
   try {
     const out = execFileSync(
       'git',
-      ['log', '--since=90 days ago', '--format=%ae', '--no-merges'],
+      ['log', '--since=90 days ago', '--format=%ae%x09%an', '--no-merges'],
       {
         cwd: root,
         encoding: 'utf8',
@@ -856,11 +880,13 @@ function detectGitStats(root: string): GitStats {
         timeout: 4000,
       },
     );
+    // People only: a coding agent or a bot that authors a commit is not a second reviewer.
     const authors = new Set(
       out
         .split('\n')
-        .map((s) => s.trim().toLowerCase())
-        .filter((s) => s.length > 0 && !s.includes('[bot]')),
+        .map((line) => line.trim().toLowerCase().split('\t'))
+        .filter(([email, name]) => Boolean(email) && !AUTOMATION_EMAIL.test(email!) && !AUTOMATION_NAME.test(name ?? ''))
+        .map(([email]) => email!),
     );
     gitAuthors90d = authors.size;
   } catch {

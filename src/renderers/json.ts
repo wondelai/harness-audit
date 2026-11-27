@@ -13,6 +13,8 @@ export function renderJson(report: AuditReport, options: RenderOptions = {}): st
     repoPath: report.repoPath,
     lang,
     overallScore: report.overallScore,
+    stationScore: report.stationScore,
+    criticalPenalty: report.criticalPenalty,
     rawLevel: report.rawLevel,
     level: report.level,
     levelName: t(levelMeta.shortName, lang),

@@ -158,7 +158,12 @@ export interface AuditReport {
   scan: ScanInfo;
   stack: StackInfo;
   git: GitStats;
+  /** The weighted station total minus the critical penalty. */
   overallScore: number;
+  /** The weighted station total on its own. */
+  stationScore: number;
+  /** Points taken off for critical findings (5 each, 15 at most) and the checks that caused it. */
+  criticalPenalty: { points: number; checks: string[] };
   rawLevel: AutonomyLevel;
   level: AutonomyLevel;
   levelCaps: LevelCap[];

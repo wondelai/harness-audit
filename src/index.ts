@@ -5,6 +5,7 @@ import { planInit } from './init.js';
 import {
   assignImpact,
   buildRecommendations,
+  criticalPenalty,
   computeOverallScore,
   evaluateLevel,
   nextLevelFor,
@@ -29,7 +30,9 @@ export function auditRepo(repoPath: string, options: AuditOptions = {}): AuditRe
 
   assignImpact(checks);
   const stations = STATIONS.map((s) => scoreStation(s.id, checks));
-  const overallScore = computeOverallScore(stations);
+  const stationScore = computeOverallScore(stations);
+  const penalty = criticalPenalty(checks);
+  const overallScore = Math.max(0, stationScore - penalty.points);
   const { rawLevel, level, caps } = evaluateLevel(overallScore, stations, checks);
   const nextLevel = nextLevelFor(level, overallScore, stations, checks);
   const topPriorities = selectTopPriorities(checks, 5, nextLevel);
@@ -55,6 +58,8 @@ export function auditRepo(repoPath: string, options: AuditOptions = {}): AuditRe
     stack: ctx.stack,
     git: ctx.git,
     overallScore,
+    stationScore,
+    criticalPenalty: { points: penalty.points, checks: penalty.checks },
     rawLevel,
     level,
     levelCaps: caps,

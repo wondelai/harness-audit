@@ -1,16 +1,14 @@
 import { docsUrl, LEVELS, STATION_MAP, t } from './i18n.js';
+import { selectTopPriorities, unblocksNextLevel } from './scoring.js';
 import type { AuditReport, Lang } from './types.js';
 
 export function generateFixPrompt(report: AuditReport, lang: Lang = report.lang): string {
-  // Highest gain first inside each group, so an agent that runs out of budget stops in the right place.
-  const actionable = report.checks
-    .filter((c) => c.status === 'fail' || c.status === 'warn')
-    .sort((a, b) => (b.impact ?? 0) - (a.impact ?? 0));
+  // The report's own order (critical, next-level gates, severity, points), so an agent that runs
+  // out of budget stops in the right place.
+  const next = report.nextLevel;
+  const actionable = selectTopPriorities(report.checks, Number.POSITIVE_INFINITY, next);
   const fails = actionable.filter((c) => c.status === 'fail');
   const warns = actionable.filter((c) => c.status === 'warn');
-  const next = report.nextLevel;
-  const gatesNext = (id: string, station: string): boolean =>
-    next?.blockers.some((b) => b.id === id || b.id.startsWith(`${station} (`)) ?? false;
   const levelMeta = LEVELS[report.level];
 
   const stackSummary = [
@@ -33,7 +31,7 @@ export function generateFixPrompt(report: AuditReport, lang: Lang = report.lang)
       .map((c, i) => {
         const stationName = t(STATION_MAP[c.station].name, lang);
         return [
-          `### ${i + 1}. \`${c.id}\` (${stationName} · ${c.status.toUpperCase()} · ${c.severity}${c.impact ? ` · +${c.impact} pts` : ''}${gatesNext(c.id, c.station) ? ` · gates Level ${next!.level}` : ''})`,
+          `### ${i + 1}. \`${c.id}\` (${stationName} · ${c.status.toUpperCase()} · ${c.severity}${c.impact ? ` · +${c.impact} pts` : ''}${next && unblocksNextLevel(c, next) ? ` · gates Level ${next.level}` : ''})`,
           `- **Issue:** ${t(c.title, lang)}`,
           `- **Observed evidence:** ${c.evidence.join(' ; ')}`,
           `- **Required fix:** ${t(c.fix, lang)}`,

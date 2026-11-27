@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { STATIONS } from '../src/i18n.js';
 import {
+  assignImpact,
   buildRecommendations,
   computeOverallScore,
+  criticalPenalty,
   evaluateLevel,
   nextLevelFor,
   rawLevelFromScore,
@@ -115,6 +117,56 @@ describe('scoring engine & level gating caps', () => {
     expect(next?.level).toBe(4);
     expect(next?.pointsMissing).toBe(0);
     expect(next?.blockers.map((b) => b.id)).toContain('harness (<60)');
+  });
+
+  it('caps at Level 3 without a permission policy even when hygiene checks carry the harness station', () => {
+    const checks: CheckResult[] = [
+      makeCheck('intent.instructions-file', 'intent', 'pass', 100),
+      makeCheck('harness.permissions-policy', 'harness', 'fail', 25),
+      makeCheck('harness.secret-hygiene', 'harness', 'pass', 75),
+      makeCheck('loop.single-command-verify', 'loop', 'pass', 100),
+      makeCheck('graph.worktree-isolation', 'graph', 'pass', 100),
+      makeCheck('verification.unit-tests', 'verification', 'pass', 100),
+      makeCheck('release.ci-pipeline', 'release', 'pass', 100),
+    ];
+    const stations = STATIONS.map((s) => scoreStation(s.id, checks));
+    expect(stations.find((s) => s.id === 'harness')?.score).toBe(75);
+    const overall = computeOverallScore(stations);
+    const { level, caps } = evaluateLevel(overall, stations, checks);
+    expect(level).toBe(3);
+    expect(caps.find((c) => c.cappedTo === 3)?.triggeredBy).toEqual(['harness.permissions-policy']);
+  });
+
+  it('caps at Level 2 when there is no project brief, whatever the rest scores', () => {
+    const checks: CheckResult[] = [
+      makeCheck('intent.instructions-file', 'intent', 'fail', 10),
+      makeCheck('intent.skills-and-specs', 'intent', 'pass', 90),
+      makeCheck('harness.permissions-policy', 'harness', 'pass', 100),
+      makeCheck('loop.single-command-verify', 'loop', 'pass', 100),
+      makeCheck('graph.worktree-isolation', 'graph', 'pass', 100),
+      makeCheck('verification.unit-tests', 'verification', 'pass', 100),
+      makeCheck('release.ci-pipeline', 'release', 'pass', 100),
+    ];
+    const stations = STATIONS.map((s) => scoreStation(s.id, checks));
+    const { rawLevel, level, caps } = evaluateLevel(computeOverallScore(stations), stations, checks);
+    expect(rawLevel).toBe(5);
+    expect(level).toBe(2);
+    expect(caps.some((c) => c.cappedTo === 2 && c.triggeredBy.includes('intent.instructions-file'))).toBe(true);
+  });
+
+  it('takes 5 points per critical finding, 15 at most, and gives them back in the impact', () => {
+    const critical = (id: string, station: StationId): CheckResult => ({ ...makeCheck(id, station, 'fail', 50), severity: 'critical' });
+    const two = [critical('a', 'intent'), critical('b', 'loop'), makeCheck('c', 'harness', 'fail', 50)];
+    expect(criticalPenalty(two)).toEqual({ points: 10, perCheck: 5, checks: ['a', 'b'] });
+
+    const five = ['a', 'b', 'c', 'd', 'e'].map((id) => critical(id, 'intent'));
+    expect(criticalPenalty(five).points).toBe(15);
+    expect(criticalPenalty(five).perCheck).toBe(3);
+
+    // One station with one critical failing check: its whole weight plus the penalty comes back.
+    const lone = [critical('intent.instructions-file', 'intent')];
+    assignImpact(lone);
+    expect(lone[0]!.impact).toBe(25);
   });
 
   it('caps a 95+ score at Level 4 when oracle protection is missing', () => {

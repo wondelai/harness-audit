@@ -1,3 +1,4 @@
+import { repoDocLinks } from '../brief.js';
 import type { RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
 
@@ -366,7 +367,11 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         evidence.push(`Generic filler detected: ${fillerHits.join(', ')}`);
       }
       if (bytes > 32 * 1024) {
-        evidence.push('Exceeds Codex default project_doc_max_bytes (32 KiB) — tail gets silently truncated');
+        evidence.push(
+          primaryFile === 'AGENTS.md'
+            ? 'Exceeds Codex default project_doc_max_bytes (32 KiB) — Codex silently drops the tail'
+            : `${(bytes / 1024).toFixed(0)} KiB is loaded into every Claude Code session before the first prompt`,
+        );
       }
 
       let status: CheckResult['status'] = 'pass';
@@ -406,14 +411,9 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
 
   // 4. intent.scoped-rules
   {
-    // Nested briefs load when an agent works in that directory. Copies shipped inside skill or
-    // plugin folders (.agents/, .claude/skills/…) are someone else's instructions, not scoping.
-    const nestedBriefs = ctx.findFiles((f) => /\/(AGENTS|CLAUDE)\.md$/.test(f) && !f.startsWith('.'));
-    // "Read before you touch": a root brief that sends agents to a doc per area scopes context too.
-    const rootBrief = `${ctx.readText('AGENTS.md') ?? ''}\n${ctx.readText('CLAUDE.md') ?? ''}`;
-    const routedDocs = [...new Set([...rootBrief.matchAll(/[`(]((?:[\w.@-]+\/)+[\w.@-]+\.mdx?)[`)]/g)].map((m) => m[1]!))].filter(
-      (p) => ctx.hasFile(p),
-    );
+    // Nested briefs load when an agent works in that directory; a root brief that sends agents to
+    // a doc per area ("Read before you touch") scopes context too.
+    const { nestedBriefs, routedDocs } = ctx.brief;
     const claudeRulesWithoutPaths: string[] = [];
     for (const rf of claudeRuleFiles) {
       const content = ctx.readText(rf) ?? '';
@@ -488,10 +488,20 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
       'docs/pull_request_template.md',
     ]) ?? ctx.findFiles((f) => /^\.github\/PULL_REQUEST_TEMPLATE\/.+\.md$/i.test(f))[0];
     const issueTemplates = ctx.findFiles((f) => /^\.github\/ISSUE_TEMPLATE\/.+\.(md|ya?ml)$/i.test(f));
-    const specDocs = ctx.findFiles((f) =>
-      /^(DESIGN|PRODUCT|CODING_STANDARDS|TESTING|ARCHITECTURE)\.md$/i.test(f) ||
-      /^docs\/(adr|adrs|specs|rfcs|architecture)\//i.test(f),
-    );
+    const SPEC_NAME = /(architecture|design|spec|standards|testing|contract|security|conventions|adr|rfc|decision)/i;
+    const specDocs = [
+      ...new Set([
+        ...ctx.findFiles(
+          (f) =>
+            /^(DESIGN|PRODUCT|CODING_STANDARDS|TESTING|ARCHITECTURE|CONTRIBUTING|SECURITY|CONVENTIONS)\.md$/i.test(f) ||
+            /^docs\/(adr|adrs|specs?|rfcs?|architecture|decisions)\//i.test(f) ||
+            (/^docs\/[^/]+\.mdx?$/i.test(f) && SPEC_NAME.test(f)),
+        ),
+        // Docs the brief or the README sends readers to are the repository's standing specs.
+        ...ctx.brief.routedDocs.filter((p) => SPEC_NAME.test(p)),
+        ...repoDocLinks(ctx.readText('README.md') ?? '', (p) => ctx.hasFile(p)).filter((p) => SPEC_NAME.test(p)),
+      ]),
+    ];
 
     const evidence: string[] = [];
     if (skillFiles.length > 0) evidence.push(`Reusable skills: ${skillFiles.length} (${skillFiles.slice(0, 3).join(', ')})`);
@@ -505,6 +515,20 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
       (specDocs.length > 0 ? 1 : 0);
 
     const status: CheckResult['status'] = categoriesHit >= 2 ? 'pass' : categoriesHit === 1 ? 'warn' : 'fail';
+    // Name only what this repository lacks.
+    const missingKinds = { en: [] as string[], pl: [] as string[] };
+    if (skillFiles.length === 0) {
+      missingKinds.en.push('a reusable skill for a procedure you repeat (`.claude/skills/<name>/SKILL.md` or `.agents/skills/`)');
+      missingKinds.pl.push('skilla dla powtarzanej procedury (`.claude/skills/<nazwa>/SKILL.md` lub `.agents/skills/`)');
+    }
+    if (!prTemplate && issueTemplates.length === 0) {
+      missingKinds.en.push('a PR or issue template with acceptance criteria');
+      missingKinds.pl.push('szablonu PR lub zgłoszenia z kryteriami akceptacji');
+    }
+    if (specDocs.length === 0) {
+      missingKinds.en.push('a standards, testing or architecture doc agents can be pointed at');
+      missingKinds.pl.push('dokumentu standardów, testów lub architektury, do którego można odesłać agenta');
+    }
     if (evidence.length === 0) {
       evidence.push('No project skills, spec/ADR/standards docs, or PR/issue templates found');
     }
@@ -525,8 +549,8 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Wejście powyżej Poziomu 2 wymaga wielokrotnego użytku procedur (skilli) i trwałych specyfikacji zamiast ciągłego tłumaczenia wymagań na czacie.',
       },
       fix: {
-        en: 'Commit a standards or testing doc (e.g., `TESTING.md` or `CODING_STANDARDS.md`), add a PR/issue template with acceptance criteria, and extract recurring procedures into `.claude/skills/` or `.agents/skills/`.',
-        pl: 'Dodaj do repozytorium dokument standardów lub testów (np. `TESTING.md` lub `CODING_STANDARDS.md`), szablon PR/zgłoszenia z kryteriami akceptacji oraz wyodrębnij powtarzalne procedury do `.claude/skills/` lub `.agents/skills/`.',
+        en: missingKinds.en.length > 0 ? `Still missing: ${missingKinds.en.join('; ')}.` : 'Keep skills, templates and standards docs current as the workflow changes.',
+        pl: missingKinds.pl.length > 0 ? `Wciąż brakuje: ${missingKinds.pl.join('; ')}.` : 'Aktualizuj skille, szablony i dokumenty standardów wraz ze zmianami procesu.',
       },
       docsPath: 'method/',
     });

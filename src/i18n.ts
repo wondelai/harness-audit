@@ -1,6 +1,8 @@
+import { createRequire } from 'node:module';
 import type { AutonomyLevel, Lang, LocalizedText, StationId } from './types.js';
 
-export const TOOL_VERSION = '0.2.0';
+/** The version in package.json, which sits one directory above both `src/` and the built `dist/`. */
+export const TOOL_VERSION: string = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
 export const BASE_DOCS_URL = 'https://developertoolkit.ai';
 
 export function docsUrl(lang: Lang, docsPath: string): string {
@@ -239,7 +241,13 @@ export const UI = {
   overallScore: { en: 'Overall Score', pl: 'Wynik ogólny' },
   autonomyLevel: { en: 'Autonomy Level', pl: 'Poziom autonomii' },
   rawScoreLevel: { en: 'Uncapped level', pl: 'Poziom przed ograniczeniami' },
-  levelCapsHeading: { en: 'Level Gating Caps Applied', pl: 'Zastosowane ograniczenia poziomu' },
+  penaltyLine: {
+    en: '= {stations} from the stations − {points} for critical findings ({checks})',
+    pl: '= {stations} ze stacji − {points} za ustalenia krytyczne ({checks})',
+  },
+  levelCapsHeading: { en: 'Level capped', pl: 'Poziom ograniczony' },
+  capNeeds: { en: 'needs', pl: 'wymaga' },
+  liftCap: { en: 'lift the cap above first', pl: 'najpierw zdejmij powyższe ograniczenie' },
   stackHeading: { en: 'Detected Stack & Context', pl: 'Wykryty stos i kontekst' },
   stationsHeading: { en: 'Six Factory Stations', pl: 'Sześć stacji fabryki' },
   topPrioritiesHeading: { en: 'Top Fixes', pl: 'Najważniejsze poprawki' },
@@ -250,7 +258,6 @@ export const UI = {
   nextLevelHeading: { en: 'Next level', pl: 'Kolejny poziom' },
   scoreNeeded: { en: 'needs', pl: 'wymaga' },
   pointsToGo: { en: 'to go', pl: 'do zdobycia' },
-  plusGates: { en: 'and these gates:', pl: 'oraz tych bramek:' },
   gateLabel: { en: 'Gate', pl: 'Bramka' },
   unblocks: { en: 'unblocks', pl: 'odblokowuje' },
   pts: { en: 'pts', pl: 'pkt' },

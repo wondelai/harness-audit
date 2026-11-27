@@ -1,4 +1,6 @@
 import { docsUrl, LEVELS, STATION_MAP, t, UI } from '../i18n.js';
+import { unblocksNextLevel } from '../scoring.js';
+import { describeGate, uncappedGates } from './gates.js';
 import type { AuditReport, CheckStatus, RenderOptions } from '../types.js';
 
 interface Colors {
@@ -60,11 +62,6 @@ function statusBadge(status: CheckStatus, lang: 'en' | 'pl', c: Colors): string 
     case 'info':
       return `${c.cyan}[${t(UI.info, lang)}]${c.reset}`;
   }
-}
-
-/** "Capped at Level 3: unattended runs require …" → "unattended runs require …". */
-export function requirementText(reason: string): string {
-  return reason.replace(/^[^:]{0,40}:\s*/, '');
 }
 
 function wrap(text: string, width: number, indent: string): string[] {
@@ -133,21 +130,28 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
   lines.push(
     `  ${c.bold}${t(UI.overallScore, lang)}:${c.reset}   ${scoreColor}${c.bold}${report.overallScore}/100${c.reset}  ${progressBar(report.overallScore, 24)}`,
   );
+  if (report.criticalPenalty.points > 0) {
+    lines.push(
+      `  ${c.dim}${t(UI.penaltyLine, lang)
+        .replace('{stations}', String(report.stationScore))
+        .replace('{points}', String(report.criticalPenalty.points))
+        .replace('{checks}', report.criticalPenalty.checks.join(', '))}${c.reset}`,
+    );
+  }
   lines.push(
     `  ${c.bold}${t(UI.autonomyLevel, lang)}:${c.reset} ${c.orange}${c.bold}Level ${report.level} — ${t(levelMeta.shortName, lang)}${c.reset} ${c.dim}(${t(levelMeta.shapiroName, lang)})${c.reset}`,
   );
-  if (report.level !== report.rawLevel) {
-    lines.push(
-      `  ${c.dim}${t(UI.rawScoreLevel, lang)}: Level ${report.rawLevel} -> capped to Level ${report.level}${c.reset}`,
-    );
-  }
   lines.push(...wrap(t(levelMeta.summary, lang), WIDTH, '  ').map((l) => `${c.dim}${l}${c.reset}`));
 
-  if (report.levelCaps.length > 0) {
+  // Why the level sits below what the score alone would give: only the unmet requirements, once.
+  if (report.level !== report.rawLevel) {
     lines.push('');
-    lines.push(`${c.yellow}${c.bold}! ${t(UI.levelCapsHeading, lang)}${c.reset}`);
-    for (const cap of report.levelCaps) {
-      lines.push(...wrap(`• ${t(cap.reason, lang)} [${cap.triggeredBy.join(', ')}]`, WIDTH, '  '));
+    lines.push(
+      `${c.yellow}${c.bold}! ${t(UI.levelCapsHeading, lang)}: Level ${report.rawLevel} → Level ${report.level}${c.reset}`,
+    );
+    for (const cap of report.levelCaps.filter((cp) => cp.cappedTo < report.rawLevel)) {
+      const needs = cap.triggeredBy.map((id) => describeGate(id, report, lang)).join(' · ');
+      lines.push(...wrap(`• Level ${cap.cappedTo + 1}+ ${t(UI.capNeeds, lang)}: ${needs}`, WIDTH, '  '));
     }
   }
 
@@ -160,16 +164,13 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
       next.pointsMissing > 0
         ? `${next.scoreNeeded}/100 (+${next.pointsMissing} ${t(UI.pointsToGo, lang)})`
         : `${next.scoreNeeded}/100 ✓`;
+    const gates = uncappedGates(report);
+    const cappedHere = next.blockers.length > gates.length;
     lines.push(
-      `${c.bold}${t(UI.nextLevelHeading, lang)}: Level ${next.level} — ${t(nextMeta.shortName, lang)}${c.reset} · ${t(UI.scoreNeeded, lang)} ${scorePart}${next.blockers.length > 0 ? ` · ${t(UI.plusGates, lang)}` : ''}`,
+      `${c.bold}${t(UI.nextLevelHeading, lang)}: Level ${next.level} — ${t(nextMeta.shortName, lang)}${c.reset} · ${t(UI.scoreNeeded, lang)} ${scorePart}${cappedHere ? ` · ${t(UI.liftCap, lang)}` : ''}`,
     );
-    const byReason = new Map<string, string[]>();
-    for (const b of next.blockers) {
-      const key = requirementText(t(b.requirement, lang));
-      byReason.set(key, [...(byReason.get(key) ?? []), b.id]);
-    }
-    for (const [reason, ids] of byReason) {
-      lines.push(...wrap(`• ${t(UI.gateLabel, lang)}: ${ids.join(', ')} — ${reason}`, WIDTH, '  '));
+    for (const id of gates) {
+      lines.push(`  • ${describeGate(id, report, lang)}`);
     }
   }
 
@@ -191,15 +192,13 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
   // Top priorities: full evidence and fix, once
   const priorityRank = new Map(report.topPriorities.map((p, i) => [p.id, i + 1]));
   const gain = (impact: number | undefined): string => (impact ? `+${impact % 1 === 0 ? impact : impact.toFixed(1)} ${t(UI.pts, lang)}` : '');
-  const gates = (id: string, station: string): boolean =>
-    next?.blockers.some((b) => b.id === id || b.id.startsWith(`${station} (`)) ?? false;
 
   if (report.topPriorities.length > 0) {
     lines.push('');
     lines.push(`${c.bold}${t(UI.topPrioritiesHeading, lang)}${c.reset} ${c.dim}${t(UI.topPrioritiesOrder, lang)}${c.reset}`);
     for (let i = 0; i < report.topPriorities.length; i++) {
       const check = report.topPriorities[i]!;
-      const tags = [gain(check.impact), next && gates(check.id, check.station) ? `${t(UI.unblocks, lang)} Level ${next.level}` : ''].filter(Boolean);
+      const tags = [gain(check.impact), next && unblocksNextLevel(check, next) ? `${t(UI.unblocks, lang)} Level ${next.level}` : ''].filter(Boolean);
       lines.push(
         `  ${i + 1}. ${statusBadge(check.status, lang, c)} ${c.bold}${check.id}${c.reset} — ${t(check.title, lang)}${tags.length > 0 ? `  ${c.cyan}${tags.join(' · ')}${c.reset}` : ''}`,
       );

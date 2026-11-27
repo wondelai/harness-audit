@@ -2,8 +2,8 @@
 
 CLI and library that audits a repository's AI-coding-agent harness: 30 deterministic checks across six
 stations, a 0–100 score and an Autonomy Level 0–5. TypeScript, Node >= 20, zero runtime dependencies.
-Published as `@wondelai/harness-audit`; `packages/harness-audit-alias` is the unscoped `harness-audit`
-wrapper that depends on it.
+Published under two names from one build, `@wondelai/harness-audit` and `harness-audit`, always at the
+same version.
 
 ## Commands
 
@@ -41,11 +41,26 @@ Try a change on a real repository: `node dist/cli.js /path/to/repo` (add `--verb
 - `src/checks/<station>.ts`: one file per station. A check returns status, evidence, why and fix.
 - `src/scoring.ts`: level thresholds, gating caps, impact points, priority order. The "Autonomy Ladder"
   table in `README.md` restates the caps, so change both together.
-- `src/i18n.ts`: `TOOL_VERSION` must equal `version` in `package.json` (a test checks it).
+- `src/brief.ts`: what the root AGENTS.md / CLAUDE.md say (routed docs, boundary rules, module map),
+  read once for every check that asks.
+- `src/i18n.ts`: every user-facing string. `TOOL_VERSION` is read from `package.json`, the one place
+  the version lives.
 - `tests/accuracy.test.ts`: one test per false finding that was fixed. Tests build real temporary
   repositories with `tests/fixtures.ts`; the scanner is never mocked.
 
 ## Release
 
-Publishing to npm is the owner's call: never run `npm publish`. A release bumps `package.json`,
-`TOOL_VERSION` and `packages/harness-audit-alias/package.json` (version and dependency range) together.
+The version lives in `package.json` only. A release is a tag:
+
+```bash
+npm version minor            # or patch: bumps package.json, commits, tags vX.Y.Z
+git push --follow-tags       # .github/workflows/release.yml does the rest
+```
+
+The workflow runs the gate, publishes the build under both names with `scripts/publish.mjs` (npm
+trusted publishing, no token), waits until `npx harness-audit@X --version` and
+`npx @wondelai/harness-audit@X --version` both print `X`, and creates the GitHub release.
+`npm run release:dry-run` shows what would be uploaded without uploading.
+
+Tagging and publishing are the owner's call: an agent never pushes a `v*` tag and never runs
+`npm publish` or `npm run release:publish`.

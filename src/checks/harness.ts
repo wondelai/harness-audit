@@ -1,3 +1,4 @@
+import { localDeployCommands, minimalVerifySet } from '../capabilities.js';
 import type { RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
 
@@ -64,7 +65,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     const evidence: string[] = [];
     const criticalErrors: string[] = [];
     let hasPolicy = false;
-    const verifyAllows = ctx.verify.commands.slice(0, 3).map((c) => `Bash(${c.command})`);
+    const verifyAllows = minimalVerifySet(ctx.verify).slice(0, 3).map((c) => `Bash(${c}:*)`);
     const allowExample = verifyAllows.length > 0 ? verifyAllows.map((a) => `\`${a}\``).join(', ') : '`Bash(<your test command>)`';
 
     if (claudeSettings) {
@@ -116,6 +117,12 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       criticalErrors.push('.claude/settings.json contains --dangerously-skip-permissions');
     }
 
+    // settings.local.json is one person's machine: committed, it becomes everyone's silent policy.
+    const committedLocal = ctx.isTracked('.claude/settings.local.json') === true;
+    const denyCount = claudeSettings?.permissions?.deny?.length ?? 0;
+    const deployDenies = localDeployCommands(ctx).map((c) => `\`Bash(${c}:*)\``);
+    const denyExample = deployDenies.length > 0 ? deployDenies.slice(0, 3).join(', ') : '`Bash(<your deploy command>:*)`';
+
     let status: CheckResult['status'] = 'warn';
     if (criticalErrors.length > 0) {
       status = 'fail';
@@ -143,6 +150,37 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       }
     }
 
+    if (committedLocal) {
+      evidence.push('.claude/settings.local.json is committed: personal settings are now shared; move the rules everyone needs into settings.json and gitignore the local file');
+      if (status === 'pass') status = 'warn';
+    }
+    // The fix follows the evidence: never "create" a file that exists, never ask for rules that are there.
+    const permissionFix =
+      criticalErrors.length > 0
+        ? {
+            en: 'Replace retired Codex `approval_policy = "untrusted"` with `"on-request"` (or `"never"` only in isolated CI) and remove any `bypassPermissions` defaults from repo settings.',
+            pl: 'Zastąp wycofane w Codex `approval_policy = "untrusted"` wartością `"on-request"` (lub `"never"` tylko w izolowanym CI) i usuń domyślne `bypassPermissions` z konfiguracji repozytorium.',
+          }
+        : hasPolicy && denyCount === 0 && status !== 'pass'
+          ? {
+              en: `The allow list is there; add \`permissions.deny\` for what must never run from an agent session: ${denyExample}, plus force pushes.${committedLocal ? ' Gitignore `.claude/settings.local.json`.' : ''}`,
+              pl: `Lista allow już jest; dodaj \`permissions.deny\` dla komend, których sesja agenta nie może uruchomić: ${denyExample} oraz force push.${committedLocal ? ' Dodaj `.claude/settings.local.json` do .gitignore.' : ''}`,
+            }
+          : claudeSettings && !hasPolicy
+            ? {
+                en: `Add a \`permissions\` block to the existing \`.claude/settings.json\`: allow the verify commands (${allowExample}) and deny ${denyExample}.`,
+                pl: `Dodaj blok \`permissions\` do istniejącego \`.claude/settings.json\`: zezwól na komendy weryfikacji (${allowExample}) i zablokuj ${denyExample}.`,
+              }
+            : committedLocal
+              ? {
+                  en: 'Move the shared allow/deny rules from `.claude/settings.local.json` into `.claude/settings.json` and gitignore the local file.',
+                  pl: 'Przenieś wspólne reguły allow/deny z `.claude/settings.local.json` do `.claude/settings.json` i dodaj plik lokalny do .gitignore.',
+                }
+              : {
+                  en: `Commit \`.claude/settings.json\` with \`permissions.allow\` for the verify commands (${allowExample}) and \`permissions.deny\` for ${denyExample}; for Codex, \`.codex/config.toml\` with \`approval_policy = "on-request"\` and \`sandbox_mode = "workspace-write"\`. \`npx harness-audit init\` writes the Claude Code file from these commands.`,
+                  pl: `Dodaj \`.claude/settings.json\` z \`permissions.allow\` dla komend weryfikacji (${allowExample}) i \`permissions.deny\` dla ${denyExample}; dla Codexa \`.codex/config.toml\` z \`approval_policy = "on-request"\` oraz \`sandbox_mode = "workspace-write"\`. \`npx harness-audit init\` utworzy plik dla Claude Code z tych komend.`,
+                };
+
     results.push({
       id: 'harness.permissions-policy',
       station: 'harness',
@@ -158,14 +196,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         en: 'An explicit allow/deny policy lets agents run routine verify commands without constant prompts while blocking destructive or production commands.',
         pl: 'Jawna polityka allow/deny pozwala agentom uruchamiać rutynowe komendy weryfikacji bez ciągłych pytań, blokując jednocześnie komendy produkcyjne lub destrukcyjne.',
       },
-      fix: {
-        en: criticalErrors.length > 0
-          ? 'Replace retired Codex `approval_policy = "untrusted"` with `"on-request"` (or `"never"` only in isolated CI) and remove any `bypassPermissions` defaults from repo settings.'
-          : `Add \`permissions\` to a committed \`.claude/settings.json\`: allow the verify commands (${allowExample}) and deny deploy/production commands; for Codex add \`.codex/config.toml\` with \`approval_policy = "on-request"\` and \`sandbox_mode = "workspace-write"\`. \`npx harness-audit init\` writes a starter settings.json when none exists.`,
-        pl: criticalErrors.length > 0
-          ? 'Zastąp wycofane w Codex `approval_policy = "untrusted"` wartością `"on-request"` (lub `"never"` tylko w izolowanym CI) i usuń domyślne `bypassPermissions` z konfiguracji repozytorium.'
-          : `Dodaj \`permissions\` do wersjonowanego \`.claude/settings.json\`: zezwól na komendy weryfikacji (${allowExample}) i zablokuj komendy deploy/produkcyjne; dla Codexa dodaj \`.codex/config.toml\` z \`approval_policy = "on-request"\` oraz \`sandbox_mode = "workspace-write"\`. \`npx harness-audit init\` utworzy startowy settings.json, jeśli go nie ma.`,
-      },
+      fix: permissionFix,
       docsPath: 'workflows/harness/permissions-and-sandboxing/',
       meta: {
         hasCriticalPermissionError: criticalErrors.length > 0,
@@ -540,25 +571,37 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
 
   // 5. harness.sandbox-readiness
   {
-    const sandboxArtifacts: string[] = [];
-    if (ctx.findFiles((f) => /^\.devcontainer\//.test(f)).length > 0) sandboxArtifacts.push('.devcontainer/');
-    if (ctx.hasAnyFile(['Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml'])) {
-      sandboxArtifacts.push('Docker / Compose');
+    const brief = ctx.brief;
+    const sandboxes: string[] = [];
+    const notes: string[] = [];
+    if (ctx.findFiles((f) => /^\.devcontainer\//.test(f)).length > 0) sandboxes.push('.devcontainer/');
+    const dockerFile = ctx.hasAnyFile(['Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']);
+    if (dockerFile) {
+      // A Dockerfile is usually the product's image. It is an agent sandbox only when the brief says agents run in it.
+      if (/\b(docker|container|devcontainer|compose)\b/i.test(brief.text)) sandboxes.push(`${dockerFile} (the brief runs work in a container)`);
+      else notes.push(`${dockerFile} exists but the brief does not use it as a place to run agents`);
     }
-    if (ctx.hasAnyFile(['flake.nix', 'shell.nix'])) sandboxArtifacts.push('Nix shell');
-    if (claudeSettings?.sandbox) sandboxArtifacts.push('.claude/settings.json sandbox');
-    if (codexToml && /^\s*sandbox_mode\s*=/m.test(codexToml)) sandboxArtifacts.push('.codex/config.toml sandbox_mode');
+    if (ctx.hasAnyFile(['flake.nix', 'shell.nix'])) sandboxes.push('Nix shell');
+    if (claudeSettings?.sandbox) sandboxes.push('.claude/settings.json sandbox');
+    if (codexToml && /^\s*sandbox_mode\s*=/m.test(codexToml)) sandboxes.push('.codex/config.toml sandbox_mode');
 
-    const brief = `${ctx.readText('AGENTS.md') ?? ''}\n${ctx.readText('CLAUDE.md') ?? ''}`;
-    const hasProdBoundaryNotes =
-      /\b(production|prod|remote|deploy|shared)\b/i.test(brief) &&
-      /\b(never|do not|don't|forbidden|shared|deny)\b/i.test(brief);
-    if (hasProdBoundaryNotes) {
-      sandboxArtifacts.push('Production / shared-resource boundary documented in root brief');
-    }
+    const hasBoundary = brief.boundaryRules.length > 0;
+    const evidence: string[] = [];
+    if (sandboxes.length > 0) evidence.push(`Sandbox: ${sandboxes.join(', ')}`);
+    else evidence.push('No container or tool sandbox configured (.devcontainer/, Claude Code `sandbox`, Codex `sandbox_mode`)');
+    if (hasBoundary) evidence.push(`${brief.primary} states a boundary: "${brief.boundaryRules[0]}"${brief.boundaryRules.length > 1 ? ` (+${brief.boundaryRules.length - 1} more)` : ''}`);
+    else evidence.push(brief.files.length > 0 ? `${brief.primary} names no production or shared resource that agents must not touch` : 'No brief, so no written boundary around production or shared resources');
+    evidence.push(...notes);
 
-    const status: CheckResult['status'] =
-      sandboxArtifacts.length >= 2 ? 'pass' : sandboxArtifacts.length === 1 ? 'warn' : 'fail';
+    const status: CheckResult['status'] = sandboxes.length > 0 && hasBoundary ? 'pass' : sandboxes.length > 0 || hasBoundary ? 'warn' : 'fail';
+    const needSandbox = {
+      en: 'Give agents an OS-level boundary: enable the tool sandbox (`"sandbox": { "enabled": true }` in `.claude/settings.json`, or `sandbox_mode = "workspace-write"` in `.codex/config.toml`) or commit a `.devcontainer/`.',
+      pl: 'Daj agentom granicę na poziomie systemu: włącz piaskownicę narzędzia (`"sandbox": { "enabled": true }` w `.claude/settings.json` lub `sandbox_mode = "workspace-write"` w `.codex/config.toml`) albo dodaj `.devcontainer/`.',
+    };
+    const needBoundary = {
+      en: `Write in ${brief.primary} which production and shared resources an agent must never touch (remote databases, deploys, live webhooks, secrets).`,
+      pl: `Napisz w ${brief.primary}, których zasobów produkcyjnych i współdzielonych agent nie może dotykać (zdalne bazy, deploy, żywe webhooki, sekrety).`,
+    };
 
     results.push({
       id: 'harness.sandbox-readiness',
@@ -570,17 +613,14 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         en: 'Sandbox & production boundary readiness',
         pl: 'Gotowość piaskownicy i granice środowiska produkcyjnego',
       },
-      evidence:
-        sandboxArtifacts.length > 0
-          ? sandboxArtifacts
-          : ['No devcontainer/Docker/Nix sandbox config, tool sandbox settings, or production boundary rules found'],
+      evidence,
       why: {
         en: 'Higher-autonomy runs need an OS/container boundary plus clear written boundaries around shared cloud resources (prod DBs, deploy targets, live webhooks).',
         pl: 'Uruchomienia o wyższej autonomii wymagają izolacji kontenerowej/OS oraz jasnych granic chroniących współdzielone zasoby chmurowe (baza produkcyjna, deploy, webhooki).',
       },
       fix: {
-        en: 'Add sandbox configuration (`.devcontainer/`, `Dockerfile`, `.claude/settings.json` `sandbox`, or `.codex/config.toml` `sandbox_mode`) and document shared production resources agents must never mutate.',
-        pl: 'Dodaj konfigurację piaskownicy (`.devcontainer/`, `Dockerfile`, `sandbox` w `.claude/settings.json` lub `sandbox_mode` w `.codex/config.toml`) i opisz w `AGENTS.md` zasoby produkcyjne, których agentom nie wolno dotykać.',
+        en: [sandboxes.length === 0 ? needSandbox.en : '', !hasBoundary ? needBoundary.en : ''].filter(Boolean).join(' ') || 'Keep the sandbox setting and the boundary rules in step with new environments.',
+        pl: [sandboxes.length === 0 ? needSandbox.pl : '', !hasBoundary ? needBoundary.pl : ''].filter(Boolean).join(' ') || 'Aktualizuj ustawienia piaskownicy i zasady granic wraz z nowymi środowiskami.',
       },
       docsPath: 'workflows/harness/permissions-and-sandboxing/',
     });

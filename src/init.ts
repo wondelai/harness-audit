@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { scriptRunner } from './capabilities.js';
+import { localDeployCommands, minimalVerifySet } from './capabilities.js';
 import { RepoContext } from './fs-scanner.js';
 import type { InitAction, InitOptions, InitResult, SupportedTool } from './types.js';
 
@@ -23,26 +23,10 @@ const INSTALL_COMMAND: Record<string, string> = {
   mix: 'mix deps.get',
 };
 
-/**
- * The fewest detected commands that together cover typecheck, lint, test and build. Only commands
- * the repository really has: a brief that quotes a script which does not exist teaches agents to
- * distrust the brief.
- */
-function verifyCommandsFor(ctx: RepoContext): string[] {
-  const { commands, unified } = ctx.verify;
-  const chosen = unified ? [unified] : [];
-  for (const kind of ['typecheck', 'lint', 'test', 'build'] as const) {
-    if (chosen.some((c) => c.kinds.includes(kind))) continue;
-    const next = commands.find((c) => c.kinds.includes(kind));
-    if (next) chosen.push(next);
-  }
-  return chosen.map((c) => c.command);
-}
-
 function buildAgentsMd(ctx: RepoContext): string {
   const stack = ctx.stack;
   const install = stack.packageManagers.map((pm) => INSTALL_COMMAND[pm]).find(Boolean);
-  const verify = verifyCommandsFor(ctx);
+  const verify = minimalVerifySet(ctx.verify);
   const stackLine =
     [...stack.languages, ...stack.frameworks].join(' · ') || 'TODO: name the stack';
   const commandLines = [
@@ -85,17 +69,20 @@ Do not copy stale server lists from blog posts. Discover verified official serve
  * that reach production or rewrite history are denied.
  */
 function buildClaudeSettings(ctx: RepoContext): string {
-  const allow = verifyCommandsFor(ctx).map((cmd) => `Bash(${cmd}:*)`);
+  const allow = minimalVerifySet(ctx.verify).map((cmd) => `Bash(${cmd}:*)`);
   const deny: string[] = [];
-  const scripts = Object.keys(ctx.packageJson?.scripts ?? {});
-  const run = scriptRunner(ctx);
-  for (const name of scripts.filter((k) => /^(deploy|publish|release)([:._-].*)?$/.test(k)).slice(0, 4)) {
-    deny.push(`Bash(${run(name)}:*)`);
+  for (const command of localDeployCommands(ctx)) {
+    deny.push(`Bash(${command}:*)`);
+    // The platform CLI is reachable without the npx prefix and through bunx as well.
+    const bare = /^npx (.+)$/.exec(command)?.[1];
+    if (bare) deny.push(`Bash(${bare}:*)`, `Bash(bunx ${bare}:*)`);
   }
-  if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json'])) {
-    deny.push('Bash(wrangler deploy:*)', 'Bash(npx wrangler deploy:*)', 'Bash(bunx wrangler deploy:*)');
-  }
-  deny.push('Bash(git push --force:*)', 'Bash(git push -f:*)', 'Read(./.env)', 'Read(./.env.*)');
+  deny.push('Bash(git push --force:*)', 'Bash(git push -f:*)');
+  // The local secret files of this stack, so an agent cannot read them into its context.
+  const secretFiles = ['.env', '.env.*'];
+  if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json'])) secretFiles.push('.dev.vars');
+  if (ctx.stack.frameworks.includes('Android')) secretFiles.push('local.properties', 'secrets.properties');
+  for (const f of secretFiles) deny.push(`Read(./${f})`);
 
   return `${JSON.stringify(
     {
@@ -112,13 +99,22 @@ function buildClaudeMd(): string {
 `;
 }
 
-function buildClaudeTestingRule(): string {
+/** Where this stack keeps its tests, as globs for a path-scoped rule. */
+function testGlobs(ctx: RepoContext): string[] {
+  const langs = ctx.stack.languages;
+  if (langs.includes('Swift')) return ['Tests/**', '**/*Tests.swift', '**/*UITests/**'];
+  if (langs.includes('Kotlin') || langs.includes('Java')) return ['**/src/test/**', '**/src/androidTest/**'];
+  if (langs.includes('Go')) return ['**/*_test.go'];
+  if (langs.includes('Python') && !ctx.packageJson) return ['tests/**', '**/test_*.py', '**/*_test.py'];
+  if (langs.includes('Rust')) return ['tests/**', 'src/**/tests.rs'];
+  if (langs.includes('Dart')) return ['test/**', 'integration_test/**'];
+  return ['**/*.test.*', '**/*.spec.*', 'tests/**', '__tests__/**'];
+}
+
+function buildClaudeTestingRule(ctx: RepoContext): string {
   return `---
 paths:
-  - "**/*.test.*"
-  - "**/*.spec.*"
-  - "tests/**"
-  - "__tests__/**"
+${testGlobs(ctx).map((g) => `  - "${g}"`).join('\n')}
 ---
 
 # Testing Rules
@@ -129,10 +125,10 @@ paths:
 `;
 }
 
-function buildCursorTestingRule(): string {
+function buildCursorTestingRule(ctx: RepoContext): string {
   return `---
 description: Testing discipline and oracle hygiene for automated test suites
-globs: "**/*.test.*,**/*.spec.*,tests/**,__tests__/**"
+globs: "${testGlobs(ctx).join(',')}"
 alwaysApply: false
 ---
 
@@ -144,19 +140,20 @@ alwaysApply: false
 `;
 }
 
-function buildPrTemplate(): string {
+function buildPrTemplate(ctx: RepoContext): string {
+  const commands = minimalVerifySet(ctx.verify);
+  const rows = commands.length > 0 ? commands.map((c) => `| \`${c}\` | |`) : ['| `<the command that runs your tests and static checks>` | |'];
   return `## Summary
 
 - What changed and why:
 
 ## Verification Evidence
 
-| Check | Command | Result |
-| --- | --- | --- |
-| Typecheck | \`...\` | PASS / N/A |
-| Lint | \`...\` | PASS / N/A |
-| Tests | \`...\` | PASS |
-| Build | \`...\` | PASS / N/A |
+Paste the result of each command you ran (exit code and the last lines of output).
+
+| Command | Result |
+| --- | --- |
+${rows.join('\n')}
 
 ## Risk & Escalation Check
 
@@ -167,23 +164,33 @@ function buildPrTemplate(): string {
 }
 
 /**
+ * The tools to scaffold for: what was asked for, else the tools the repository already uses, else
+ * all of them. A repository that has never seen Cursor is not handed `.cursor/rules`.
+ */
+function toolsFor(ctx: RepoContext, options: InitOptions): SupportedTool[] {
+  if (options.tools && options.tools.length > 0) return options.tools;
+  const detected = ctx.stack.detectedTools;
+  return detected.length > 0 ? detected : DEFAULT_TOOLS;
+}
+
+/**
  * The files `init` would write for this repository, without writing them. An existing file is
  * always `skip` unless `force` is set.
  */
 export function planInit(ctx: RepoContext, options: InitOptions = {}): InitAction[] {
   const force = Boolean(options.force);
-  const tools = options.tools && options.tools.length > 0 ? options.tools : DEFAULT_TOOLS;
+  const tools = toolsFor(ctx, options);
 
   const candidates: Array<{ path: string; content: string }> = [{ path: 'AGENTS.md', content: buildAgentsMd(ctx) }];
 
   if (tools.includes('claude-code')) {
     candidates.push({ path: 'CLAUDE.md', content: buildClaudeMd() });
-    candidates.push({ path: '.claude/rules/testing.md', content: buildClaudeTestingRule() });
+    candidates.push({ path: '.claude/rules/testing.md', content: buildClaudeTestingRule(ctx) });
     candidates.push({ path: '.claude/settings.json', content: buildClaudeSettings(ctx) });
   }
 
   if (tools.includes('cursor')) {
-    candidates.push({ path: '.cursor/rules/testing.mdc', content: buildCursorTestingRule() });
+    candidates.push({ path: '.cursor/rules/testing.mdc', content: buildCursorTestingRule(ctx) });
   }
 
   if (
@@ -193,7 +200,7 @@ export function planInit(ctx: RepoContext, options: InitOptions = {}): InitActio
       'docs/pull_request_template.md',
     ])
   ) {
-    candidates.push({ path: '.github/pull_request_template.md', content: buildPrTemplate() });
+    candidates.push({ path: '.github/pull_request_template.md', content: buildPrTemplate(ctx) });
   }
 
   return candidates.map((item) => {
@@ -210,7 +217,7 @@ export function planInit(ctx: RepoContext, options: InitOptions = {}): InitActio
 export function initHarness(repoPath: string, options: InitOptions = {}): InitResult {
   const ctx = new RepoContext(repoPath);
   const dryRun = Boolean(options.dryRun);
-  const tools = options.tools && options.tools.length > 0 ? options.tools : DEFAULT_TOOLS;
+  const tools = toolsFor(ctx, options);
 
   const actions = planInit(ctx, options).map((item): InitAction => {
     if (item.action === 'skip' || dryRun) return item;

@@ -3,6 +3,15 @@ import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
+// Hermetic git: the developer's global gitignore and config must not decide what a fixture commits
+// or what the audit sees as ignored.
+process.env['GIT_CONFIG_GLOBAL'] = '/dev/null';
+process.env['GIT_CONFIG_NOSYSTEM'] = '1';
+// ~/.config/git/ignore applies even without a global config, so point the excludes file away too.
+process.env['GIT_CONFIG_COUNT'] = '1';
+process.env['GIT_CONFIG_KEY_0'] = 'core.excludesFile';
+process.env['GIT_CONFIG_VALUE_0'] = '/dev/null';
+
 export interface TempRepo {
   dir: string;
   write: (relPath: string, content: string) => void;

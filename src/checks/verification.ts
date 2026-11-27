@@ -184,7 +184,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     if (!protectsOracle && !codeownersPath) {
       evidence.push(
         solo
-          ? 'One active contributor: no CI or harness guard stops an agent from weakening tests or editing .github/workflows to get to green'
+          ? `${ctx.team === 'inactive' ? 'No commits in the last 90 days' : 'One active contributor'}: no CI or harness guard stops an agent from weakening tests or editing .github/workflows to get to green`
           : 'No CODEOWNERS or CI/harness protection found for tests/, .github/workflows/, or rule files',
       );
     }
@@ -430,7 +430,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         // A repository's own invariant checks: `check:design`, or a lint script that runs scripts/check-*.mjs.
         const ownChecks = v.match(/\bscripts\/check-[\w.-]+/g);
         if (ownChecks) fitnessSignals.push(`invariant checks in \`${k}\`: ${[...new Set(ownChecks)].slice(0, 3).join(', ')}`);
-        else if (/^check:(?!types?$|ts$)[\w-]+$/.test(k)) fitnessSignals.push(`script: ${k}`);
+        // `check:design`, `lint:design`, `verify:deps`: a named check that runs the repository's own program.
+        else if (/^(check|lint|verify|guard|validate):(?!types?$|ts$|fix$)[\w-]+$/.test(k) && /\b(node|bun|tsx|deno|python3?)\s+\S*scripts?\//.test(v)) {
+          fitnessSignals.push(`invariant check: \`${k}\``);
+        } else if (/^check:(?!types?$|ts$)[\w-]+$/.test(k)) fitnessSignals.push(`script: ${k}`);
       }
     }
     if (ctx.hasAnyFile(['knip.json', 'knip.jsonc', 'knip.ts', '.knip.json'])) fitnessSignals.push('Knip (unused code and dependencies)');

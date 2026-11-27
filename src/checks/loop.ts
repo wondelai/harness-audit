@@ -202,10 +202,19 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
         const first = strictOnes[0]!;
         const via = (first.verdict as { via: string }).via;
         evidence.push(
-          via === first.file
-            ? `${first.file} has \`compilerOptions.strict: true\``
-            : `${first.file} inherits \`strict: true\` from ${via}`,
+          strictOnes.length > 1
+            ? `${strictOnes.length} tsconfig files set \`strict: true\` (${strictOnes.slice(0, 3).map((v) => v.file).join(', ')}${strictOnes.length > 3 ? ', …' : ''})`
+            : via === first.file
+              ? `${first.file} has \`compilerOptions.strict: true\``
+              : `${first.file} inherits \`strict: true\` from ${via}`,
         );
+        // Plain JavaScript next to the TypeScript is outside the type checker.
+        const jsFiles = ctx.sourceFiles.filter((f) => /\.(js|jsx|mjs|cjs)$/.test(f)).length;
+        const tsFiles = ctx.sourceFiles.filter((f) => /\.(ts|tsx|mts|cts)$/.test(f)).length;
+        if (jsFiles >= 20 && jsFiles > tsFiles * 0.3) {
+          evidence.push(`${jsFiles} of ${jsFiles + tsFiles} source files are plain JavaScript, outside the type checker`);
+          if (jsFiles > tsFiles) status = 'warn';
+        }
       } else if (looseOnes.length > 0) {
         status = 'warn';
         evidence.push(`${looseOnes.map((v) => v.file).join(', ')}: \`compilerOptions.strict\` is not enabled (checked the extends chain)`);
@@ -341,7 +350,9 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     const customLintOnly = toolsFound.length === 0 && lintCommand !== undefined;
     const lintBody = customLintOnly && pkg?.scripts ? pkg.scripts[lintCommand.command.split(' ').pop()!] : undefined;
 
-    const status: CheckResult['status'] = toolsFound.length > 0 ? 'pass' : customLintOnly ? 'warn' : 'fail';
+    // Android Lint ships with the Android Gradle plugin: on its own it formats nothing and knows no Kotlin style.
+    const androidLintOnly = toolsFound.length === 1 && toolsFound[0]!.startsWith('Android Lint');
+    const status: CheckResult['status'] = androidLintOnly ? 'warn' : toolsFound.length > 0 ? 'pass' : customLintOnly ? 'warn' : 'fail';
 
     results.push({
       id: 'loop.formatter-linter',
@@ -354,8 +365,10 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Deterministyczny formatter i linter',
       },
       evidence:
-        toolsFound.length > 0
-          ? [`Configured: ${toolsFound.join(', ')}`]
+        androidLintOnly
+          ? ['Android Lint is available through the Android Gradle plugin; no formatter or Kotlin linter (ktlint, detekt, Spotless) is configured']
+          : toolsFound.length > 0
+            ? [`Configured: ${toolsFound.join(', ')}`]
           : customLintOnly
             ? [`\`${lintCommand.command}\` exists${lintBody ? ` (${lintBody.length > 90 ? `${lintBody.slice(0, 90)}…` : lintBody})` : ''}, but no general-purpose linter or formatter is configured`]
             : ['No formatter or linter configured (looked for oxlint, Biome, ESLint, Prettier, dprint, Ruff, golangci-lint, SwiftLint, detekt/ktlint, clang-format and similar)'],
@@ -442,11 +455,24 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
 
     // make, cmake and xcodebuild build the project; they do not resolve dependencies to lock.
     const hasManager = stack.packageManagers.some((pm) => !['make', 'cmake', 'xcodebuild'].includes(pm));
+    // Two JavaScript package managers' lockfiles at the root: each install resolves a different tree.
+    const jsLockOwners: Record<string, string> = { 'package-lock.json': 'npm', 'npm-shrinkwrap.json': 'npm', 'pnpm-lock.yaml': 'pnpm', 'yarn.lock': 'yarn', 'bun.lock': 'bun', 'bun.lockb': 'bun' };
+    const rootJsManagers = [...new Set(lockfiles.filter((f) => f in jsLockOwners).map((f) => jsLockOwners[f]!))];
+    const ciInstaller = ctx.ci.workflows
+      .map((w) => /\b(npm ci|npm install|pnpm install|yarn install|bun install)\b/.exec(ctx.readText(w.path) ?? '')?.[1])
+      .find(Boolean);
+    const competingLocks = rootJsManagers.length > 1;
+    // Swift packages that declare no external dependency have nothing to resolve.
+    const swiftManifests = ctx.findFiles((f) => /(^|\/)Package\.swift$/.test(f) && f.split('/').length <= 4);
+    const swiftHasDeps = swiftManifests.some((f) => /\.package\(\s*(url|id)\s*:/.test(ctx.readText(f) ?? ''));
     const evidence: string[] = [];
     if (lockfiles.length > 0) evidence.push(`Lockfile(s): ${lockfiles.join(', ')}`);
     else if (versionCatalog) evidence.push('Gradle version catalog pins direct dependencies (gradle/libs.versions.toml); transitive versions are not locked (no gradle.lockfile)');
     else if (hasManager) evidence.push('No committed dependency lockfile found');
     if (uncommittedLocks.length > 0) evidence.push(`On disk but not committed: ${uncommittedLocks.join(', ')}`);
+    if (competingLocks) {
+      evidence.push(`Lockfiles from ${rootJsManagers.length} package managers at the root (${rootJsManagers.join(', ')})${ciInstaller ? `; CI installs with \`${ciInstaller}\`` : ''} — keep one`);
+    }
     if (gitignoredResolved) evidence.push('.gitignore excludes Package.resolved — Swift package versions float between machines and CI');
     evidence.push(
       runtimePins.length > 0
@@ -456,12 +482,17 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
 
     const locked = lockfiles.length > 0 || versionCatalog;
     let status: CheckResult['status'];
-    if (!hasManager && !locked && runtimePins.length === 0) {
+    const nothingToLock = swiftManifests.length > 0 && !swiftHasDeps && !locked && !stack.packageManagers.some((pm) => !['swiftpm', 'xcodebuild'].includes(pm));
+    if (nothingToLock) {
+      // The answer does not depend on a lockfile; a pinned toolchain is still worth having.
+      status = runtimePins.length > 0 ? 'pass' : 'warn';
+      evidence[0] = `${swiftManifests.slice(0, 2).join(', ')} declare no external dependencies — nothing to lock`;
+    } else if (!hasManager && !locked && runtimePins.length === 0) {
       status = 'info';
       evidence.length = 0;
       evidence.push('No dependency manifest detected — nothing to lock');
     } else if (locked && runtimePins.length > 0) {
-      status = 'pass';
+      status = competingLocks ? 'warn' : 'pass';
     } else if (locked || runtimePins.length > 0) {
       status = 'warn';
     } else {

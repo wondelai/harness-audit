@@ -75,8 +75,19 @@ export function computeOverallScore(stations: StationScore[]): number {
   return totalWeight > 0 ? Math.round(sum / totalWeight) : 0;
 }
 
+/**
+ * A critical finding (no brief, no verify loop, no tests, no CI, a committed credential, a bypassed
+ * permission model) costs more than its share of one station: 5 points each, 15 at most. Without
+ * it a repository that leaks keys or gives agents nothing to read still shows a comfortable score.
+ */
+export function criticalPenalty(checks: CheckResult[]): { points: number; perCheck: number; checks: string[] } {
+  const critical = checks.filter((c) => c.status === 'fail' && c.severity === 'critical');
+  const perCheck = critical.length === 0 ? 0 : Math.min(5, 15 / critical.length);
+  return { points: Math.round(perCheck * critical.length), perCheck, checks: critical.map((c) => c.id) };
+}
+
 /** Lowest overall score of each level; index = level. */
-export const LEVEL_THRESHOLDS: readonly number[] = [0, 25, 45, 63, 78, 90];
+const LEVEL_THRESHOLDS: readonly number[] = [0, 25, 45, 63, 78, 90];
 
 export function rawLevelFromScore(overallScore: number): AutonomyLevel {
   let level = 0;
@@ -91,6 +102,7 @@ export function rawLevelFromScore(overallScore: number): AutonomyLevel {
  * check alone turns to pass. Mutates the checks so every renderer reads the same number.
  */
 export function assignImpact(checks: CheckResult[]): void {
+  const penalty = criticalPenalty(checks);
   for (const station of STATIONS) {
     const stationChecks = checks.filter((c) => c.station === station.id);
     const possible = stationChecks.reduce((sum, c) => (c.status === 'info' ? sum : sum + c.weight), 0);
@@ -100,7 +112,9 @@ export function assignImpact(checks: CheckResult[]): void {
         continue;
       }
       const missing = c.status === 'fail' ? c.weight : c.weight * 0.5;
-      c.impact = Math.round((missing / possible) * station.weight * 1000) / 10;
+      const share = (missing / possible) * station.weight * 100;
+      // Fixing a critical finding also lifts its share of the critical penalty.
+      c.impact = Math.round((share + (penalty.checks.includes(c.id) ? penalty.perCheck : 0)) * 10) / 10;
     }
   }
 }
@@ -168,6 +182,18 @@ function capsAt(rawLevel: AutonomyLevel, stations: StationScore[], checks: Check
     });
   }
 
+  // Cap 1b: No Level 3+ without a project brief
+  if (rawLevel >= 3 && checkStatus('intent.instructions-file') === 'fail') {
+    caps.push({
+      cappedTo: 2,
+      triggeredBy: ['intent.instructions-file'],
+      reason: {
+        en: 'Capped at Level 2: an agent cannot take a whole task (Level 3+) in a repository that gives it no project brief.',
+        pl: 'Ograniczenie do Poziomu 2: agent nie przejmie całego zadania (Poziom 3+) w repozytorium, które nie daje mu żadnych instrukcji projektu.',
+      },
+    });
+  }
+
   // Cap 2: No Level 3+ without unit tests OR without a CI pipeline
   if (rawLevel >= 3) {
     const missingTests = checkStatus('verification.unit-tests') === 'fail';
@@ -217,6 +243,8 @@ function capsAt(rawLevel: AutonomyLevel, stations: StationScore[], checks: Check
     // as much as how its work is checked.
     if (stationScore('intent') < 60) triggers.push('intent (<60)');
     if (stationScore('harness') < 60) triggers.push('harness (<60)');
+    // A harness score can clear 60 on hygiene alone; running unattended still needs the rules written down.
+    if (checkStatus('harness.permissions-policy') === 'fail') triggers.push('harness.permissions-policy');
     if (stationScore('verification') < 70) triggers.push('verification (<70)');
     if (stationScore('loop') < 70) triggers.push('loop (<70)');
     if (checkStatus('release.ci-pipeline') !== 'pass') triggers.push('release.ci-pipeline');
@@ -227,8 +255,8 @@ function capsAt(rawLevel: AutonomyLevel, stations: StationScore[], checks: Check
         cappedTo: 3,
         triggeredBy: triggers,
         reason: {
-          en: 'Capped at Level 3: unattended Level 4 runs require clear Intent (>=60), a defined Harness (>=60), strong Verification (>=70), fast Loop (>=70), PR-gated CI, and clean non-tautological tests.',
-          pl: 'Ograniczenie do Poziomu 3: bezobsługowe uruchomienia Poziomu 4 wymagają jasnej Intencji (>=60), zdefiniowanej Uprzęży (>=60), silnej Weryfikacji (>=70), szybkiej Pętli (>=70), CI na PR i rzetelnych testów.',
+          en: 'Capped at Level 3: unattended Level 4 runs require clear Intent (>=60), a defined Harness (>=60, with a versioned permission policy), strong Verification (>=70), fast Loop (>=70), PR-gated CI, and clean non-tautological tests.',
+          pl: 'Ograniczenie do Poziomu 3: bezobsługowe uruchomienia Poziomu 4 wymagają jasnej Intencji (>=60), zdefiniowanej Uprzęży (>=60, z wersjonowaną polityką uprawnień), silnej Weryfikacji (>=70), szybkiej Pętli (>=70), CI na PR i rzetelnych testów.',
         },
       });
     }

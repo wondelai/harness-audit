@@ -20,7 +20,7 @@ Run directly against the current repository (no install required):
 npx harness-audit
 ```
 
-`harness-audit` is a thin wrapper around `@wondelai/harness-audit`; both names run the same CLI.
+`harness-audit` and `@wondelai/harness-audit` are the same build published under two names, always at the same version.
 
 Common workflows:
 
@@ -90,12 +90,14 @@ Raw weighted scores map to Levels 0–5 (Dan Shapiro's Autonomy Ladder), **cappe
 | --- | --- | --- |
 | **L0** | By hand | `< 25` |
 | **L1** | Assisted | `25–44` (capped at L1 if missing both instructions and verify loop) |
-| **L2** | Paired | `45–62` (capped at L2 if missing tests, missing CI, hardcoded secrets, or broken permission config) |
-| **L3** | Review manager | `63–77` (capped at L3 if Intent < 60, Harness < 60, Verification < 70, Loop < 70, CI not passing on PRs, or test quality scan fails) |
+| **L2** | Paired | `45–62` (capped at L2 if there is no project brief, no tests, no CI, hardcoded secrets, or broken permission config) |
+| **L3** | Review manager | `63–77` (capped at L3 if Intent < 60, Harness < 60 or no versioned permission policy, Verification < 70, Loop < 70, CI not passing on PRs, or test quality scan fails) |
 | **L4** | Spec manager | `78–89` (capped at L4 unless oracle protection passes, Graph >= 70, Harness >= 75, Release >= 80, Verification >= 85) |
 | **L5** | Dark factory | `90–100` with all gating requirements met |
 
 Every triggered cap is printed explicitly in terminal, Markdown, HTML, and JSON outputs, and the `Next level` block names the gates that apply one level up before you reach them.
+
+A critical finding (no brief, no verify loop, no tests, no CI, a committed credential, a bypassed permission model) also takes 5 points off the overall score, 15 at most, and the report shows the subtraction.
 
 Each open finding carries the points the overall score gains when it is fixed (`impact` in JSON). The top fixes are ordered: committed credentials and other critical findings first, then the gates of the next level, then by severity and points.
 

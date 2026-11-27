@@ -199,11 +199,15 @@ describe('stacks other than TypeScript', () => {
     expect(check(report, 'loop.single-command-verify').status).toBe('pass');
     expect(evidence(report, 'loop.single-command-verify')).toContain('Root instructions quote 3 verify command(s)');
     expect(check(report, 'loop.lockfile-reproducibility').status).toBe('pass');
-    expect(check(report, 'loop.formatter-linter').status).toBe('pass');
+    // Android Lint comes with the Gradle plugin; without a Kotlin linter or formatter that is half a setup.
+    expect(check(report, 'loop.formatter-linter').status).toBe('warn');
     expect(check(report, 'harness.secret-hygiene').status).toBe('pass');
     // Lint runs only off pull requests, so it is not part of the PR gate.
     expect(evidence(report, 'release.ci-pipeline')).toContain('tests: yes · lint: not on PRs · typecheck: yes');
     expect(evidence(report, 'release.observability-and-safety')).toContain('Sentry');
+
+    repo.write('gradle/libs.versions.toml', '[versions]\nagp = "9.5.1"\ndetekt = "2.0.0"\n');
+    expect(check(auditRepo(repo.dir), 'loop.formatter-linter').status).toBe('pass');
   });
 
   it('does not demand tests or lockfiles from a repository with no program in it', () => {
@@ -337,9 +341,11 @@ describe('priorities and the next level', () => {
     const open = report.checks.filter((c) => c.status === 'fail' || c.status === 'warn');
     expect(open.every((c) => typeof c.impact === 'number' && c.impact > 0)).toBe(true);
     expect(report.checks.filter((c) => c.status === 'pass' || c.status === 'info').every((c) => c.impact === undefined)).toBe(true);
-    // Fixing everything open lands on 100: the impacts are the score's own arithmetic.
+    // Fixing everything open lands on 100: the impacts are the score's own arithmetic, station
+    // shares plus the critical penalty they lift (the displayed score is floored at 0).
     const total = open.reduce((sum, c) => sum + c.impact!, 0);
-    expect(Math.abs(report.overallScore + total - 100)).toBeLessThanOrEqual(2);
+    expect(Math.abs(report.stationScore - report.criticalPenalty.points + total - 100)).toBeLessThanOrEqual(2);
+    expect(report.overallScore).toBe(Math.max(0, report.stationScore - report.criticalPenalty.points));
     // Critical findings lead the list.
     expect(report.topPriorities[0]!.severity).toBe('critical');
   });
@@ -371,5 +377,188 @@ describe('init', () => {
     expect(check(after, 'intent.single-source').status).toBe('pass');
     expect(check(after, 'harness.permissions-policy').status).toBe('pass');
     expect(check(after, 'release.deploy-safety').status).toBe('pass');
+  });
+});
+
+describe('what a command proves', () => {
+  it('judges a command by the program it runs, not by words in its arguments', () => {
+    const repo = temp('ha-classify-');
+    repo.write(
+      'package.json',
+      JSON.stringify({
+        name: 'app',
+        scripts: {
+          check: 'pnpm run format:check && pnpm run lint',
+          lint: 'oxlint --vitest-plugin --deny-warnings',
+          'format:check': 'oxfmt --check',
+          test: 'vitest run',
+          'test:watch': 'vitest',
+        },
+      }),
+    );
+    repo.write('pnpm-lock.yaml', 'lockfileVersion: 9\n');
+    const report = auditRepo(repo.dir);
+    const commands = report.stack.verifyCommands;
+    expect(commands).toContain('`pnpm run check` → lint + format');
+    expect(commands).toContain('`pnpm run lint` → lint');
+    expect(commands).toContain('`pnpm run test` → test');
+    // A watcher never exits, so it is not offered as a verify command.
+    expect(commands.join(' ')).not.toContain('test:watch');
+  });
+
+  it('counts a sub-package test script that CI runs on pull requests', () => {
+    const repo = temp('ha-subpkg-');
+    repo.write('package.json', JSON.stringify({ name: 'mono', workspaces: ['api', 'client'] }));
+    repo.write('api/package.json', JSON.stringify({ name: 'api', scripts: { 'test:ci': 'jest --ci' } }));
+    repo.write(
+      '.github/workflows/backend-review.yml',
+      'on:\n  pull_request:\n    paths: ["api/**"]\njobs:\n  tests:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm ci\n      - run: cd api && npm run test:ci\n      - run: npx eslint api\n',
+    );
+    const report = auditRepo(repo.dir);
+    expect(evidence(report, 'release.ci-pipeline')).toContain('tests: yes · lint: yes');
+    expect(check(report, 'release.ci-pipeline').status).toBe('pass');
+  });
+
+  it('reads a mixed TypeScript and JavaScript workspace by what its files are', () => {
+    const repo = temp('ha-mixed-');
+    repo.write('package.json', JSON.stringify({ name: 'mono', workspaces: ['client', 'api'] }));
+    repo.write('client/tsconfig.json', '{ "compilerOptions": { "strict": true } }');
+    repo.write('packages/data/tsconfig.json', '{ "compilerOptions": { "strict": true } }');
+    for (let i = 0; i < 12; i++) repo.write(`client/src/c${i}.tsx`, 'export {};\n');
+    for (let i = 0; i < 4; i++) repo.write(`api/server/s${i}.js`, 'module.exports = {};\n');
+    const report = auditRepo(repo.dir);
+    expect(report.stack.languages).toContain('TypeScript');
+    const types = check(report, 'loop.static-types');
+    expect(types.status).toBe('pass');
+    expect(types.evidence[0]).toContain('2 tsconfig files set `strict: true`');
+  });
+});
+
+describe('people, briefs and boundaries', () => {
+  it('does not count a coding agent or a bot as a second contributor', () => {
+    const repo = temp('ha-bots-');
+    repo.write('package.json', JSON.stringify({ name: 'app' }));
+    repo.commit('human@example.com');
+    repo.write('a.txt', 'a\n');
+    repo.commit('noreply@anthropic.com');
+    repo.write('b.txt', 'b\n');
+    repo.commit('49699333+dependabot[bot]@users.noreply.github.com');
+    const report = auditRepo(repo.dir);
+    expect(report.git.gitAuthors90d).toBe(1);
+    expect(check(report, 'verification.oracle-protection').fix.en).toContain('skip CODEOWNERS');
+  });
+
+  it('takes a prohibition for a boundary, not the word production', () => {
+    const label = temp('ha-boundary-label-');
+    label.write('CLAUDE.md', '# App\n\nPrompts are fetched with the `production` label from the prompt store.\nA\nB\nC\n');
+    const none = check(auditRepo(label.dir), 'harness.sandbox-readiness');
+    expect(none.status).toBe('fail');
+    expect(none.evidence.join('\n')).toContain('names no production or shared resource');
+
+    const rule = temp('ha-boundary-rule-');
+    rule.write('CLAUDE.md', '# App\n\n- Never run `wrangler deploy` or a `--remote` migration from a local session.\nA\nB\nC\n');
+    rule.write('Dockerfile', 'FROM node:24\n');
+    const some = check(auditRepo(rule.dir), 'harness.sandbox-readiness');
+    expect(some.status).toBe('warn');
+    expect(some.evidence.join('\n')).toContain('states a boundary: "Never run `wrangler deploy`');
+    // The product image is not a place agents run in, and the fix asks only for what is missing.
+    expect(some.evidence.join('\n')).toContain('Dockerfile exists but the brief does not use it');
+    expect(some.fix.en).toContain('OS-level boundary');
+    expect(some.fix.en).not.toContain('must never touch');
+  });
+
+  it('credits a path table in CLAUDE.md as a module map and names the brief the repo has', () => {
+    const repo = temp('ha-map-');
+    repo.write('package.json', JSON.stringify({ name: 'app' }));
+    repo.write(
+      'CLAUDE.md',
+      '# App\n\n| Before touching | Read |\n| --- | --- |\n| `src/billing/` | `docs/billing.md` |\n| `src/auth/` | `docs/auth.md` |\n| `migrations/` | `docs/migrations.md` |\n',
+    );
+    for (const d of ['billing', 'auth', 'migrations']) repo.write(`docs/${d}.md`, '# Rules\n');
+    const map = check(auditRepo(repo.dir), 'graph.workspace-boundaries');
+    expect(map.status).toBe('pass');
+    expect(map.evidence[0]).toContain('CLAUDE.md maps areas to 3 doc(s)');
+
+    const bare = temp('ha-nomap-');
+    bare.write('package.json', JSON.stringify({ name: 'app' }));
+    bare.write('CLAUDE.md', '# App\nA\nB\nC\nD\n');
+    const missing = check(auditRepo(bare.dir), 'graph.workspace-boundaries');
+    expect(missing.fix.en).toContain('CLAUDE.md');
+    expect(missing.fix.en).not.toContain('AGENTS.md');
+  });
+
+  it('finds spec docs under docs/ and names only the kinds still missing', () => {
+    const repo = temp('ha-specs-');
+    repo.write('package.json', JSON.stringify({ name: 'app' }));
+    repo.write('docs/ARCHITECTURE.md', '# Architecture\n');
+    repo.write('docs/API-CONTRACT.md', '# Contract\n');
+    const specs = check(auditRepo(repo.dir), 'intent.skills-and-specs');
+    expect(specs.status).toBe('warn');
+    expect(specs.evidence.join('\n')).toContain('docs/ARCHITECTURE.md');
+    expect(specs.fix.en).toContain('reusable skill');
+    expect(specs.fix.en).not.toContain('standards, testing or architecture doc');
+  });
+
+  it('flags a committed settings.local.json and asks for deny rules when only allow rules exist', () => {
+    const repo = temp('ha-localsettings-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'vitest run', deploy: 'wrangler deploy' } }));
+    repo.write('wrangler.toml', 'name = "app"\n');
+    repo.write('.claude/settings.json', JSON.stringify({ permissions: { allow: ['Bash(npm test:*)'] } }));
+    repo.write('.claude/settings.local.json', JSON.stringify({ permissions: { allow: ['Bash(rm:*)'] } }));
+    repo.commit();
+    const policy = check(auditRepo(repo.dir), 'harness.permissions-policy');
+    expect(policy.status).toBe('warn');
+    expect(policy.evidence.join('\n')).toContain('.claude/settings.local.json is committed');
+    expect(policy.fix.en).toContain('The allow list is there; add `permissions.deny`');
+    expect(policy.fix.en).toContain('Bash(npm run deploy:*)');
+    expect(policy.fix.en).not.toContain('init');
+  });
+});
+
+describe('lockfiles and deploys', () => {
+  it('warns when two package managers left lockfiles at the root', () => {
+    const repo = temp('ha-twolocks-');
+    repo.write('package.json', JSON.stringify({ name: 'app', engines: { node: '>=22' } }));
+    repo.write('package-lock.json', '{}\n');
+    repo.write('bun.lockb', 'x\n');
+    repo.write('.github/workflows/ci.yml', 'on: [pull_request]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm ci\n');
+    const lock = check(auditRepo(repo.dir), 'loop.lockfile-reproducibility');
+    expect(lock.status).toBe('warn');
+    expect(lock.evidence.join('\n')).toContain('Lockfiles from 2 package managers at the root (bun, npm); CI installs with `npm ci`');
+  });
+
+  it('checks deny rules against the commands that really deploy, and ignores a script that only refuses', () => {
+    const repo = temp('ha-deploy-');
+    repo.write(
+      'package.json',
+      JSON.stringify({ name: 'app', scripts: { deploy: 'wrangler deploy', 'deploy:production': 'echo "Use CI" && exit 1' } }),
+    );
+    repo.write('wrangler.toml', 'name = "app"\n');
+    repo.write('.claude/settings.json', JSON.stringify({ permissions: { deny: ['Bash(npm run deploy)', 'Bash(npm run deploy:*)'] } }));
+    const partial = check(auditRepo(repo.dir), 'release.deploy-safety');
+    expect(partial.status).toBe('warn');
+    expect(partial.evidence.join('\n')).toContain('covers some deploy commands but not `npx wrangler deploy`');
+    expect(partial.evidence.join('\n')).not.toContain('deploy:production');
+
+    repo.write('.claude/settings.json', JSON.stringify({ permissions: { deny: ['Bash(npm run deploy:*)', 'Bash(npx wrangler deploy:*)', 'Bash(wrangler deploy:*)'] } }));
+    expect(check(auditRepo(repo.dir), 'release.deploy-safety').status).toBe('pass');
+  });
+});
+
+describe('init follows the repository', () => {
+  it('scaffolds only for the tools in use, with the globs of the stack', () => {
+    const repo = temp('ha-init-swift-');
+    repo.write('Package.swift', '// swift-tools-version: 6.0\n');
+    repo.write('Sources/Kit/Kit.swift', 'public struct Kit {}\n');
+    repo.write('Tests/KitTests/KitTests.swift', 'import XCTest\n');
+    repo.write('CLAUDE.md', '# Kit\nA\nB\nC\nD\n');
+    const plan = initHarness(repo.dir, { dryRun: true });
+    expect(plan.tools).toEqual(['claude-code']);
+    expect(plan.actions.map((a) => a.path)).not.toContain('.cursor/rules/testing.mdc');
+    const rule = plan.actions.find((a) => a.path === '.claude/rules/testing.md')!.content;
+    expect(rule).toContain('"Tests/**"');
+    expect(rule).not.toContain('*.spec.*');
+    const template = plan.actions.find((a) => a.path === '.github/pull_request_template.md')!.content;
+    expect(template).toContain('| `swift test` | |');
   });
 });

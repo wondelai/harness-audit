@@ -23,44 +23,184 @@ export interface VerifyCapabilities {
 
 type Scripts = Record<string, string>;
 
+/** Wrappers that run another program: the program is what counts, the wrapper is dropped. */
+const ONE_WORD_WRAPPERS = new Set(['npx', 'bunx', 'pnpx', 'time', 'sudo', 'command', 'exec', 'nice', 'xvfb-run', 'cross-env', 'dotenv', 'env']);
+const TWO_WORD_WRAPPERS = new Set([
+  'pnpm exec', 'pnpm dlx', 'yarn exec', 'yarn dlx', 'bun x', 'uv run', 'poetry run', 'pipenv run', 'bundle exec',
+  'python -m', 'python3 -m', 'mise exec', 'doppler run', 'npm exec',
+]);
+
+/** The program a command line runs and its arguments, with env assignments and wrappers removed. */
+function programOf(command: string): { program: string; args: string[] } | undefined {
+  let tokens = command.trim().split(/\s+/).filter(Boolean);
+  for (let guard = 0; guard < 6 && tokens.length > 0; guard++) {
+    const first = tokens[0]!;
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first) || first === '--') {
+      tokens = tokens.slice(1);
+    } else if (tokens.length > 1 && TWO_WORD_WRAPPERS.has(`${first} ${tokens[1]}`)) {
+      tokens = tokens.slice(2);
+    } else if (ONE_WORD_WRAPPERS.has(first)) {
+      tokens = tokens.slice(1);
+      // npx -y, npx --yes, npx -p pkg
+      while (tokens.length > 0 && tokens[0]!.startsWith('-') && tokens[0] !== '--') {
+        tokens = tokens.slice(tokens[0] === '-p' || tokens[0] === '--package' ? 2 : 1);
+      }
+    } else {
+      break;
+    }
+  }
+  if (tokens.length === 0) return undefined;
+  const program = tokens[0]!.replace(/^.*\//, '').replace(/\.(bat|cmd|exe)$/, '').replace(/@[\w.^~-]+$/, '');
+  return { program, args: tokens.slice(1) };
+}
+
+const TEST_RUNNERS = new Set(['vitest', 'jest', 'mocha', 'ava', 'playwright', 'cypress', 'pytest', 'tox', 'nox', 'rspec', 'phpunit', 'pest', 'ctest', 'karma', 'unittest']);
+const LINTERS = new Set(['eslint', 'oxlint', 'flake8', 'pylint', 'golangci-lint', 'rubocop', 'swiftlint', 'ktlint', 'detekt', 'shellcheck', 'stylelint', 'actionlint', 'phpcs', 'phpstan', 'psalm', 'clang-tidy', 'cppcheck', 'staticcheck', 'knip']);
+const TYPECHECKERS = new Set(['tsgo', 'vue-tsc', 'svelte-check', 'mypy', 'pyright', 'basedpyright', 'steep']);
+const FORMATTERS = new Set(['prettier', 'dprint', 'oxfmt', 'black', 'gofmt', 'goimports', 'swiftformat', 'rustfmt']);
+const BUNDLERS = new Set(['vite', 'next', 'astro', 'nuxt', 'webpack', 'rollup', 'esbuild', 'tsup', 'tsdown', 'remix', 'react-router', 'expo', 'docusaurus']);
+
 /**
- * Recognisers for a single shell command (no `&&`). Order is irrelevant: every match counts.
- * A compiled language's build or test run also type-checks, which the last typecheck rows say.
+ * What one program invocation proves, decided by the program and its subcommand. An argument that
+ * merely names a tool (`oxlint --vitest-plugin`) proves nothing about that tool. A compiled
+ * language's build or test run also type-checks.
  */
-const KIND_PATTERNS: ReadonlyArray<readonly [VerifyKind, RegExp]> = [
-  ['test', /\b(vitest|jest|mocha|ava|playwright|cypress|pytest|tox|nox|rspec|phpunit|pest|ctest|karma|nextest)\b/],
-  ['test', /\b(?:go|cargo|swift|dotnet|flutter|dart|mix|bun|deno|vp|zig|forge|sbt)\s+test\b/],
-  ['test', /\bnode\s+(?:\S+\s+)*--test\b/],
-  ['test', /\bpython3?\s+-m\s+(?:pytest|unittest)\b/],
-  ['test', /(?:^|[\s/])gradlew?(?:\.bat)?\b.*?(?:^|[\s:])(?:\w*[tT]est\w*|check)\b/],
-  ['test', /(?:^|[\s/])mvnw?\b.*\b(?:test|verify|install)\b/],
-  ['test', /\bxcodebuild\b.*\btest(?:-without-building)?\b/],
-  ['test', /\brake\s+(?:test|spec)\b/],
-  ['test', /\bfastlane\s+(?:\S+\s+)?(?:tests?|scan)\b/],
-  ['lint', /\b(eslint|oxlint|ruff\s+check|flake8|pylint|golangci-lint|rubocop|swiftlint|ktlint|detekt|shellcheck|stylelint|actionlint|phpcs|phpstan|psalm|clang-tidy|cppcheck|staticcheck|knip)\b/],
-  ['lint', /\bbiome\s+(?:lint|check|ci)\b/],
-  ['lint', /\b(?:cargo\s+clippy|go\s+vet|mix\s+credo|vp\s+(?:lint|check))\b/],
-  ['lint', /\b(?:dart|flutter)\s+analyze\b/],
-  ['lint', /(?:^|[\s/])gradlew?(?:\.bat)?\b.*?(?:^|[\s:])(?:lint\w*|detekt\w*|ktlint\w*|spotlessCheck|check)\b/],
-  ['typecheck', /\b(tsc|tsgo|vue-tsc|svelte-check|mypy|pyright|basedpyright|steep)\b/],
-  ['typecheck', /\b(?:astro|bun|vp|cargo|ty|srb)\s+(?:check|tc)\b/],
-  ['typecheck', /\bgo\s+(?:vet|build|test)\b/],
-  ['typecheck', /(?:^|[\s/])gradlew?(?:\.bat)?\b.*?(?:^|[\s:])(?:assemble\w*|compile\w*|build|\w*[tT]est\w*|check)\b/],
-  ['typecheck', /\b(?:swift\s+(?:build|test)|cargo\s+(?:build|test)|dotnet\s+(?:build|test)|zig\s+build)\b/],
-  ['typecheck', /\bxcodebuild\b.*\b(?:build|test|archive|analyze|build-for-testing|test-without-building)\b/],
-  ['typecheck', /(?:^|[\s/])mvnw?\b.*\b(?:compile|test|verify|package|install)\b/],
-  ['typecheck', /\b(?:flutter\s+(?:build|analyze)|dart\s+(?:analyze|compile))\b/],
-  ['build', /\b(?:vite|next|astro|nuxt|webpack|rollup|esbuild|tsup|tsdown|turbo|nx|vp|remix|react-router|expo|docusaurus)\s+(?:run\s+)?(?:build|pack|export)\b/],
-  ['build', /\btsc\b(?!.*--noEmit)/],
-  ['build', /\b(?:cargo|go|swift|dotnet|zig|flutter|docker|bun)\s+build\b/],
-  ['build', /\bxcodebuild\b.*\b(?:build|archive|build-for-testing)\b/],
-  ['build', /(?:^|[\s/])gradlew?(?:\.bat)?\b.*?(?:^|[\s:])(?:assemble\w*|build|bundle\w*)\b/],
-  ['build', /(?:^|[\s/])mvnw?\b.*\b(?:package|install|verify)\b/],
-  ['build', /\bwrangler\s+deploy\s+.*--dry-run\b|\bcmake\s+--build\b/],
-  ['format', /\b(prettier|dprint|oxfmt|black|gofmt|goimports|swiftformat|rustfmt)\b/],
-  ['format', /\b(?:cargo\s+fmt|ruff\s+format|mix\s+format|dart\s+format|bun\s+fmt|vp\s+(?:fmt|check)|biome\s+(?:format|check|ci))\b/],
-  ['format', /spotless(?:Check|Apply)|ktlintFormat/],
-];
+function kindsOfInvocation(program: string, args: string[]): VerifyKind[] {
+  const sub = args.find((a) => !a.startsWith('-')) ?? '';
+  const has = (...names: string[]): boolean => args.some((a) => names.includes(a));
+  const kinds: VerifyKind[] = [];
+  const add = (...k: VerifyKind[]): void => {
+    kinds.push(...k);
+  };
+
+  if (TEST_RUNNERS.has(program)) add('test');
+  if (LINTERS.has(program)) add('lint');
+  if (TYPECHECKERS.has(program)) add('typecheck');
+  if (FORMATTERS.has(program)) add('format');
+  if (BUNDLERS.has(program) && has('build', 'pack', 'export')) add('build');
+
+  switch (program) {
+    case 'tsc':
+      add('typecheck');
+      if (!has('--noEmit')) add('build');
+      break;
+    case 'biome':
+      if (has('lint', 'check', 'ci')) add('lint');
+      if (has('format', 'check', 'ci')) add('format');
+      break;
+    case 'ruff':
+      add(sub === 'format' ? 'format' : 'lint');
+      break;
+    case 'node':
+      if (has('--test')) add('test');
+      break;
+    case 'bun':
+      if (sub === 'test') add('test');
+      if (sub === 'check') add('typecheck');
+      if (sub === 'fmt') add('format');
+      if (sub === 'build') add('build');
+      break;
+    case 'deno':
+      if (sub === 'test') add('test');
+      if (sub === 'lint') add('lint');
+      if (sub === 'check') add('typecheck');
+      if (sub === 'fmt') add('format');
+      break;
+    case 'vp':
+      if (sub === 'test') add('test');
+      if (sub === 'lint') add('lint');
+      if (sub === 'check') add('lint', 'format', 'typecheck');
+      if (sub === 'fmt') add('format');
+      if (sub === 'build' || sub === 'pack') add('build');
+      break;
+    case 'astro':
+    case 'ty':
+      if (sub === 'check') add('typecheck');
+      break;
+    case 'turbo':
+    case 'nx':
+      for (const a of args) add(...kindsFromName(a));
+      break;
+    case 'go':
+      if (sub === 'test') add('test', 'typecheck');
+      if (sub === 'vet') add('lint', 'typecheck');
+      if (sub === 'build') add('build', 'typecheck');
+      break;
+    case 'cargo':
+      if (sub === 'test' || sub === 'nextest') add('test', 'typecheck');
+      if (sub === 'clippy') add('lint');
+      if (sub === 'check') add('typecheck');
+      if (sub === 'build') add('build', 'typecheck');
+      if (sub === 'fmt') add('format');
+      break;
+    case 'swift':
+      if (sub === 'test') add('test', 'typecheck');
+      if (sub === 'build') add('build', 'typecheck');
+      break;
+    case 'dotnet':
+      if (sub === 'test') add('test', 'typecheck');
+      if (sub === 'build') add('build', 'typecheck');
+      if (sub === 'format') add('format');
+      break;
+    case 'zig':
+    case 'forge':
+    case 'sbt':
+      if (sub === 'test') add('test', 'typecheck');
+      if (sub === 'build') add('build', 'typecheck');
+      break;
+    case 'flutter':
+    case 'dart':
+      if (sub === 'test') add('test');
+      if (sub === 'analyze') add('lint', 'typecheck');
+      if (sub === 'format') add('format');
+      if (sub === 'build' || sub === 'compile') add('build', 'typecheck');
+      break;
+    case 'mix':
+      if (sub === 'test') add('test');
+      if (sub === 'credo') add('lint');
+      if (sub === 'format') add('format');
+      break;
+    case 'rake':
+      if (sub === 'test' || sub === 'spec') add('test');
+      break;
+    case 'fastlane':
+      if (args.some((a) => /^(tests?|scan)$/.test(a))) add('test');
+      break;
+    case 'srb':
+      if (sub === 'tc') add('typecheck');
+      break;
+    case 'gradle':
+    case 'gradlew':
+      for (const task of args.filter((a) => !a.startsWith('-')).map((a) => a.replace(/^.*:/, ''))) {
+        if (/[tT]est/.test(task) || task === 'check') add('test', 'typecheck');
+        if (/^(lint|detekt|ktlint)/.test(task) || task === 'spotlessCheck' || task === 'check') add('lint');
+        if (/^(assemble|compile|bundle)/.test(task) || task === 'build') add('build', 'typecheck');
+        if (/^spotless|^ktlintFormat$/.test(task)) add('format');
+      }
+      break;
+    case 'mvn':
+    case 'mvnw':
+      if (has('test', 'verify', 'install')) add('test', 'typecheck');
+      if (has('compile', 'package', 'install', 'verify')) add('build', 'typecheck');
+      break;
+    case 'xcodebuild':
+      if (has('test', 'test-without-building')) add('test', 'typecheck');
+      if (has('build', 'archive', 'build-for-testing', 'analyze')) add('build', 'typecheck');
+      break;
+    case 'wrangler':
+      if (sub === 'deploy' && has('--dry-run')) add('build');
+      break;
+    case 'cmake':
+      if (has('--build')) add('build');
+      break;
+    case 'docker':
+      if (sub === 'build') add('build');
+      break;
+    default:
+      break;
+  }
+  return kinds;
+}
 
 /** What a script or target proves by its name alone, when its body is a custom program. */
 function kindsFromName(name: string): VerifyKind[] {
@@ -80,6 +220,18 @@ const PM_BUILTINS: Record<string, ReadonlySet<string>> = {
   pnpm: new Set(['install', 'add', 'exec', 'dlx', 'publish', 'audit']),
   yarn: new Set(['install', 'add', 'dlx', 'exec', 'npm', 'workspaces']),
 };
+
+/** The script names a package-manager invocation asks for, whether or not this package defines them. */
+function scriptNamesIn(program: string, args: string[]): string[] {
+  if (!(program in PM_BUILTINS) && program !== 'vpr') return [];
+  const positional = args.filter((a) => !a.startsWith('-'));
+  if (program === 'vpr') return positional.slice(0, 1);
+  const runIndex = positional.findIndex((a) => a === 'run' || a === 'run-script');
+  if (runIndex >= 0) return positional.slice(runIndex + 1, runIndex + 2);
+  // `npm test`, `yarn lint`, `pnpm typecheck`
+  const first = positional[0];
+  return first && (first === 'test' || !PM_BUILTINS[program]!.has(first)) ? [first] : [];
+}
 
 /** The package scripts a command such as `bun run --parallel lint check test` invokes. */
 function scriptsCalledBy(command: string, scripts: Scripts): string[] {
@@ -178,8 +330,13 @@ export class CommandClassifier {
         for (const k of this.classifyRecipe(recipeCall[1] as RecipeBook['tool'], recipeCall[2]!, seen)) kinds.add(k);
       }
 
-      for (const [kind, pattern] of KIND_PATTERNS) {
-        if (pattern.test(cmd)) kinds.add(kind);
+      const invocation = programOf(cmd);
+      if (invocation) {
+        for (const k of kindsOfInvocation(invocation.program, invocation.args)) kinds.add(k);
+        // `npm run test:ci` inside a sub-package: the script is not ours to read, its name still says what it is.
+        for (const name of scriptNamesIn(invocation.program, invocation.args)) {
+          if (!(name in this.scripts)) for (const k of kindsFromName(name)) kinds.add(k);
+        }
       }
     }
     return kinds;
@@ -240,12 +397,29 @@ function isUnified(kinds: VerifyKind[]): boolean {
 
 /** How the repository's package scripts are run: `bun run x`, `pnpm run x`, `yarn x`, `npm run x`. */
 export function scriptRunner(ctx: RepoContext): (script: string) => string {
-  const pkg = ctx.packageJson;
-  const declared = pkg?.packageManager ?? '';
-  if (ctx.hasFile('bun.lock') || ctx.hasFile('bun.lockb') || declared.startsWith('bun')) return (s) => `bun run ${s}`;
-  if (ctx.hasFile('pnpm-lock.yaml') || declared.startsWith('pnpm')) return (s) => `pnpm run ${s}`;
-  if (ctx.hasFile('yarn.lock') || declared.startsWith('yarn')) return (s) => `yarn ${s}`;
-  return (s) => (s === 'test' ? 'npm test' : `npm run ${s}`);
+  const runners: Record<string, (script: string) => string> = {
+    bun: (s) => `bun run ${s}`,
+    pnpm: (s) => `pnpm run ${s}`,
+    yarn: (s) => `yarn ${s}`,
+    npm: (s) => (s === 'test' ? 'npm test' : `npm run ${s}`),
+  };
+  const declared = /^(bun|pnpm|yarn|npm)@/.exec(ctx.packageJson?.packageManager ?? '')?.[1];
+  if (declared) return runners[declared]!;
+
+  const locked = [
+    ctx.hasFile('bun.lock') || ctx.hasFile('bun.lockb') ? 'bun' : '',
+    ctx.hasFile('pnpm-lock.yaml') ? 'pnpm' : '',
+    ctx.hasFile('yarn.lock') ? 'yarn' : '',
+    ctx.hasFile('package-lock.json') ? 'npm' : '',
+  ].filter(Boolean);
+  if (locked.length > 1) {
+    // Two managers left lockfiles: the one CI installs with is the one the project really uses.
+    const workflows = ctx.findFiles((f) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f)).map((f) => ctx.readText(f) ?? '').join('\n');
+    const inCi = /\b(npm) ci\b|\b(pnpm|yarn|bun) install\b/.exec(workflows);
+    const ciManager = inCi?.[1] ?? inCi?.[2];
+    if (ciManager && locked.includes(ciManager)) return runners[ciManager]!;
+  }
+  return runners[locked[0] ?? 'npm']!;
 }
 
 const SCRIPT_PRIORITY = ['verify', 'check', 'ci', 'validate', 'test', 'lint', 'typecheck', 'type-check', 'build', 'fmt:check', 'format:check'];
@@ -287,9 +461,12 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   // 1. package.json scripts
   const scripts = ctx.packageJson?.scripts ?? {};
   const run = scriptRunner(ctx);
+  // A watcher or a dev server never exits, so it cannot be a verify command.
+  const longRunning = (name: string): boolean =>
+    /(^|[:._-])(watch|dev|serve|ui|debug|open)($|[:._-])/.test(name) || /--watch\b|\bnodemon\b/.test(scripts[name] ?? '');
   const scriptNames = [
     ...SCRIPT_PRIORITY.filter((n) => n in scripts),
-    ...Object.keys(scripts).filter((n) => /^test[:._-]/.test(n)).slice(0, 4),
+    ...Object.keys(scripts).filter((n) => /^test[:._-]/.test(n) && !longRunning(n)).slice(0, 4),
   ];
   for (const name of scriptNames) add(run(name), classifier.classifyScript(name), 'package.json');
 
@@ -383,4 +560,36 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
 
 export function describeCommand(cmd: VerifyCommand): string {
   return `\`${cmd.command}\` → ${cmd.kinds.join(' + ')}`;
+}
+
+/**
+ * The fewest detected commands that together cover typecheck, lint, test and build: what a brief
+ * should quote, what CI should run, what a permission policy should allow.
+ */
+export function minimalVerifySet(caps: VerifyCapabilities): string[] {
+  const chosen = caps.unified ? [caps.unified] : [];
+  for (const kind of ['typecheck', 'lint', 'test', 'build'] as const) {
+    if (chosen.some((c) => c.kinds.includes(kind))) continue;
+    // The most specific command for the kind: `npm run lint` before a broader script that also lints.
+    const next = caps.commands.filter((c) => c.kinds.includes(kind)).sort((a, b) => a.kinds.length - b.kinds.length)[0];
+    if (next) chosen.push(next);
+  }
+  return chosen.map((c) => c.command);
+}
+
+/**
+ * Commands that ship from a local checkout: deploy and publish package scripts (unless the script
+ * only refuses, e.g. `echo … && exit 1`) and the platform CLI the repository is configured for.
+ */
+export function localDeployCommands(ctx: RepoContext): string[] {
+  const scripts = ctx.packageJson?.scripts ?? {};
+  const run = scriptRunner(ctx);
+  const commands = Object.entries(scripts)
+    .filter(([name, body]) => /^(deploy|publish)([:._-].*)?$/.test(name) && !/\bexit\s+1\b/.test(body))
+    .map(([name]) => run(name));
+  if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json'])) commands.push('npx wrangler deploy');
+  if (ctx.hasAnyFile(['vercel.json'])) commands.push('npx vercel --prod');
+  if (ctx.hasAnyFile(['fly.toml'])) commands.push('fly deploy');
+  if (ctx.hasAnyFile(['netlify.toml'])) commands.push('npx netlify deploy --prod');
+  return commands;
 }

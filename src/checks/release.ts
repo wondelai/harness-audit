@@ -1,3 +1,4 @@
+import { localDeployCommands, minimalVerifySet } from '../capabilities.js';
 import type { RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
 
@@ -41,8 +42,8 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       status = 'warn';
     }
 
-    const verify = ctx.verify;
-    const gateCommand = verify.unified?.command ?? verify.commands.filter((c) => c.kinds.includes('test') || c.kinds.includes('lint') || c.kinds.includes('typecheck')).slice(0, 3).map((c) => c.command).join('`, `');
+    // The same minimal set a brief should quote: never a watcher, always the build when there is one.
+    const gateCommand = minimalVerifySet(ctx.verify).join('`, `');
     const missingOnPr = (['test', 'lint', 'typecheck'] as const).filter((k) => !gates(k));
 
     results.push({
@@ -104,7 +105,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       status = solo ? 'warn' : 'fail';
       evidence.push(
         solo
-          ? 'No pull request template (one active contributor: agent-written PRs have no fixed evidence format to fill in)'
+          ? `No pull request template (${ctx.team === 'inactive' ? 'no commits in the last 90 days' : 'one active contributor'}: agent-written PRs have no fixed evidence format to fill in)`
           : 'No pull request / merge request template found',
       );
     }
@@ -284,32 +285,43 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       evidence.push(`${w.path}: deploys (\`${w.deployCommands[0]!.slice(0, 70)}\`) with no \`needs:\`, environment or branch condition in front of it`);
     }
 
+    // The platform deploys from git: the brief or a workflow says so.
+    const platformText = `${ctx.brief.text}\n${ci.files.map((f) => ctx.readText(f) ?? '').join('\n')}`;
+    const platform = /\b(Workers Builds|Cloudflare Pages|Vercel|Netlify|Render|Railway|Amplify)\b/.exec(platformText)?.[1];
+    if (platform && deployWorkflows.length === 0) evidence.push(`Production deploys run through ${platform} on merge (per the brief or CI config)`);
+
+    // What can ship from a laptop, and which of it a committed deny rule stops.
+    const localDeploys = localDeployCommands(ctx);
     const claudeDeny = ctx.readJson<{ permissions?: { deny?: string[] } }>('.claude/settings.json')?.permissions?.deny ?? [];
-    const blocksLocalDeploy = claudeDeny.some((d) => /deploy|publish|prod|remote/i.test(d));
-    if (blocksLocalDeploy) {
-      evidence.push('.claude/settings.json denies local agent deploy/production commands');
+    const denied = (command: string): boolean => {
+      // `bun run deploy` is covered by a rule naming the script under any runner; `npx wrangler deploy` by one naming the CLI call.
+      const needle = command.replace(/^(npx|bunx)\s+/, '').replace(/^(?:npm|pnpm|bun|yarn|vp)\s+(?:run\s+)?/, '');
+      return claudeDeny.some((rule) => rule.includes(needle));
+    };
+    const unguarded = localDeploys.filter((c) => !denied(c));
+    if (localDeploys.length > 0) {
+      evidence.push(
+        unguarded.length === 0
+          ? `.claude/settings.json denies every local deploy command (${localDeploys.map((c) => `\`${c}\``).join(', ')})`
+          : claudeDeny.length > 0 && unguarded.length < localDeploys.length
+            ? `The deny list covers some deploy commands but not ${unguarded.map((c) => `\`${c}\``).join(', ')}`
+            : `Nothing stops an agent running ${unguarded.map((c) => `\`${c}\``).join(', ')} from a local checkout`,
+      );
     }
 
-    // The repository can deploy from a laptop: a deploy script or a platform config is present.
-    const deployScripts = Object.keys(ctx.packageJson?.scripts ?? {}).filter((k) => /^(deploy|publish|release)([:._-].*)?$/.test(k));
-    const hasWrangler = ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json']) !== undefined;
-    const canDeployLocally = deployScripts.length > 0 || hasWrangler;
-
-    let status: CheckResult['status'] = 'info';
+    let status: CheckResult['status'];
     if (ungated.length > 0) {
       status = 'warn';
-    } else if (gated.length > 0 || blocksLocalDeploy) {
+    } else if (localDeploys.length > 0) {
+      status = unguarded.length === 0 ? 'pass' : 'warn';
+    } else if (gated.length > 0 || platform) {
       status = 'pass';
-    } else if (canDeployLocally) {
-      status = 'warn';
-      evidence.push(
-        `Deploys happen outside CI (${deployScripts.length > 0 ? `package script \`${deployScripts[0]}\`` : 'wrangler config'} present) and nothing stops an agent running them from a local checkout`,
-      );
     } else {
+      status = 'info';
       evidence.push('No deploy workflow or local deploy command detected');
     }
 
-    const denyExample = hasWrangler ? '`Bash(npx wrangler deploy:*)`, `Bash(bunx wrangler deploy:*)`' : deployScripts.length > 0 ? `\`Bash(npm run ${deployScripts[0]}:*)\`` : '`Bash(<your deploy command>:*)`';
+    const denyExample = unguarded.length > 0 ? unguarded.slice(0, 3).map((c) => `\`Bash(${c}:*)\``).join(', ') : '`Bash(<your deploy command>:*)`';
     results.push({
       id: 'release.deploy-safety',
       station: 'release',
@@ -328,12 +340,16 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       fix: {
         en:
           ungated.length > 0
-            ? `Put the deploy job in ${ungated[0]!.path} behind the verify job (\`needs: [verify]\`) or a protected \`environment:\`, and deny local deploys in \`.claude/settings.json\` (${denyExample}).`
-            : `Deny local deploy commands for agents in \`.claude/settings.json\` \`permissions.deny\` (${denyExample}) and say in \`AGENTS.md\` which path is the only way to production.`,
+            ? `Put the deploy job in ${ungated[0]!.path} behind the verify job (\`needs: [verify]\`) or a protected \`environment:\`${unguarded.length > 0 ? `, and deny local deploys in \`.claude/settings.json\` (${denyExample})` : ''}.`
+            : unguarded.length > 0
+              ? `Add to \`permissions.deny\` in \`.claude/settings.json\`: ${denyExample}.`
+              : 'Keep the deny list in step with new deploy scripts.',
         pl:
           ungated.length > 0
-            ? `Uzależnij zadanie deploy w ${ungated[0]!.path} od zadania weryfikacji (\`needs: [verify]\`) lub chronionego \`environment:\` i zablokuj lokalny deploy w \`.claude/settings.json\` (${denyExample}).`
-            : `Zablokuj agentom lokalne komendy deploy w \`permissions.deny\` w \`.claude/settings.json\` (${denyExample}) i napisz w \`AGENTS.md\`, która ścieżka jest jedyną drogą na produkcję.`,
+            ? `Uzależnij zadanie deploy w ${ungated[0]!.path} od zadania weryfikacji (\`needs: [verify]\`) lub chronionego \`environment:\`${unguarded.length > 0 ? ` i zablokuj lokalny deploy w \`.claude/settings.json\` (${denyExample})` : ''}.`
+            : unguarded.length > 0
+              ? `Dodaj do \`permissions.deny\` w \`.claude/settings.json\`: ${denyExample}.`
+              : 'Aktualizuj listę deny wraz z nowymi skryptami deploy.',
       },
       docsPath: 'workflows/operate/codebase-health/',
     });

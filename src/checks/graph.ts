@@ -46,8 +46,8 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Uruchamianie wielu agentów w tym samym katalogu roboczym prowadzi do nadpisywania zmian, brudnego stanu gita i zafałszowanych testów.',
       },
       fix: {
-        en: 'Add a lightweight worktree helper script (or document `git worktree` / `--worktree` conventions plus `.worktreeinclude` for local untracked config) in `AGENTS.md`.',
-        pl: 'Dodaj prosty skrypt pomocniczy do worktree (lub opisz konwencję `git worktree` / `--worktree` wraz z `.worktreeinclude`) w `AGENTS.md`.',
+        en: `Say in ${ctx.brief.primary} how a second agent gets its own checkout: a small worktree helper script, or the \`git worktree\` / \`claude --worktree\` convention plus a \`.worktreeinclude\` listing the untracked config a fresh worktree needs.`,
+        pl: `Napisz w ${ctx.brief.primary}, jak drugi agent dostaje własny checkout: mały skrypt do worktree albo konwencję \`git worktree\` / \`claude --worktree\` oraz \`.worktreeinclude\` z listą nieśledzonej konfiguracji potrzebnej w nowym worktree.`,
       },
       docsPath: 'workflows/harness/git-worktrees/',
     });
@@ -70,7 +70,7 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     }
 
     const hasEphemeralLocalState =
-      ctx.hasFile('wrangler.toml') ||
+      ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json']) !== undefined ||
       ctx.hasFile('docker-compose.yml') ||
       ctx.hasFile('docker-compose.yaml') ||
       ctx.hasDependency('testcontainers') ||
@@ -96,8 +96,7 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
       !ctx.hasDependency('fastify') &&
       !ctx.hasDependency('hono') &&
       !ctx.hasDependency('vite') &&
-      !ctx.hasFile('wrangler.toml') &&
-      !ctx.hasFile('docker-compose.yml');
+      ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json', 'docker-compose.yml']) === undefined;
 
     let status: CheckResult['status'] = 'warn';
     if (hasPortEnv && hasEphemeralLocalState) {
@@ -192,9 +191,17 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     if (gradleModules >= 2) boundaryArtifacts.push(`Gradle modules (${gradleModules} in settings.gradle)`);
     const swiftTargets = (ctx.readText('Package.swift') ?? '').match(/\.(?:target|testTarget|executableTarget)\(/g)?.length ?? 0;
     if (swiftTargets >= 2) boundaryArtifacts.push(`Swift package targets (${swiftTargets})`);
-    if (/^##\s+(Architecture|Directory|Structure|Read before you touch|Modules)/im.test(brief)) {
-      boundaryArtifacts.push('Module/ownership map in root brief');
+    // The same routing a scoped-context check credits: a map section, a path table, or nested briefs.
+    const facts = ctx.brief;
+    if (facts.hasModuleMap) {
+      boundaryArtifacts.push(
+        facts.routedDocs.length > 0
+          ? `${facts.primary} maps areas to ${facts.routedDocs.length} doc(s) (${facts.routedDocs.slice(0, 2).join(', ')}${facts.routedDocs.length > 2 ? ', …' : ''})`
+          : `Module map section in ${facts.primary}`,
+      );
     }
+    if (facts.nestedBriefs.length >= 2) boundaryArtifacts.push(`Nested briefs per area (${facts.nestedBriefs.length})`);
+    if (ctx.findFiles((f) => /^docs\/[^/]*architecture[^/]*\.mdx?$/i.test(f)).length > 0) boundaryArtifacts.push('docs/ architecture doc');
 
     const status: CheckResult['status'] =
       boundaryArtifacts.length > 0 ? 'pass' : ctx.stack.monorepo ? 'fail' : 'warn';
@@ -212,14 +219,14 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
       evidence:
         boundaryArtifacts.length > 0
           ? boundaryArtifacts
-          : ['No explicit workspace config, ARCHITECTURE.md, or module ownership map in AGENTS.md'],
+          : [`No workspace config, architecture doc, nested briefs, or module map in ${ctx.brief.files.length > 0 ? ctx.brief.primary : 'a root brief'}`],
       why: {
         en: 'Clear module boundaries let you assign disjoint ownership slices to parallel agents without merge conflicts.',
         pl: 'Jasne granice modułów pozwalają przydzielać równoległym agentom rozłączne obszary odpowiedzialności bez konfliktów przy scalaniu.',
       },
       fix: {
-        en: 'Add a short "Read before you touch" or module boundary table in `AGENTS.md` (or `ARCHITECTURE.md`) mapping directories to invariants and owners.',
-        pl: 'Dodaj krótką tabelę granic modułów („Read before you touch”) w `AGENTS.md` (lub `ARCHITECTURE.md`), wiążącą katalogi z ich niezmiennikami i właścicielami.',
+        en: `Add a short "Read before you touch" table to ${ctx.brief.primary} (or an \`ARCHITECTURE.md\`) mapping each directory to its invariants and the doc that explains them.`,
+        pl: `Dodaj do ${ctx.brief.primary} (lub \`ARCHITECTURE.md\`) krótką tabelę „Read before you touch”, wiążącą każdy katalog z jego niezmiennikami i dokumentem, który je opisuje.`,
       },
       docsPath: 'workflows/build/',
     });

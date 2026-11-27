@@ -11,6 +11,10 @@
     ],
     "deny": [
       "Bash(npm publish:*)",
+      "Bash(npm run release:publish:*)",
+      "Bash(node scripts/publish.mjs:*)",
+      "Bash(git push --follow-tags:*)",
+      "Bash(git push --tags:*)",
       "Bash(git push --force:*)",
       "Bash(git push -f:*)",
       "Edit(.github/workflows/**)",
