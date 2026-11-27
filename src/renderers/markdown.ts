@@ -1,5 +1,6 @@
 import { docsUrl, LEVELS, STATION_MAP, t, UI } from '../i18n.js';
 import type { AuditReport, RenderOptions } from '../types.js';
+import { requirementText } from './terminal.js';
 
 export function renderMarkdown(report: AuditReport, options: RenderOptions = {}): string {
   const lang = options.lang ?? report.lang;
@@ -29,6 +30,7 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
       `| **Git Activity** | ${report.git.gitAuthors90d} ${t(UI.contributors90d, lang)} · ${report.git.commits30d} ${t(UI.commits30d, lang)} |`,
     );
   }
+  lines.push(`| **Scan** | ${report.scan.fileCount} ${t(report.scan.mode === 'git' ? UI.scanGit : UI.scanWalk, lang)}${report.scan.truncated ? ` — ${t(UI.scanTruncated, lang)}` : ''} |`);
   lines.push(`| **Audited At** | ${report.auditedAt} |`);
   lines.push('');
   lines.push(t(levelMeta.summary, lang));
@@ -39,6 +41,26 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
     lines.push('');
     for (const cap of report.levelCaps) {
       lines.push(`- **Level ${cap.cappedTo} cap:** ${t(cap.reason, lang)} (\`${cap.triggeredBy.join('`, `')}\`)`);
+    }
+  }
+
+  if (report.nextLevel) {
+    const next = report.nextLevel;
+    lines.push('');
+    lines.push(`## ${t(UI.nextLevelHeading, lang)}: Level ${next.level} — ${t(LEVELS[next.level].shortName, lang)}`);
+    lines.push('');
+    lines.push(
+      next.pointsMissing > 0
+        ? `- **${next.scoreNeeded}/100** (+${next.pointsMissing} ${t(UI.pointsToGo, lang)})`
+        : `- **${next.scoreNeeded}/100** ✓`,
+    );
+    const byReason = new Map<string, string[]>();
+    for (const b of next.blockers) {
+      const key = requirementText(t(b.requirement, lang));
+      byReason.set(key, [...(byReason.get(key) ?? []), b.id]);
+    }
+    for (const [reason, ids] of byReason) {
+      lines.push(`- **${t(UI.gateLabel, lang)}** \`${ids.join('`, `')}\` — ${reason}`);
     }
   }
 
@@ -61,7 +83,7 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
     for (let i = 0; i < report.topPriorities.length; i++) {
       const c = report.topPriorities[i]!;
       lines.push(
-        `${i + 1}. **[${c.status.toUpperCase()}] \`${c.id}\` — ${t(c.title, lang)}**`,
+        `${i + 1}. **[${c.status.toUpperCase()}] \`${c.id}\` — ${t(c.title, lang)}**${c.impact ? ` (+${c.impact} ${t(UI.pts, lang)})` : ''}`,
       );
       lines.push(`   - **${t(UI.evidenceLabel, lang)}:** ${c.evidence.join(' ; ')}`);
       lines.push(`   - **${t(UI.fixLabel, lang)}:** ${t(c.fix, lang)}`);
@@ -116,7 +138,7 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
     lines.push('');
     lines.push(`## ${t(UI.nextStepsHeading, lang)}`);
     lines.push('');
-    lines.push(`- **${t(UI.fixPromptHint, lang)}** \`npx @wondelai/harness-audit --prompt --out HARNESS-FIX-PROMPT.md\``);
+    lines.push(`- **${t(UI.fixPromptHint, lang)}** \`npx harness-audit --prompt --out HARNESS-FIX-PROMPT.md\``);
     lines.push(
       `- **${t(UI.deepDiveBook, lang)}:** [${t(report.recommendations.book.title, lang)}](${report.recommendations.book.url}) — ${t(report.recommendations.book.reason, lang)}`,
     );

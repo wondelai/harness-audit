@@ -1,6 +1,6 @@
 import type { AutonomyLevel, Lang, LocalizedText, StationId } from './types.js';
 
-export const TOOL_VERSION = '0.1.0';
+export const TOOL_VERSION = '0.2.0';
 export const BASE_DOCS_URL = 'https://developertoolkit.ai';
 
 export function docsUrl(lang: Lang, docsPath: string): string {
@@ -242,7 +242,37 @@ export const UI = {
   levelCapsHeading: { en: 'Level Gating Caps Applied', pl: 'Zastosowane ograniczenia poziomu' },
   stackHeading: { en: 'Detected Stack & Context', pl: 'Wykryty stos i kontekst' },
   stationsHeading: { en: 'Six Factory Stations', pl: 'Sześć stacji fabryki' },
-  topPrioritiesHeading: { en: 'Top Fixes to Unlock the Next Level', pl: 'Najważniejsze poprawki do kolejnego poziomu' },
+  topPrioritiesHeading: { en: 'Top Fixes', pl: 'Najważniejsze poprawki' },
+  topPrioritiesOrder: {
+    en: '(critical first, then next-level gates, then by severity and points gained)',
+    pl: '(najpierw krytyczne, potem bramki kolejnego poziomu, potem według wagi i zysku punktowego)',
+  },
+  nextLevelHeading: { en: 'Next level', pl: 'Kolejny poziom' },
+  scoreNeeded: { en: 'needs', pl: 'wymaga' },
+  pointsToGo: { en: 'to go', pl: 'do zdobycia' },
+  plusGates: { en: 'and these gates:', pl: 'oraz tych bramek:' },
+  gateLabel: { en: 'Gate', pl: 'Bramka' },
+  unblocks: { en: 'unblocks', pl: 'odblokowuje' },
+  pts: { en: 'pts', pl: 'pkt' },
+  seeTopFix: { en: 'top fix', pl: 'poprawka' },
+  verboseHint: { en: '(--verbose lists passing checks with evidence)', pl: '(--verbose pokazuje też zaliczone checki z dowodami)' },
+  stackUnknown: { en: 'no recognised language', pl: 'nie rozpoznano języka' },
+  scanGit: {
+    en: 'files (tracked + untracked; .gitignore respected, so local env files and build output are not audited)',
+    pl: 'plików (śledzone + nieśledzone; z uwzględnieniem .gitignore, więc lokalne pliki env i wyniki builda nie są audytowane)',
+  },
+  scanWalk: {
+    en: 'files (directory walk; not a git work tree, so .gitignore is not applied)',
+    pl: 'plików (przejście po katalogach; to nie jest repozytorium git, więc .gitignore nie jest stosowany)',
+  },
+  scanTruncated: {
+    en: 'Scan limit reached: the deepest paths were not read, so counts and file-based findings may be incomplete.',
+    pl: 'Osiągnięto limit skanu: najgłębsze ścieżki nie zostały przeczytane, więc liczniki i ustalenia mogą być niepełne.',
+  },
+  scaffoldHint: {
+    en: 'Preview the starter files this repo is missing:',
+    pl: 'Podejrzyj pliki startowe, których brakuje w tym repo:',
+  },
   allChecksHeading: { en: 'Detailed Station Findings', pl: 'Szczegółowe wyniki według stacji' },
   interviewHeading: { en: 'Org & Workflow Assessment', pl: 'Ocena organizacji i procesu pracy' },
   deepReviewHeading: { en: 'Deep Qualitative Review (LLM)', pl: 'Pogłębiona analiza jakościowa (LLM)' },
@@ -283,6 +313,7 @@ Audit options:
   --ci                CI mode: strip decorative banners & promo footer
   --min-score <N>     Exit with code 1 if overall score < N (0–100)
   --no-promo          Hide book and team-services next-step links
+  --verbose           List passing checks with their evidence too
   --interview         Run interactive 7-question Org & Workflow interview
   --role <role>       Role for interview & guidance: dev | lead | cto (default: dev)
   --deep              Run optional LLM qualitative pass (uses local claude/codex CLI or API key)
@@ -292,17 +323,17 @@ Audit options:
 
 Init subcommand options:
   harness-audit init [path]
-  --dry-run           Preview files without writing to disk
+  --dry-run           Print the files init would write, with their content, without writing
   --force             Overwrite existing files (never overwrites without --force)
   --tools <list>      Comma-separated: claude-code,cursor,codex (default: all)
   --lang <lang>       Language: en | pl (default: en)
 
 Examples:
-  npx @wondelai/harness-audit
-  npx @wondelai/harness-audit ./my-app --format html --out audit.html
-  npx @wondelai/harness-audit --ci --min-score 70 --format json
-  npx @wondelai/harness-audit --prompt --out HARNESS-FIX-PROMPT.md
-  npx @wondelai/harness-audit init --dry-run --tools claude-code,cursor
+  npx harness-audit
+  npx harness-audit ./my-app --format html --out audit.html
+  npx harness-audit --ci --min-score 70 --format json
+  npx harness-audit --prompt --out HARNESS-FIX-PROMPT.md
+  npx harness-audit init --dry-run --tools claude-code,cursor
 `,
     pl: `Użycie:
   harness-audit [ścieżka] [opcje]
@@ -319,6 +350,7 @@ Opcje audytu:
   --ci                Tryb CI: ukrywa dekoracyjne banery i stopkę z poleceniami
   --min-score <N>     Kod wyjścia 1, jeśli wynik ogólny < N (0–100)
   --no-promo          Ukrywa sekcję książek i usług dla zespołów
+  --verbose           Pokazuje też zaliczone checki wraz z dowodami
   --interview         Uruchamia interaktywny wywiad (7 pytań o proces i organizację)
   --role <rola>       Rola do wywiadu i rekomendacji: dev | lead | cto (domyślnie: dev)
   --deep              Opcjonalna analiza jakościowa LLM (lokalne CLI claude/codex lub klucz API)
@@ -328,17 +360,17 @@ Opcje audytu:
 
 Opcje podkomendy init:
   harness-audit init [ścieżka]
-  --dry-run           Podgląd plików bez zapisu na dysku
+  --dry-run           Wypisuje pliki, które init by utworzył, wraz z treścią, bez zapisu
   --force             Nadpisz istniejące pliki (domyślnie nigdy nie nadpisuje)
   --tools <lista>     Lista narzędzi: claude-code,cursor,codex (domyślnie: wszystkie)
   --lang <język>      Język: en | pl (domyślnie: en)
 
 Przykłady:
-  npx @wondelai/harness-audit --lang pl
-  npx @wondelai/harness-audit ./projekt --format html --out audyt.html --lang pl
-  npx @wondelai/harness-audit --ci --min-score 70 --format json
-  npx @wondelai/harness-audit --prompt --out HARNESS-FIX-PROMPT.md
-  npx @wondelai/harness-audit init --dry-run --tools claude-code,cursor
+  npx harness-audit --lang pl
+  npx harness-audit ./projekt --format html --out audyt.html --lang pl
+  npx harness-audit --ci --min-score 70 --format json
+  npx harness-audit --prompt --out HARNESS-FIX-PROMPT.md
+  npx harness-audit init --dry-run --tools claude-code,cursor
 `,
   },
 } as const;

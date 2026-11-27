@@ -105,7 +105,7 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     } else if (hasPortEnv || hasEphemeralLocalState || isPureLibrary) {
       status = isPureLibrary && !hasPortEnv && !hasEphemeralLocalState ? 'info' : 'pass';
       if (isPureLibrary && evidence.length === 0) {
-        evidence.push('Library/CLI repository without long-running dev server ports');
+        evidence.push('No long-running dev server detected (mobile app, library or CLI) — no ports to collide');
       }
     } else {
       status = 'warn';
@@ -188,6 +188,10 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     }
     if (ctx.packageJson?.workspaces) boundaryArtifacts.push('package.json workspaces');
     if (/\[workspace\]/.test(ctx.readText('Cargo.toml') ?? '')) boundaryArtifacts.push('Cargo.toml [workspace]');
+    const gradleModules = (`${ctx.readText('settings.gradle.kts') ?? ''}\n${ctx.readText('settings.gradle') ?? ''}`.match(/["']:[\w:-]+["']/g) ?? []).length;
+    if (gradleModules >= 2) boundaryArtifacts.push(`Gradle modules (${gradleModules} in settings.gradle)`);
+    const swiftTargets = (ctx.readText('Package.swift') ?? '').match(/\.(?:target|testTarget|executableTarget)\(/g)?.length ?? 0;
+    if (swiftTargets >= 2) boundaryArtifacts.push(`Swift package targets (${swiftTargets})`);
     if (/^##\s+(Architecture|Directory|Structure|Read before you touch|Modules)/im.test(brief)) {
       boundaryArtifacts.push('Module/ownership map in root brief');
     }

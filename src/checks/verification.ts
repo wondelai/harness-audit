@@ -22,6 +22,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       status = 'pass';
     } else if (testCount >= 1) {
       status = srcCount <= 10 && testCount >= 2 ? 'pass' : 'warn';
+    } else if (srcCount === 0 || (srcCount < 3 && ctx.stack.languages.length === 0)) {
+      // Documentation, prompts or configuration only: there is no program to test.
+      status = 'info';
+      evidence[0] = 'No source code detected (documentation / configuration repository) — nothing to unit-test';
     }
 
     results.push({
@@ -66,10 +70,19 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     if (e2eDirs.length > 0) {
       e2eSignals.push(`e2e/integration files (${e2eDirs.length})`);
     }
+    const androidUi = ctx.findFiles((f) => /\/androidTest\//.test(f)).length;
+    if (androidUi > 0) e2eSignals.push(`Android instrumented tests (${androidUi} files in androidTest/)`);
+    const xcUi = ctx.findFiles((f) => /UITests\/[^/]+\.swift$/.test(f)).length;
+    if (xcUi > 0) e2eSignals.push(`XCUITest UI tests (${xcUi} files)`);
+    if (ctx.findFiles((f) => /^\.maestro\//.test(f)).length > 0) e2eSignals.push('Maestro flows');
+    if (ctx.hasDependency('detox')) e2eSignals.push('Detox');
+    if (ctx.findFiles((f) => /(^|\/)integration_test\/.+\.dart$/.test(f)).length > 0) e2eSignals.push('Flutter integration tests');
 
+    const isMobileApp = ctx.stack.frameworks.some((fw) => ['Android', 'SwiftUI', 'Flutter', 'Expo'].includes(fw)) || ctx.stack.packageManagers.includes('xcodebuild');
     const isWebOrService =
+      isMobileApp ||
       ctx.stack.frameworks.some((fw) =>
-        ['Next.js', 'Astro', 'React', 'Vue', 'Nuxt', 'Svelte', 'SvelteKit', 'Express', 'Fastify', 'Hono', 'NestJS', 'FastAPI', 'Django', 'Flask', 'Rails', 'Laravel', 'Cloudflare Workers'].includes(fw),
+        ['Next.js', 'Astro', 'React', 'Vue', 'Nuxt', 'Svelte', 'SvelteKit', 'Express', 'Fastify', 'Hono', 'NestJS', 'FastAPI', 'Django', 'Flask', 'Rails', 'Laravel', 'Phoenix', 'Spring Boot', 'Cloudflare Workers'].includes(fw),
       );
 
     let status: CheckResult['status'] = 'pass';
@@ -77,10 +90,14 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       status = 'pass';
     } else if (isWebOrService) {
       status = 'warn';
-      e2eSignals.push('Web/service stack detected without E2E or runtime contract test suite');
+      e2eSignals.push(
+        isMobileApp
+          ? 'Mobile app without a UI or end-to-end test suite (XCUITest, Espresso/androidTest, Maestro)'
+          : 'Web/service stack detected without E2E or runtime contract test suite',
+      );
     } else {
       status = 'info';
-      e2eSignals.push('No separate browser E2E suite (library/CLI repo — CLI/integration tests suffice)');
+      e2eSignals.push('No app or service surface detected (library, CLI or tooling repo) — unit and integration tests suffice');
     }
 
     results.push({
@@ -99,8 +116,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Testy jednostkowe mockują routing, autoryzację, serializację i granice runtime — czyli dokładnie te miejsca, gdzie kod agentów psuje się najczęściej.',
       },
       fix: {
-        en: 'Add a focused must-have E2E or runtime contract tier (e.g., Playwright, Workers pool, or HTTP contract tests) covering critical user/API flows.',
-        pl: 'Dodaj szybki zestaw krytycznych testów E2E lub kontraktowych runtime (np. Playwright, Workers pool lub testy HTTP) pokrywający kluczowe ścieżki użytkownika/API.',
+        en: isMobileApp
+          ? 'Add a small must-pass UI tier for the critical flows (XCUITest, Espresso under `androidTest/`, or Maestro flows) that an agent can run headlessly.'
+          : 'Add a focused must-have E2E or runtime contract tier (e.g., Playwright, Workers pool, or HTTP contract tests) covering critical user/API flows.',
+        pl: isMobileApp
+          ? 'Dodaj mały, obowiązkowy zestaw testów UI dla krytycznych ścieżek (XCUITest, Espresso w `androidTest/` lub scenariusze Maestro), który agent uruchomi bez nadzoru.'
+          : 'Dodaj szybki zestaw krytycznych testów E2E lub kontraktowych runtime (np. Playwright, Workers pool lub testy HTTP) pokrywający kluczowe ścieżki użytkownika/API.',
       },
       docsPath: 'workflows/test/oracle-strength/',
     });
@@ -113,40 +134,59 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     let protectsOracle = false;
 
     if (codeownersPath) {
-      const content = ctx.readText(codeownersPath) ?? '';
-      const guardsTests = /(^|\s)\/?(tests?|__tests__|e2e|spec)\b/m.test(content);
-      const guardsCi = /(^|\s)\/?\.github\b/m.test(content);
-      const guardsBrief = /(^|\s)\/?(AGENTS\.md|CLAUDE\.md|\.claude|\.codex)/m.test(content);
+      // A rule guards the oracle when its pattern covers the tests or the CI definitions, not
+      // when it merely names a file that lives under .github/.
+      const patterns = (ctx.readText(codeownersPath) ?? '')
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#'))
+        .map((l) => l.split(/\s+/)[0]!);
+      const catchAll = patterns.some((p) => p === '*' || p === '/' || p === '**');
+      const guardsTests = catchAll || patterns.some((p) => /^\/?(\*\*\/)?(tests?|__tests__|e2e|specs?|Tests)(\/|\/\*\*?|$)/.test(p) || /\*\.(test|spec)\./.test(p));
+      // The whole workflows directory, not one workflow file.
+      const guardsCi = catchAll || patterns.some((p) => /^\/?\.github(\/(\*\*?)?|\/workflows(\/(\*\*?)?)?)?$/.test(p));
+      const guardsBrief = catchAll || patterns.some((p) => /^\/?(AGENTS\.md|CLAUDE\.md|\.claude(\/.*)?|\.codex(\/.*)?)$/.test(p));
+      const covered = [guardsTests ? 'tests' : '', guardsCi ? 'CI workflows' : '', guardsBrief ? 'agent rules' : ''].filter(Boolean);
       evidence.push(
-        `${codeownersPath} present (guards: ${[guardsTests ? 'tests' : '', guardsCi ? '.github' : '', guardsBrief ? 'agent rules' : ''].filter(Boolean).join(', ') || 'general paths'})`,
+        covered.length > 0
+          ? `${codeownersPath} covers ${covered.join(', ')}`
+          : `${codeownersPath} exists but covers neither tests nor .github/workflows (${patterns.length} rule(s): ${patterns.slice(0, 3).join(', ')}${patterns.length > 3 ? ', …' : ''})`,
       );
       if (guardsTests || guardsCi) protectsOracle = true;
     }
 
     // Also check if .claude/settings.json denies editing tests or CI workflows
     const claudeRaw = ctx.readText('.claude/settings.json') ?? '';
-    if (/"(?:Edit|Write)\([^)]*(?:tests|\.github|playwright|vitest)/i.test(claudeRaw)) {
+    if (/"(?:Edit|Write|MultiEdit)\([^)]*(?:tests?\b|\.github|playwright|vitest|e2e)/i.test(claudeRaw)) {
       evidence.push('.claude/settings.json restricts agent edits to test/CI paths');
       protectsOracle = true;
     }
 
-    // Check CI workflows for oracle / protected-path guard
+    // A CI job that fails (or flags) a change which weakens tests or edits protected paths
     const workflows = ctx.findFiles((f) => /^\.github\/workflows\/.+\.ya?ml$/.test(f));
     for (const wf of workflows) {
       const body = ctx.readText(wf) ?? '';
-      if (/protected.*path|oracle|CODEOWNERS|test.*modified/i.test(body)) {
-        evidence.push(`${wf} includes protected-path / oracle guard`);
+      if (/protected[-_ ]paths?|oracle[-_ ]guard|test[-_ ]?(files?)?[-_ ](deleted|removed|weakened|guard)|guard[-_ ]tests/i.test(body)) {
+        evidence.push(`${wf} guards protected paths / test changes`);
         protectsOracle = true;
       }
     }
 
+    const solo = ctx.isSolo;
     let status: CheckResult['status'] = 'fail';
     if (protectsOracle) {
       status = 'pass';
-    } else if (codeownersPath) {
+    } else if (codeownersPath || solo) {
+      // With one contributor there is nobody for CODEOWNERS to route a review to; the gap is real
+      // but smaller, and the fix is a guard rather than a second reviewer.
       status = 'warn';
-    } else {
-      evidence.push('No CODEOWNERS or CI/harness protection found for tests/, .github/workflows/, or rule files');
+    }
+    if (!protectsOracle && !codeownersPath) {
+      evidence.push(
+        solo
+          ? 'One active contributor: no CI or harness guard stops an agent from weakening tests or editing .github/workflows to get to green'
+          : 'No CODEOWNERS or CI/harness protection found for tests/, .github/workflows/, or rule files',
+      );
     }
 
     results.push({
@@ -165,8 +205,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Agent, który może osłabić testy, usunąć asercje lub zmienić workflow CI, aby uzyskać zielony wynik, zamienia bramkę weryfikacji w fikcję.',
       },
       fix: {
-        en: 'Add `.github/CODEOWNERS` protecting `tests/`, `.github/`, `AGENTS.md`, and linter/tsconfig files, and require Code Owner review on protected branches.',
-        pl: 'Dodaj `.github/CODEOWNERS` chroniący `tests/`, `.github/`, `AGENTS.md` oraz konfigurację lintera/TS i wymagaj zatwierdzenia Code Owners na chronionych gałęziach.',
+        en: solo
+          ? 'Solo repo, so skip CODEOWNERS and add a guard instead: a CI step that fails when a pull request deletes test files, adds `.skip`/`.only`, or edits `.github/workflows/` without an explicit label; or deny agent edits to CI config in `.claude/settings.json` (`"deny": ["Edit(.github/workflows/**)"]`).'
+          : 'Add `.github/CODEOWNERS` rules for `tests/`, `.github/workflows/`, `AGENTS.md` and the lint/type config, and require Code Owner review on the protected branch.',
+        pl: solo
+          ? 'Repozytorium jednoosobowe, więc zamiast CODEOWNERS dodaj bezpiecznik: krok CI, który pada, gdy pull request usuwa pliki testów, dodaje `.skip`/`.only` lub zmienia `.github/workflows/` bez jawnej etykiety; albo zablokuj agentom edycję konfiguracji CI w `.claude/settings.json` (`"deny": ["Edit(.github/workflows/**)"]`).'
+          : 'Dodaj reguły `.github/CODEOWNERS` dla `tests/`, `.github/workflows/`, `AGENTS.md` oraz konfiguracji lintera/typów i wymagaj zatwierdzenia Code Owners na chronionej gałęzi.',
       },
       docsPath: 'workflows/test/protect-the-oracle/',
     });
@@ -180,6 +224,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     const tautologyHits: string[] = [];
     let tsIgnoreCount = 0;
     let eslintDisableCount = 0;
+    const tsIgnoreFiles: Array<{ file: string; count: number }> = [];
 
     // Scan up to 150 test files for test anti-patterns
     const sampleTests = ctx.testFiles.slice(0, 150);
@@ -194,21 +239,27 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         const trimmed = line.trim();
         if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('#')) continue;
 
-        if (/\b(?:it|test|describe|context)\.only\s*\(/.test(trimmed) || /\bf(?:it|describe)\s*\(/.test(trimmed)) {
+        // Matchers are anchored to the start of the statement: the same call quoted inside a
+        // string (a fixture a test writes to disk) is data, not a test.
+        if (/^(?:(?:test|describe)\.)?(?:it|test|describe|context)\.only\b/.test(trimmed) || /^f(?:it|describe)\s*\(/.test(trimmed)) {
           onlyHits.push(`${tf}:${idx + 1}`);
         }
+        // A skipped test is declared with a title: `it.skip('…')`. `test.skip(isMobile, 'why')`
+        // inside a test body is a runtime condition, which is how Playwright scopes a test.
         if (
-          /\b(?:it|test|describe)\.skip\s*\(/.test(trimmed) ||
-          /\bx(?:it|test|describe)\s*\(/.test(trimmed) ||
-          /@pytest\.mark\.skip\b/.test(trimmed)
+          /^(?:(?:test|describe)\.)?(?:it|test|describe)\.(?:skip|todo|fixme)\s*\(\s*['"`]/.test(trimmed) ||
+          /^x(?:it|test|describe)\s*\(/.test(trimmed) ||
+          /@pytest\.mark\.skip\b|@unittest\.skip\b/.test(trimmed) ||
+          /^@(?:Ignore|Disabled)\b/.test(trimmed) ||
+          /\bt\.Skip\(\)/.test(trimmed)
         ) {
           skipHits.push(`${tf}:${idx + 1}`);
         }
-        if (/\b(?:it|test)\s*\([^)]+,\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{\s*\}\s*\)/.test(trimmed)) {
+        if (/^(?:it|test)\s*\([^)]+,\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{\s*\}\s*\)/.test(trimmed)) {
           emptyTestHits.push(`${tf}:${idx + 1}`);
         }
         if (
-          /\bexpect\s*\(\s*(true|false|\d+|['"][^'"]*['"])\s*\)\s*\.\s*(?:toBe|toEqual|toStrictEqual)\s*\(\s*\1\s*\)/.test(
+          /^(?:await\s+)?expect\s*\(\s*(true|false|\d+|['"][^'"]*['"])\s*\)\s*\.\s*(?:toBe|toEqual|toStrictEqual)\s*\(\s*\1\s*\)/.test(
             trimmed,
           ) ||
           /^\s*assert\s+True\s*$/.test(line)
@@ -223,14 +274,23 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     for (const sf of sampleSources) {
       const content = ctx.readText(sf);
       if (!content) continue;
-      const tsMatches = content.match(/@ts-(?:ignore|nocheck)\b/g);
-      if (tsMatches) tsIgnoreCount += tsMatches.length;
-      const esMatches = content.match(/\beslint-disable(?:-next-line|-line)?\b|#\s*type:\s*ignore\b/g);
+      // A suppression only works as the start of a comment; the same words inside a string or a
+      // regular expression (a linter's own source, a prompt) suppress nothing.
+      const tsMatches = content.match(/(?:\/\/|\/\*)\s*@ts-(?:ignore|nocheck)\b/g);
+      if (tsMatches) {
+        tsIgnoreCount += tsMatches.length;
+        tsIgnoreFiles.push({ file: sf, count: tsMatches.length });
+      }
+      const esMatches = content.match(/(?:\/\/|\/\*)\s*(?:eslint|oxlint|biome)-(?:disable|ignore)(?:-next-line|-line)?\b|#\s*type:\s*ignore\b|#\s*noqa\b|@Suppress(?:Warnings)?\(|\/\/\s*swiftlint:disable\b/g);
       if (esMatches) eslintDisableCount += esMatches.length;
     }
 
     const evidence: string[] = [];
-    if (sampleTests.length === 0) {
+    const nothingToTest =
+      sampleTests.length === 0 && (ctx.sourceFiles.length === 0 || (ctx.sourceFiles.length < 3 && ctx.stack.languages.length === 0));
+    if (nothingToTest) {
+      evidence.push('No source code detected — nothing to scan');
+    } else if (sampleTests.length === 0) {
       evidence.push('No test files to scan');
     } else {
       evidence.push(`Scanned ${sampleTests.length} test file(s) and ${sampleSources.length} source file(s)`);
@@ -240,12 +300,18 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     if (tautologyHits.length > 0) evidence.push(`Constant-to-constant tautology assertions (${tautologyHits.length}): ${tautologyHits.slice(0, 3).join(', ')}`);
     if (skipHits.length > 0) evidence.push(`Skipped tests (${skipHits.length}): ${skipHits.slice(0, 3).join(', ')}`);
     if (tsIgnoreCount > 0 || eslintDisableCount > 0) {
-      evidence.push(`Suppressions in source: ${tsIgnoreCount} @ts-ignore/@ts-nocheck, ${eslintDisableCount} eslint-disable/type:ignore`);
+      evidence.push(`Suppressions in ${sampleSources.length} source file(s): ${tsIgnoreCount} @ts-ignore/@ts-nocheck, ${eslintDisableCount} lint/type suppressions`);
+    }
+    if (tsIgnoreCount >= 5) {
+      const worst = tsIgnoreFiles.sort((a, b) => b.count - a.count).slice(0, 3);
+      evidence.push(`@ts-ignore/@ts-nocheck in: ${worst.map((w) => `${w.file} (${w.count})`).join(', ')}`);
     }
 
     const suppressionRate = sampleSources.length > 0 ? (tsIgnoreCount + eslintDisableCount) / sampleSources.length : 0;
     let status: CheckResult['status'] = 'pass';
-    if (sampleTests.length === 0) {
+    if (nothingToTest) {
+      status = 'info';
+    } else if (sampleTests.length === 0) {
       status = 'fail';
     } else if (onlyHits.length > 0 || tautologyHits.length > 0 || emptyTestHits.length >= 2 || tsIgnoreCount >= 15) {
       status = 'fail';
@@ -253,6 +319,25 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       status = 'warn';
     } else {
       evidence.push('No .only(), empty test blocks, constant tautologies, or heavy suppression sprawl detected');
+    }
+
+    // One sentence per kind of finding, so the fix never talks about something the scan did not see.
+    const qualityFix = { en: [] as string[], pl: [] as string[] };
+    if (onlyHits.length > 0) {
+      qualityFix.en.push('Remove the `.only()` calls listed above (they silently drop every other test from the run).');
+      qualityFix.pl.push('Usuń wymienione wyżej wywołania `.only()` (po cichu wyłączają pozostałe testy).');
+    }
+    if (tautologyHits.length > 0 || emptyTestHits.length > 0) {
+      qualityFix.en.push('Replace the empty and constant-to-constant tests with assertions on real behaviour against hand-computed values.');
+      qualityFix.pl.push('Zastąp puste i tautologiczne testy asercjami realnego zachowania wobec ręcznie wyliczonych wartości.');
+    }
+    if (skipHits.length >= 5) {
+      qualityFix.en.push('Un-skip or delete the skipped tests listed above; a skipped test that stays is a hole agents learn to dig.');
+      qualityFix.pl.push('Włącz lub usuń wymienione wyżej pominięte testy; pominięty test, który zostaje, to furtka, z której agenci nauczą się korzystać.');
+    }
+    if (tsIgnoreCount >= 5 || suppressionRate > 0.35) {
+      qualityFix.en.push('Replace `@ts-ignore` in the files listed above with proper narrowing, or with `@ts-expect-error` plus a reason so it fails once the cause is gone.');
+      qualityFix.pl.push('Zastąp `@ts-ignore` w wymienionych plikach właściwym zawężaniem typów albo `@ts-expect-error` z uzasadnieniem, aby zgłaszał błąd, gdy przyczyna zniknie.');
     }
 
     results.push({
@@ -271,8 +356,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Tautologiczne asercje (`expect(true).toBe(true)`), `.only()`, pominięte testy i nadmiar `@ts-ignore` dają zielone buildy, które niczego nie dowodzą.',
       },
       fix: {
-        en: 'Remove `.only()`, delete or replace tautological/empty tests with behavioral assertions against hand-computed expected values, and replace `@ts-ignore` with proper narrowing or `@ts-expect-error` with rationale.',
-        pl: 'Usuń `.only()`, zastąp puste i tautologiczne testy asercjami zachowania wobec ręcznie wyliczonych oczekiwań oraz zamień `@ts-ignore` na właściwe typowanie.',
+        en: sampleTests.length === 0
+          ? 'Write the first tests (see verification.unit-tests); this scan has nothing to read until they exist.'
+          : qualityFix.en.join(' ') || 'Keep it this way: no `.only()`, no title-skipped tests, no constant assertions.',
+        pl: sampleTests.length === 0
+          ? 'Napisz pierwsze testy (patrz verification.unit-tests); dopóki ich nie ma, ten skan nie ma czego czytać.'
+          : qualityFix.pl.join(' ') || 'Utrzymaj ten stan: bez `.only()`, bez testów pomijanych po tytule, bez asercji na stałych.',
       },
       docsPath: 'workflows/test/oracle-strength/',
     });
@@ -332,11 +421,23 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     const pkg = ctx.packageJson;
     if (pkg?.scripts) {
       for (const [k, v] of Object.entries(pkg.scripts)) {
-        if (/(audit|seo|budget|check:links|check:size|architecture|arch)/i.test(k) || /seo-audit|check-links|size-limit|depcruise/i.test(v)) {
+        if (
+          /(^|[:._-])(audit|seo|budget|links|size|architecture|arch|a11y|deps|boundaries|knip|deadcode)($|[:._-])/i.test(k) ||
+          /\b(seo-audit|check-links|size-limit|depcruise|knip|madge|lhci|pa11y|linkinator|lychee|ts-prune|bundlesize)\b/i.test(v)
+        ) {
           fitnessSignals.push(`script: ${k}`);
         }
+        // A repository's own invariant checks: `check:design`, or a lint script that runs scripts/check-*.mjs.
+        const ownChecks = v.match(/\bscripts\/check-[\w.-]+/g);
+        if (ownChecks) fitnessSignals.push(`invariant checks in \`${k}\`: ${[...new Set(ownChecks)].slice(0, 3).join(', ')}`);
+        else if (/^check:(?!types?$|ts$)[\w-]+$/.test(k)) fitnessSignals.push(`script: ${k}`);
       }
     }
+    if (ctx.hasAnyFile(['knip.json', 'knip.jsonc', 'knip.ts', '.knip.json'])) fitnessSignals.push('Knip (unused code and dependencies)');
+    if (ctx.hasFile('.periphery.yml')) fitnessSignals.push('Periphery (unused Swift code)');
+    const gradleCatalog = `${ctx.readText('gradle/libs.versions.toml') ?? ''}\n${ctx.readText('build.gradle.kts') ?? ''}`;
+    if (/kover|jacoco/i.test(gradleCatalog)) fitnessSignals.push('JVM coverage tooling (Kover/JaCoCo)');
+    if (/dependency-?guard|dependencyAnalysis/i.test(gradleCatalog)) fitnessSignals.push('Gradle dependency guard');
 
     // Coverage thresholds in vitest/jest/pyproject
     const testConfigs = ['vitest.config.ts', 'vite.config.ts', 'jest.config.ts', 'jest.config.js', 'pyproject.toml'];

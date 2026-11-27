@@ -25,6 +25,7 @@ interface ParsedArgs {
   prompt: boolean;
   dryRun: boolean;
   force: boolean;
+  verbose: boolean;
   tools?: SupportedTool[];
   help: boolean;
   version: boolean;
@@ -44,6 +45,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     prompt: false,
     dryRun: false,
     force: false,
+    verbose: false,
     help: false,
     version: false,
   };
@@ -70,6 +72,8 @@ function parseArgs(argv: string[]): ParsedArgs {
       args.dryRun = true;
     } else if (token === '--force') {
       args.force = true;
+    } else if (token === '--verbose') {
+      args.verbose = true;
     } else if (token === '--format' || token.startsWith('--format=')) {
       const val = token.includes('=') ? token.split('=')[1] : argv[++i];
       if (val === 'terminal' || val === 'md' || val === 'html' || val === 'json') {
@@ -159,6 +163,15 @@ async function main(): Promise<void> {
     for (const a of result.actions) {
       const sym = a.action === 'skip' ? 'SKIP' : a.action === 'overwrite' ? 'OVERWRITE' : 'CREATE';
       process.stdout.write(`  [${sym}] ${a.path} — ${a.reason}\n`);
+      // A dry run is a preview: show what would land on disk, not just where.
+      if (result.dryRun && a.action !== 'skip') {
+        for (const line of a.content.replace(/\n$/, '').split('\n')) {
+          process.stdout.write(`      | ${line}\n`);
+        }
+      }
+    }
+    if (result.dryRun && result.actions.some((a) => a.action !== 'skip')) {
+      process.stdout.write('\nNothing was written. Run again without --dry-run to create these files.\n');
     }
     return;
   }
@@ -186,6 +199,7 @@ async function main(): Promise<void> {
         lang: args.lang,
         ci: args.ci,
         noPromo: args.noPromo,
+        verbose: args.verbose,
       });
 
   if (args.out) {

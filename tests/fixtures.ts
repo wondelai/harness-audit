@@ -1,21 +1,43 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 export interface TempRepo {
   dir: string;
   write: (relPath: string, content: string) => void;
+  /** Creates `relPath` as a symlink to `target` (relative to the link's directory). */
+  symlink: (relPath: string, target: string) => void;
+  /** `git init` on first use, then stages everything and commits as `author`. */
+  commit: (author?: string) => void;
   cleanup: () => void;
 }
 
 export function createTempRepo(prefix = 'harness-audit-test-'): TempRepo {
   const dir = mkdtempSync(join(tmpdir(), prefix));
+  let initialised = false;
+  const git = (...args: string[]): void => {
+    execFileSync('git', args, { cwd: dir, stdio: 'ignore' });
+  };
   return {
     dir,
     write(relPath: string, content: string) {
       const full = join(dir, relPath);
       mkdirSync(dirname(full), { recursive: true });
       writeFileSync(full, content, 'utf8');
+    },
+    symlink(relPath: string, target: string) {
+      const full = join(dir, relPath);
+      mkdirSync(dirname(full), { recursive: true });
+      symlinkSync(target, full);
+    },
+    commit(author = 'dev@example.com') {
+      if (!initialised) {
+        git('init', '-q', '-b', 'main');
+        initialised = true;
+      }
+      git('add', '-A');
+      git('-c', `user.email=${author}`, '-c', 'user.name=Test Author', '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'snapshot');
     },
     cleanup() {
       rmSync(dir, { recursive: true, force: true });

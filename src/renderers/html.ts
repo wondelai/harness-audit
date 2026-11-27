@@ -234,7 +234,7 @@ export function renderHtml(report: AuditReport, options: RenderOptions = {}): st
         <div class="next-card">
           <div class="mono next-label">01 · CLI FIX PROMPT</div>
           <p>${escapeHtml(t(UI.fixPromptHint, lang))}</p>
-          <pre class="code-well"><code>npx @wondelai/harness-audit --prompt --out HARNESS-FIX-PROMPT.md</code></pre>
+          <pre class="code-well"><code>npx harness-audit --prompt --out HARNESS-FIX-PROMPT.md</code></pre>
         </div>
         <div class="next-card">
           <div class="mono next-label">02 · ${escapeHtml(t(UI.deepDiveBook, lang).toUpperCase())}</div>

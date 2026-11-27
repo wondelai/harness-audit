@@ -1,6 +1,6 @@
 {
   "name": "harness-audit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Audit any repository's AI coding agent harness across the 6 Software Factory Stations and Autonomy Ladder (Level 0-5). Works with Claude Code, Codex, and Cursor.",
   "license": "MIT",
   "author": "Michal Jaskolski <michal@wondel.ai>",
@@ -45,6 +45,6 @@
     "LICENSE"
   ],
   "dependencies": {
-    "@wondelai/harness-audit": "^0.1.0"
+    "@wondelai/harness-audit": "^0.2.0"
   }
 }

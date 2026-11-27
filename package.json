@@ -1,6 +1,6 @@
 {
   "name": "@wondelai/harness-audit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Audit any repository's AI coding agent harness across the 6 Software Factory Stations and Autonomy Ladder (Level 0-5). Works with Claude Code, Codex, and Cursor.",
   "license": "MIT",
   "author": "Michal Jaskolski <michal@wondel.ai>",
@@ -51,7 +51,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run typecheck && npm run build && npm test"
+    "verify": "npm run typecheck && npm run build && npm test",
+    "prepublishOnly": "npm run verify"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",

@@ -7,6 +7,7 @@ import type {
   InterviewRole,
   Lang,
   LevelCap,
+  NextLevel,
   ServiceRecommendation,
   Severity,
   StackInfo,
@@ -74,13 +75,34 @@ export function computeOverallScore(stations: StationScore[]): number {
   return totalWeight > 0 ? Math.round(sum / totalWeight) : 0;
 }
 
+/** Lowest overall score of each level; index = level. */
+export const LEVEL_THRESHOLDS: readonly number[] = [0, 25, 45, 63, 78, 90];
+
 export function rawLevelFromScore(overallScore: number): AutonomyLevel {
-  if (overallScore < 25) return 0;
-  if (overallScore < 45) return 1;
-  if (overallScore < 63) return 2;
-  if (overallScore < 78) return 3;
-  if (overallScore < 90) return 4;
-  return 5;
+  let level = 0;
+  for (let l = 1; l < LEVEL_THRESHOLDS.length; l++) {
+    if (overallScore >= LEVEL_THRESHOLDS[l]!) level = l;
+  }
+  return level as AutonomyLevel;
+}
+
+/**
+ * Sets `impact` on every failing or warning check: the points the overall score gains when that
+ * check alone turns to pass. Mutates the checks so every renderer reads the same number.
+ */
+export function assignImpact(checks: CheckResult[]): void {
+  for (const station of STATIONS) {
+    const stationChecks = checks.filter((c) => c.station === station.id);
+    const possible = stationChecks.reduce((sum, c) => (c.status === 'info' ? sum : sum + c.weight), 0);
+    for (const c of stationChecks) {
+      if (possible === 0 || (c.status !== 'fail' && c.status !== 'warn')) {
+        delete c.impact;
+        continue;
+      }
+      const missing = c.status === 'fail' ? c.weight : c.weight * 0.5;
+      c.impact = Math.round((missing / possible) * station.weight * 1000) / 10;
+    }
+  }
 }
 
 export function evaluateLevel(
@@ -89,6 +111,39 @@ export function evaluateLevel(
   checks: CheckResult[],
 ): { rawLevel: AutonomyLevel; level: AutonomyLevel; caps: LevelCap[] } {
   const rawLevel = rawLevelFromScore(overallScore);
+  const caps = capsAt(rawLevel, stations, checks);
+
+  let level = rawLevel;
+  for (const cap of caps) {
+    if (cap.cappedTo < level) {
+      level = cap.cappedTo;
+    }
+  }
+
+  return { rawLevel, level, caps };
+}
+
+/**
+ * What the next level needs: its score threshold and the gates that would hold a repository below
+ * it whatever the score. Undefined at Level 5.
+ */
+export function nextLevelFor(
+  level: AutonomyLevel,
+  overallScore: number,
+  stations: StationScore[],
+  checks: CheckResult[],
+): NextLevel | undefined {
+  if (level >= 5) return undefined;
+  const target = (level + 1) as AutonomyLevel;
+  const scoreNeeded = LEVEL_THRESHOLDS[target]!;
+  const blockers = capsAt(target, stations, checks)
+    .filter((cap) => cap.cappedTo < target)
+    .flatMap((cap) => cap.triggeredBy.map((id) => ({ id, requirement: cap.reason })));
+  return { level: target, scoreNeeded, pointsMissing: Math.max(0, scoreNeeded - overallScore), blockers };
+}
+
+/** The gating caps that apply to a repository whose score alone would put it at `rawLevel`. */
+function capsAt(rawLevel: AutonomyLevel, stations: StationScore[], checks: CheckResult[]): LevelCap[] {
   const byId = new Map(checks.map((c) => [c.id, c]));
   const stationById = new Map(stations.map((s) => [s.id, s]));
   const caps: LevelCap[] = [];
@@ -158,6 +213,10 @@ export function evaluateLevel(
   // Cap 4: No Level 4+ without strong Verification (>=70), Loop (>=70), passing CI, and non-failing test quality scan
   if (rawLevel >= 4) {
     const triggers: string[] = [];
+    // Unattended runs are bounded by the weakest station: what the agent is told and allowed counts
+    // as much as how its work is checked.
+    if (stationScore('intent') < 60) triggers.push('intent (<60)');
+    if (stationScore('harness') < 60) triggers.push('harness (<60)');
     if (stationScore('verification') < 70) triggers.push('verification (<70)');
     if (stationScore('loop') < 70) triggers.push('loop (<70)');
     if (checkStatus('release.ci-pipeline') !== 'pass') triggers.push('release.ci-pipeline');
@@ -168,8 +227,8 @@ export function evaluateLevel(
         cappedTo: 3,
         triggeredBy: triggers,
         reason: {
-          en: 'Capped at Level 3: unattended Level 4 runs require strong Verification (>=70), fast Loop (>=70), PR-gated CI, and clean non-tautological tests.',
-          pl: 'Ograniczenie do Poziomu 3: bezobsługowe uruchomienia Poziomu 4 wymagają silnej Weryfikacji (>=70), szybkiej Pętli (>=70), CI na PR i rzetelnych testów.',
+          en: 'Capped at Level 3: unattended Level 4 runs require clear Intent (>=60), a defined Harness (>=60), strong Verification (>=70), fast Loop (>=70), PR-gated CI, and clean non-tautological tests.',
+          pl: 'Ograniczenie do Poziomu 3: bezobsługowe uruchomienia Poziomu 4 wymagają jasnej Intencji (>=60), zdefiniowanej Uprzęży (>=60), silnej Weryfikacji (>=70), szybkiej Pętli (>=70), CI na PR i rzetelnych testów.',
         },
       });
     }
@@ -196,27 +255,35 @@ export function evaluateLevel(
     }
   }
 
-  let level = rawLevel;
-  for (const cap of caps) {
-    if (cap.cappedTo < level) {
-      level = cap.cappedTo;
-    }
-  }
-
-  return { rawLevel, level, caps };
+  return caps;
 }
 
-export function selectTopPriorities(checks: CheckResult[], limit = 5): CheckResult[] {
+/** Whether fixing the check clears one of the next level's gates. */
+export function unblocksNextLevel(check: CheckResult, next: NextLevel | undefined): boolean {
+  if (!next) return false;
+  return next.blockers.some((b) => b.id === check.id || b.id.startsWith(`${check.station} (`));
+}
+
+/**
+ * The order to fix things in: critical findings first, then whatever gates the next level, then
+ * by severity, and within one severity by the points each fix adds to the score.
+ */
+export function selectTopPriorities(checks: CheckResult[], limit = 5, next?: NextLevel): CheckResult[] {
+  // A committed credential or a bypassed permission model is urgent whatever else is missing.
+  const securityBlocker = (c: CheckResult): boolean =>
+    Boolean(c.meta?.['hasHardcodedSecrets'] || c.meta?.['hasHardcodedMcpSecrets'] || c.meta?.['hasCriticalPermissionError']);
+  const rank = (c: CheckResult): number =>
+    securityBlocker(c) ? 0 : c.severity === 'critical' ? 1 : unblocksNextLevel(c, next) ? 2 : 3;
   return checks
     .filter((c) => c.status === 'fail' || c.status === 'warn')
     .sort((a, b) => {
-      // Fail before warn
-      if (a.status !== b.status) return a.status === 'fail' ? -1 : 1;
-      // Higher severity first
-      const sevDiff = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
-      if (sevDiff !== 0) return sevDiff;
-      // Higher weight first
-      return b.weight - a.weight;
+      const rankDiff = rank(a) - rank(b);
+      if (rankDiff !== 0) return rankDiff;
+      const severityDiff = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
+      if (severityDiff !== 0) return severityDiff;
+      const impactDiff = (b.impact ?? 0) - (a.impact ?? 0);
+      if (impactDiff !== 0) return impactDiff;
+      return a.status === b.status ? 0 : a.status === 'fail' ? -1 : 1;
     })
     .slice(0, limit);
 }

@@ -1,118 +1,65 @@
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { scriptRunner } from './capabilities.js';
 import { RepoContext } from './fs-scanner.js';
-import type { InitAction, InitOptions, InitResult, StackInfo, SupportedTool } from './types.js';
+import type { InitAction, InitOptions, InitResult, SupportedTool } from './types.js';
 
 const DEFAULT_TOOLS: SupportedTool[] = ['claude-code', 'cursor', 'codex'];
 
-function detectCommands(stack: StackInfo): {
-  install: string;
-  test: string;
-  lint: string;
-  typecheck: string;
-  build: string;
-} {
-  const pm = stack.packageManagers[0];
-  if (pm === 'vp') {
-    return {
-      install: 'vp install --frozen-lockfile',
-      test: 'vp test',
-      lint: 'vp lint',
-      typecheck: 'vp run typecheck',
-      build: 'vp run build',
-    };
+const INSTALL_COMMAND: Record<string, string> = {
+  bun: 'bun install --frozen-lockfile',
+  pnpm: 'pnpm install --frozen-lockfile',
+  yarn: 'yarn install --frozen-lockfile',
+  npm: 'npm ci',
+  uv: 'uv sync',
+  poetry: 'poetry install',
+  pip: 'pip install -r requirements.txt',
+  go: 'go mod download',
+  cargo: 'cargo fetch',
+  swiftpm: 'swift package resolve',
+  pub: 'dart pub get',
+  bundler: 'bundle install',
+  composer: 'composer install',
+  mix: 'mix deps.get',
+};
+
+/**
+ * The fewest detected commands that together cover typecheck, lint, test and build. Only commands
+ * the repository really has: a brief that quotes a script which does not exist teaches agents to
+ * distrust the brief.
+ */
+function verifyCommandsFor(ctx: RepoContext): string[] {
+  const { commands, unified } = ctx.verify;
+  const chosen = unified ? [unified] : [];
+  for (const kind of ['typecheck', 'lint', 'test', 'build'] as const) {
+    if (chosen.some((c) => c.kinds.includes(kind))) continue;
+    const next = commands.find((c) => c.kinds.includes(kind));
+    if (next) chosen.push(next);
   }
-  if (pm === 'bun') {
-    return {
-      install: 'bun install --frozen-lockfile',
-      test: 'bun test',
-      lint: 'bun run lint',
-      typecheck: 'bun run typecheck',
-      build: 'bun run build',
-    };
-  }
-  if (pm === 'pnpm') {
-    return {
-      install: 'pnpm install --frozen-lockfile',
-      test: 'pnpm test',
-      lint: 'pnpm run lint',
-      typecheck: 'pnpm run typecheck',
-      build: 'pnpm run build',
-    };
-  }
-  if (pm === 'yarn') {
-    return {
-      install: 'yarn install --frozen-lockfile',
-      test: 'yarn test',
-      lint: 'yarn lint',
-      typecheck: 'yarn typecheck',
-      build: 'yarn build',
-    };
-  }
-  if (pm === 'uv') {
-    return {
-      install: 'uv sync',
-      test: 'uv run pytest',
-      lint: 'uv run ruff check .',
-      typecheck: 'uv run pyright',
-      build: 'uv build',
-    };
-  }
-  if (pm === 'poetry') {
-    return {
-      install: 'poetry install',
-      test: 'poetry run pytest',
-      lint: 'poetry run ruff check .',
-      typecheck: 'poetry run mypy .',
-      build: 'poetry build',
-    };
-  }
-  if (pm === 'go') {
-    return {
-      install: 'go mod download',
-      test: 'go test ./...',
-      lint: 'golangci-lint run',
-      typecheck: 'go vet ./...',
-      build: 'go build ./...',
-    };
-  }
-  if (pm === 'cargo') {
-    return {
-      install: 'cargo fetch',
-      test: 'cargo test',
-      lint: 'cargo clippy --all-targets -- -D warnings',
-      typecheck: 'cargo check',
-      build: 'cargo build',
-    };
-  }
-  return {
-    install: 'npm ci',
-    test: 'npm test',
-    lint: 'npm run lint',
-    typecheck: 'npm run typecheck',
-    build: 'npm run build',
-  };
+  return chosen.map((c) => c.command);
 }
 
-function buildAgentsMd(repoName: string, stack: StackInfo): string {
-  const cmds = detectCommands(stack);
+function buildAgentsMd(ctx: RepoContext): string {
+  const stack = ctx.stack;
+  const install = stack.packageManagers.map((pm) => INSTALL_COMMAND[pm]).find(Boolean);
+  const verify = verifyCommandsFor(ctx);
   const stackLine =
-    [...stack.languages, ...stack.frameworks].join(' · ') || 'Verify stack in project manifest';
+    [...stack.languages, ...stack.frameworks].join(' · ') || 'TODO: name the stack';
+  const commandLines = [
+    ...(install ? [install] : []),
+    ...(verify.length > 0 ? verify : ['# TODO: the command that runs your static checks and tests']),
+  ];
 
-  return `# ${repoName}
+  return `# ${ctx.repoName}
 
 ${stackLine}.
 
 ## Verification Commands
 
-Run these before concluding any change (verify each command matches your scripts):
+Run these before concluding any change${verify.length > 0 ? ' (detected from this repository; correct any that are wrong)' : ''}:
 
 \`\`\`bash
-${cmds.install}
-${cmds.typecheck}
-${cmds.lint}
-${cmds.test}
-${cmds.build}
+${commandLines.join('\n')}
 \`\`\`
 
 ## Working Rules
@@ -131,6 +78,33 @@ ${cmds.build}
 
 Do not copy stale server lists from blog posts. Discover verified official servers from the official MCP Registry (https://registry.modelcontextprotocol.io/) and pass credentials via \`\${VAR}\` / \`\${env:VAR}\` interpolation only.
 `;
+}
+
+/**
+ * A starter permission policy: the detected verify commands run without a prompt, and the commands
+ * that reach production or rewrite history are denied.
+ */
+function buildClaudeSettings(ctx: RepoContext): string {
+  const allow = verifyCommandsFor(ctx).map((cmd) => `Bash(${cmd}:*)`);
+  const deny: string[] = [];
+  const scripts = Object.keys(ctx.packageJson?.scripts ?? {});
+  const run = scriptRunner(ctx);
+  for (const name of scripts.filter((k) => /^(deploy|publish|release)([:._-].*)?$/.test(k)).slice(0, 4)) {
+    deny.push(`Bash(${run(name)}:*)`);
+  }
+  if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json'])) {
+    deny.push('Bash(wrangler deploy:*)', 'Bash(npx wrangler deploy:*)', 'Bash(bunx wrangler deploy:*)');
+  }
+  deny.push('Bash(git push --force:*)', 'Bash(git push -f:*)', 'Read(./.env)', 'Read(./.env.*)');
+
+  return `${JSON.stringify(
+    {
+      $schema: 'https://json.schemastore.org/claude-code-settings.json',
+      permissions: { allow, deny },
+    },
+    null,
+    2,
+  )}\n`;
 }
 
 function buildClaudeMd(): string {
@@ -192,19 +166,20 @@ function buildPrTemplate(): string {
 `;
 }
 
-export function initHarness(repoPath: string, options: InitOptions = {}): InitResult {
-  const ctx = new RepoContext(repoPath);
-  const dryRun = Boolean(options.dryRun);
+/**
+ * The files `init` would write for this repository, without writing them. An existing file is
+ * always `skip` unless `force` is set.
+ */
+export function planInit(ctx: RepoContext, options: InitOptions = {}): InitAction[] {
   const force = Boolean(options.force);
   const tools = options.tools && options.tools.length > 0 ? options.tools : DEFAULT_TOOLS;
 
-  const candidates: Array<{ path: string; content: string }> = [
-    { path: 'AGENTS.md', content: buildAgentsMd(ctx.repoName, ctx.stack) },
-  ];
+  const candidates: Array<{ path: string; content: string }> = [{ path: 'AGENTS.md', content: buildAgentsMd(ctx) }];
 
   if (tools.includes('claude-code')) {
     candidates.push({ path: 'CLAUDE.md', content: buildClaudeMd() });
     candidates.push({ path: '.claude/rules/testing.md', content: buildClaudeTestingRule() });
+    candidates.push({ path: '.claude/settings.json', content: buildClaudeSettings(ctx) });
   }
 
   if (tools.includes('cursor')) {
@@ -221,39 +196,29 @@ export function initHarness(repoPath: string, options: InitOptions = {}): InitRe
     candidates.push({ path: '.github/pull_request_template.md', content: buildPrTemplate() });
   }
 
-  const actions: InitAction[] = [];
-
-  for (const item of candidates) {
-    const fullPath = join(ctx.root, item.path);
-    const alreadyExists = existsSync(fullPath);
-
+  return candidates.map((item) => {
+    // On disk, not just in the scan: a gitignored local file must not be overwritten either.
+    const alreadyExists = existsSync(join(ctx.root, item.path));
     if (alreadyExists && !force) {
-      actions.push({
-        path: item.path,
-        action: 'skip',
-        reason: 'already exists (pass --force to overwrite)',
-        content: item.content,
-      });
-      continue;
+      return { path: item.path, action: 'skip', reason: 'already exists (pass --force to overwrite)', content: item.content };
     }
+    const action: InitAction['action'] = alreadyExists ? 'overwrite' : 'create';
+    return { path: item.path, action, reason: `would ${action}`, content: item.content };
+  });
+}
 
-    const actionType: InitAction['action'] = alreadyExists ? 'overwrite' : 'create';
-    if (!dryRun) {
-      mkdirSync(dirname(fullPath), { recursive: true });
-      writeFileSync(fullPath, item.content, 'utf8');
-    }
+export function initHarness(repoPath: string, options: InitOptions = {}): InitResult {
+  const ctx = new RepoContext(repoPath);
+  const dryRun = Boolean(options.dryRun);
+  const tools = options.tools && options.tools.length > 0 ? options.tools : DEFAULT_TOOLS;
 
-    actions.push({
-      path: item.path,
-      action: actionType,
-      reason: dryRun
-        ? `would ${actionType}`
-        : actionType === 'overwrite'
-          ? 'overwritten (--force)'
-          : 'created',
-      content: item.content,
-    });
-  }
+  const actions = planInit(ctx, options).map((item): InitAction => {
+    if (item.action === 'skip' || dryRun) return item;
+    const fullPath = join(ctx.root, item.path);
+    mkdirSync(dirname(fullPath), { recursive: true });
+    writeFileSync(fullPath, item.content, 'utf8');
+    return { ...item, reason: item.action === 'overwrite' ? 'overwritten (--force)' : 'created' };
+  });
 
   return {
     repoPath: ctx.root,

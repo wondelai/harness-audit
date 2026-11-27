@@ -13,13 +13,13 @@ afterEach(() => {
 });
 
 describe('renderers (terminal, markdown, html, json)', () => {
-  it('emits stable schema v1.0.0 JSON with zero promo content and localized strings', () => {
+  it('emits schema v1.1.0 JSON with zero promo content and localized strings', () => {
     const repo = track(createWellHarnessedRepo());
     const reportEn = auditRepo(repo.dir, { lang: 'en' });
     const rawEn = renderJson(reportEn);
     const parsedEn = JSON.parse(rawEn) as Record<string, unknown>;
 
-    expect(parsedEn['schemaVersion']).toBe('1.0.0');
+    expect(parsedEn['schemaVersion']).toBe('1.1.0');
     expect(parsedEn['level']).toBe(5);
     expect(Array.isArray(parsedEn['stations'])).toBe(true);
     expect((parsedEn['stations'] as unknown[]).length).toBe(6);

@@ -4,6 +4,7 @@ import {
   buildRecommendations,
   computeOverallScore,
   evaluateLevel,
+  nextLevelFor,
   rawLevelFromScore,
   scoreStation,
 } from '../src/scoring.js';
@@ -87,6 +88,33 @@ describe('scoring engine & level gating caps', () => {
     expect(rawLevel).toBe(5);
     expect(level).toBe(3);
     expect(caps.some((c) => c.cappedTo === 3 && c.triggeredBy.includes('verification.test-quality-scan'))).toBe(true);
+  });
+
+  it('caps a 90+ score at Level 3 while the harness station is below 60', () => {
+    const checks: CheckResult[] = [
+      makeCheck('intent.instructions-file', 'intent', 'pass', 100),
+      makeCheck('harness.permissions-policy', 'harness', 'fail', 50),
+      makeCheck('harness.secret-hygiene', 'harness', 'pass', 50),
+      makeCheck('loop.single-command-verify', 'loop', 'pass', 100),
+      makeCheck('graph.worktree-isolation', 'graph', 'pass', 100),
+      makeCheck('verification.unit-tests', 'verification', 'pass', 100),
+      makeCheck('release.ci-pipeline', 'release', 'pass', 100),
+    ];
+    const stations = STATIONS.map((s) => scoreStation(s.id, checks));
+    const overall = computeOverallScore(stations);
+    // 100 - 0.18 * 50 = 91
+    expect(overall).toBe(91);
+
+    const { rawLevel, level, caps } = evaluateLevel(overall, stations, checks);
+    expect(rawLevel).toBe(5);
+    expect(level).toBe(3);
+    expect(caps.some((c) => c.cappedTo === 3 && c.triggeredBy.includes('harness (<60)'))).toBe(true);
+
+    // The same gate is what the report names as standing between Level 3 and Level 4.
+    const next = nextLevelFor(level, overall, stations, checks);
+    expect(next?.level).toBe(4);
+    expect(next?.pointsMissing).toBe(0);
+    expect(next?.blockers.map((b) => b.id)).toContain('harness (<60)');
   });
 
   it('caps a 95+ score at Level 4 when oracle protection is missing', () => {

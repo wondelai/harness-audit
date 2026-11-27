@@ -90,6 +90,12 @@ describe('CLI modes, --prompt, init, interview, and --deep', () => {
     expect(newAgents).not.toContain('@modelcontextprotocol/server-postgres');
   });
 
+  it('prints the version package.json declares', () => {
+    const declared = (JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')) as { version: string }).version;
+    const printed = spawnSync('node', [CLI_PATH, '--version'], { encoding: 'utf8' }).stdout.trim();
+    expect(printed).toBe(declared);
+  });
+
   it('scores the 7-question Org & Workflow interview deterministically', () => {
     expect(INTERVIEW_QUESTIONS).toHaveLength(7);
     const allZero = scoreInterview('cto', {});

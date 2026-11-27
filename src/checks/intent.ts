@@ -59,14 +59,26 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
   const hasCopilot = ctx.hasFile('.github/copilot-instructions.md');
   const hasLegacyCursorRules = ctx.hasFile('.cursorrules');
   const cursorMdcFiles = ctx.findFiles((f) => /^\.cursor\/rules\/.+\.mdc$/.test(f));
-  const cursorPlainMdFiles = ctx.findFiles((f) => /^\.cursor\/rules\/.+\.md$/.test(f));
+  // A README inside .cursor/rules documents the folder; it was never meant to be a rule.
+  const cursorPlainMdFiles = ctx.findFiles((f) => /^\.cursor\/rules\/.+\.md$/.test(f) && !/(^|\/)readme\.md$/i.test(f));
   const claudeRuleFiles = ctx.findFiles((f) => /^\.claude\/rules\/.+\.md$/.test(f));
+
+  // CLAUDE.md -> AGENTS.md (or the reverse) is one file under two names.
+  const claudeLink = hasClaudeMd ? ctx.linkTarget('CLAUDE.md') : undefined;
+  const agentsLink = hasAgentsMd ? ctx.linkTarget('AGENTS.md') : undefined;
+  const sameFile = claudeLink === 'AGENTS.md' || agentsLink === 'CLAUDE.md';
+  const named = (file: string, link: string | undefined): string => (link ? `${file} → ${link}` : file);
+  // On this machine but ignored by git: the author has a brief, a teammate or a CI agent does not.
+  const localOnlyBriefs = ['AGENTS.md', 'CLAUDE.md'].filter((f) => ctx.isLocalOnly(f));
 
   // 1. intent.instructions-file
   {
     const found: string[] = [];
-    if (hasAgentsMd) found.push('AGENTS.md');
-    if (hasClaudeMd) found.push('CLAUDE.md');
+    if (hasAgentsMd) found.push(named('AGENTS.md', agentsLink));
+    if (hasClaudeMd) found.push(named('CLAUDE.md', claudeLink));
+    for (const f of localOnlyBriefs) {
+      found.push(`${f} exists on this machine but git ignores it — teammates and CI agents never see it`);
+    }
     if (cursorMdcFiles.length > 0) found.push(`.cursor/rules/*.mdc (${cursorMdcFiles.length})`);
     if (claudeRuleFiles.length > 0) found.push(`.claude/rules/*.md (${claudeRuleFiles.length})`);
     if (hasCopilot) found.push('.github/copilot-instructions.md');
@@ -79,16 +91,17 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
     let status: CheckResult['status'] = 'fail';
     if (hasPrimary && cursorPlainMdFiles.length === 0 && !hasLegacyCursorRules) {
       status = 'pass';
-    } else if (hasPrimary || hasLegacyCursorRules || claudeRuleFiles.length > 0) {
+    } else if (hasPrimary || hasLegacyCursorRules || claudeRuleFiles.length > 0 || localOnlyBriefs.length > 0) {
       status = 'warn';
     }
+    const onlyLocalBrief = !hasPrimary && localOnlyBriefs.length > 0;
 
     results.push({
       id: 'intent.instructions-file',
       station: 'intent',
       weight: 30,
       status,
-      severity: status === 'fail' ? 'critical' : status === 'warn' ? 'medium' : 'low',
+      severity: status === 'fail' ? 'critical' : onlyLocalBrief ? 'high' : status === 'warn' ? 'medium' : 'low',
       title: {
         en: 'Canonical project instructions file',
         pl: 'Kanoniczny plik instrukcji projektu',
@@ -99,12 +112,16 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Bez wersjonowanych instrukcji projektu każda sesja agenta zgaduje komendy budowania, granice architektury i zasady bezpieczeństwa od zera.',
       },
       fix: {
-        en: hasLegacyCursorRules || cursorPlainMdFiles.length > 0
-          ? 'Consolidate into a root AGENTS.md (read natively by Codex, Cursor, and Copilot), keep a thin CLAUDE.md importing @AGENTS.md, and rename any .cursor/rules/*.md files to .mdc with frontmatter.'
-          : 'Add a concise root AGENTS.md (<= 150 lines) with real build/test commands and invariants, plus a thin CLAUDE.md containing `@AGENTS.md`.',
-        pl: hasLegacyCursorRules || cursorPlainMdFiles.length > 0
-          ? 'Skonsoliduj instrukcje do AGENTS.md w katalogu głównym (czytanym przez Codex, Cursor i Copilot), dodaj cienki CLAUDE.md z @AGENTS.md oraz zmień rozszerzenie plików .cursor/rules/*.md na .mdc z frontmatterem.'
-          : 'Dodaj zwięzły plik AGENTS.md (<= 150 linii) w katalogu głównym z realnymi komendami build/test i niezmiennikami oraz cienki CLAUDE.md zawierający `@AGENTS.md`.',
+        en: onlyLocalBrief
+          ? `Commit ${localOnlyBriefs.join(' and ')}: remove the matching line from .gitignore so the brief is versioned and reaches teammates, CI agents and fresh worktrees.`
+          : hasLegacyCursorRules || cursorPlainMdFiles.length > 0
+            ? 'Consolidate into a root AGENTS.md (read natively by Codex, Cursor, and Copilot), keep a thin CLAUDE.md importing @AGENTS.md, and rename any .cursor/rules/*.md files to .mdc with frontmatter.'
+            : 'Add a concise root AGENTS.md (<= 150 lines) with real build/test commands and invariants, plus a thin CLAUDE.md containing `@AGENTS.md`. `npx harness-audit init` scaffolds both from the commands this audit detected.',
+        pl: onlyLocalBrief
+          ? `Dodaj ${localOnlyBriefs.join(' i ')} do repozytorium: usuń pasującą linię z .gitignore, aby instrukcje były wersjonowane i docierały do zespołu, agentów w CI i nowych worktree.`
+          : hasLegacyCursorRules || cursorPlainMdFiles.length > 0
+            ? 'Skonsoliduj instrukcje do AGENTS.md w katalogu głównym (czytanym przez Codex, Cursor i Copilot), dodaj cienki CLAUDE.md z @AGENTS.md oraz zmień rozszerzenie plików .cursor/rules/*.md na .mdc z frontmatterem.'
+            : 'Dodaj zwięzły plik AGENTS.md (<= 150 linii) w katalogu głównym z realnymi komendami build/test i niezmiennikami oraz cienki CLAUDE.md zawierający `@AGENTS.md`. `npx harness-audit init` utworzy oba pliki z komend wykrytych w tym audycie.',
       },
       docsPath: 'workflows/harness/agent-ready-codebase/',
     });
@@ -122,13 +139,13 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         id: 'intent.single-source',
         station: 'intent',
         weight: 20,
-        status: 'fail',
-        severity: 'high',
+        status: 'info',
+        severity: 'info',
         title: {
           en: 'Single source of truth for agent instructions',
           pl: 'Jedno źródło prawdy dla instrukcji agentów',
         },
-        evidence: ['Neither AGENTS.md nor CLAUDE.md exists at repository root'],
+        evidence: ['Not applicable yet: no root AGENTS.md or CLAUDE.md (counted once, under intent.instructions-file)'],
         why: {
           en: 'Cross-tool teams need one canonical instruction file so Codex, Cursor, and Claude Code never follow contradicting rules.',
           pl: 'Zespoły pracujące wieloma narzędziami potrzebują jednego kanonicznego pliku instrukcji, aby Codex, Cursor i Claude Code nie dostawały sprzecznych zasad.',
@@ -136,6 +153,30 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         fix: {
           en: 'Create AGENTS.md as the single canonical brief and add a 1-line CLAUDE.md containing `@AGENTS.md`.',
           pl: 'Utwórz AGENTS.md jako jedno kanoniczne źródło i dodaj 1-liniowy plik CLAUDE.md zawierający `@AGENTS.md`.',
+        },
+        docsPath: 'workflows/harness/agent-ready-codebase/',
+      });
+    } else if (sameFile) {
+      results.push({
+        id: 'intent.single-source',
+        station: 'intent',
+        weight: 20,
+        status: 'pass',
+        severity: 'low',
+        title: {
+          en: 'Single source of truth for agent instructions',
+          pl: 'Jedno źródło prawdy dla instrukcji agentów',
+        },
+        evidence: [
+          `${claudeLink ? 'CLAUDE.md is a symlink to AGENTS.md' : 'AGENTS.md is a symlink to CLAUDE.md'} (${agentsLines} lines) — one file under both names, nothing to drift`,
+        ],
+        why: {
+          en: 'One physical file read by Codex, Cursor and Claude Code cannot disagree with itself.',
+          pl: 'Jeden fizyczny plik czytany przez Codex, Cursor i Claude Code nie może się rozjechać sam ze sobą.',
+        },
+        fix: {
+          en: 'Keep the symlink. On Windows checkouts without symlink support, a one-line CLAUDE.md containing `@AGENTS.md` does the same job.',
+          pl: 'Zostaw symlink. Na Windowsie bez obsługi symlinków to samo daje jednoliniowy CLAUDE.md z `@AGENTS.md`.',
         },
         docsPath: 'workflows/harness/agent-ready-codebase/',
       });
@@ -274,7 +315,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
           en: 'Single source of truth for agent instructions',
           pl: 'Jedno źródło prawdy dla instrukcji agentów',
         },
-        evidence: [`Only CLAUDE.md (${claudeLines} lines) found — Codex and Cursor do not read CLAUDE.md natively`],
+        evidence: [`Only ${named('CLAUDE.md', claudeLink)} (${claudeLines} lines) found — Codex and Cursor do not read CLAUDE.md natively`],
         why: {
           en: 'Putting shared instructions only in CLAUDE.md leaves Codex and Cursor users without project context.',
           pl: 'Umieszczenie wspólnych instrukcji wyłącznie w CLAUDE.md pozbawia użytkowników Codexa i Cursora kontekstu projektu.',
@@ -296,13 +337,13 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         id: 'intent.instruction-budget',
         station: 'intent',
         weight: 20,
-        status: 'fail',
-        severity: 'medium',
+        status: 'info',
+        severity: 'info',
         title: {
           en: 'Root instruction budget & signal-to-noise',
           pl: 'Budżet długości i jakość instrukcji głównych',
         },
-        evidence: ['No root instruction file to measure'],
+        evidence: ['Not applicable yet: no root instruction file to measure'],
         why: {
           en: 'Every line of root instructions consumes context in every session. Concise, concrete commands outperform long essays.',
           pl: 'Każda linia głównych instrukcji zajmuje okno kontekstowe w każdej sesji. Konkretne komendy działają lepiej niż długie eseje.',
@@ -319,7 +360,8 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
       const bytes = Buffer.byteLength(text, 'utf8');
       const fillerHits = BOILERPLATE_PATTERNS.filter((p) => p.regex.test(text)).map((p) => p.label);
 
-      const evidence = [`${primaryFile}: ${lines} lines (${(bytes / 1024).toFixed(1)} KiB)`];
+      const primaryLink = primaryFile === 'AGENTS.md' ? agentsLink : claudeLink;
+      const evidence = [`${named(primaryFile, primaryLink)}: ${lines} lines (${(bytes / 1024).toFixed(1)} KiB)`];
       if (fillerHits.length > 0) {
         evidence.push(`Generic filler detected: ${fillerHits.join(', ')}`);
       }
@@ -352,10 +394,10 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         fix: {
           en: lines < 5
             ? `Expand ${primaryFile} with concrete verify commands, architecture pointers, and hard constraints (target 40–150 lines).`
-            : `Trim ${primaryFile} to <= 150 lines by moving domain-specific guidance into path-scoped rules (.claude/rules/ or .cursor/rules/) or linked READMEs, and delete generic advice.`,
+            : `Trim ${primaryLink ?? primaryFile} to <= 150 lines by moving domain-specific guidance into path-scoped rules (.claude/rules/ or .cursor/rules/) or linked READMEs, and delete generic advice.`,
           pl: lines < 5
             ? `Rozbuduj ${primaryFile} o konkretne komendy weryfikacji, wskaźniki architektury i twarde ograniczenia (cel: 40–150 linii).`
-            : `Skróć ${primaryFile} do <= 150 linii, przenosząc zasady domenowe do reguł przypisanych do ścieżek (.claude/rules/ lub .cursor/rules/) albo linkowanych README i usuwając ogólniki.`,
+            : `Skróć ${primaryLink ?? primaryFile} do <= 150 linii, przenosząc zasady domenowe do reguł przypisanych do ścieżek (.claude/rules/ lub .cursor/rules/) albo linkowanych README i usuwając ogólniki.`,
         },
         docsPath: 'workflows/context/',
       });
@@ -364,7 +406,14 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
 
   // 4. intent.scoped-rules
   {
-    const nestedAgents = ctx.findFiles((f) => /\/AGENTS\.md$/.test(f) && !f.startsWith('docs-backup/'));
+    // Nested briefs load when an agent works in that directory. Copies shipped inside skill or
+    // plugin folders (.agents/, .claude/skills/…) are someone else's instructions, not scoping.
+    const nestedBriefs = ctx.findFiles((f) => /\/(AGENTS|CLAUDE)\.md$/.test(f) && !f.startsWith('.'));
+    // "Read before you touch": a root brief that sends agents to a doc per area scopes context too.
+    const rootBrief = `${ctx.readText('AGENTS.md') ?? ''}\n${ctx.readText('CLAUDE.md') ?? ''}`;
+    const routedDocs = [...new Set([...rootBrief.matchAll(/[`(]((?:[\w.@-]+\/)+[\w.@-]+\.mdx?)[`)]/g)].map((m) => m[1]!))].filter(
+      (p) => ctx.hasFile(p),
+    );
     const claudeRulesWithoutPaths: string[] = [];
     for (const rf of claudeRuleFiles) {
       const content = ctx.readText(rf) ?? '';
@@ -373,11 +422,17 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
       }
     }
 
-    const totalScoped = cursorMdcFiles.length + claudeRuleFiles.length + nestedAgents.length;
+    const routesToDocs = routedDocs.length >= 2;
+    const totalScoped = cursorMdcFiles.length + claudeRuleFiles.length + nestedBriefs.length + (routesToDocs ? routedDocs.length : 0);
     const evidence: string[] = [];
     if (claudeRuleFiles.length > 0) evidence.push(`.claude/rules/*.md: ${claudeRuleFiles.length}`);
     if (cursorMdcFiles.length > 0) evidence.push(`.cursor/rules/*.mdc: ${cursorMdcFiles.length}`);
-    if (nestedAgents.length > 0) evidence.push(`Nested AGENTS.md: ${nestedAgents.slice(0, 5).join(', ')}`);
+    if (nestedBriefs.length > 0) {
+      evidence.push(`Nested briefs (${nestedBriefs.length}): ${nestedBriefs.slice(0, 5).join(', ')}${nestedBriefs.length > 5 ? ', …' : ''}`);
+    }
+    if (routesToDocs) {
+      evidence.push(`Root brief routes agents to ${routedDocs.length} area docs: ${routedDocs.slice(0, 4).join(', ')}${routedDocs.length > 4 ? ', …' : ''}`);
+    }
     if (claudeRulesWithoutPaths.length > 0) {
       evidence.push(`Warning: ${claudeRulesWithoutPaths.length} .claude/rules/*.md lack paths: frontmatter (loaded unconditionally)`);
     }
@@ -391,7 +446,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
           ? `No path-scoped rules found in a ${ctx.stack.monorepo ? 'monorepo' : `${ctx.sourceFiles.length}-file`} codebase`
           : 'No path-scoped rules yet (optional for small repos; add as modules grow)',
       );
-    } else if (claudeRulesWithoutPaths.length > 0 && claudeRulesWithoutPaths.length === claudeRuleFiles.length && cursorMdcFiles.length === 0 && nestedAgents.length === 0) {
+    } else if (claudeRulesWithoutPaths.length > 0 && claudeRulesWithoutPaths.length === claudeRuleFiles.length && totalScoped === claudeRuleFiles.length) {
       status = 'warn';
     }
 

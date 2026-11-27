@@ -62,13 +62,35 @@ function statusBadge(status: CheckStatus, lang: 'en' | 'pl', c: Colors): string 
   }
 }
 
+/** "Capped at Level 3: unattended runs require …" → "unattended runs require …". */
+export function requirementText(reason: string): string {
+  return reason.replace(/^[^:]{0,40}:\s*/, '');
+}
+
+function wrap(text: string, width: number, indent: string): string[] {
+  const out: string[] = [];
+  let line = '';
+  for (const word of text.split(/\s+/)) {
+    if (line.length > 0 && line.length + 1 + word.length > width) {
+      out.push(indent + line);
+      line = word;
+    } else {
+      line = line.length > 0 ? `${line} ${word}` : word;
+    }
+  }
+  if (line.length > 0) out.push(indent + line);
+  return out;
+}
+
 export function renderTerminal(report: AuditReport, options: RenderOptions = {}): string {
   const lang = options.lang ?? report.lang;
   const ci = Boolean(options.ci);
+  const verbose = Boolean(options.verbose);
   const noPromo = Boolean(options.noPromo) || ci;
   const useColor =
-    !options.noColor && !ci && !process.env['NO_COLOR'] && (process.stdout.isTTY !== false);
+    !options.noColor && !ci && !process.env['NO_COLOR'] && (process.stdout.isTTY === true || Boolean(process.env['FORCE_COLOR']));
   const c = makeColors(useColor);
+  const WIDTH = 96;
 
   const lines: string[] = [];
   const levelMeta = LEVELS[report.level];
@@ -88,7 +110,7 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
   );
 
   const stackBits = [
-    report.stack.languages.length > 0 ? report.stack.languages.join(', ') : 'unknown',
+    report.stack.languages.length > 0 ? report.stack.languages.join(', ') : t(UI.stackUnknown, lang),
     report.stack.frameworks.length > 0 ? report.stack.frameworks.join(', ') : '',
     report.stack.packageManagers.length > 0 ? `pm: ${report.stack.packageManagers.join(', ')}` : '',
     report.stack.monorepo ? 'monorepo' : '',
@@ -99,6 +121,12 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
     lines.push(
       `${c.bold}Git:${c.reset} ${report.git.branch ?? 'HEAD'} · ${report.git.gitAuthors90d} ${t(UI.contributors90d, lang)} · ${report.git.commits30d} ${t(UI.commits30d, lang)}`,
     );
+  }
+  lines.push(
+    `${c.bold}Scan:${c.reset} ${report.scan.fileCount} ${t(report.scan.mode === 'git' ? UI.scanGit : UI.scanWalk, lang)}`,
+  );
+  if (report.scan.truncated) {
+    lines.push(`${c.yellow}${c.bold}! ${t(UI.scanTruncated, lang)}${c.reset}`);
   }
 
   lines.push('');
@@ -113,13 +141,35 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
       `  ${c.dim}${t(UI.rawScoreLevel, lang)}: Level ${report.rawLevel} -> capped to Level ${report.level}${c.reset}`,
     );
   }
-  lines.push(`  ${c.dim}${t(levelMeta.summary, lang)}${c.reset}`);
+  lines.push(...wrap(t(levelMeta.summary, lang), WIDTH, '  ').map((l) => `${c.dim}${l}${c.reset}`));
 
   if (report.levelCaps.length > 0) {
     lines.push('');
     lines.push(`${c.yellow}${c.bold}! ${t(UI.levelCapsHeading, lang)}${c.reset}`);
     for (const cap of report.levelCaps) {
-      lines.push(`  • ${t(cap.reason, lang)} ${c.gray}[${cap.triggeredBy.join(', ')}]${c.reset}`);
+      lines.push(...wrap(`• ${t(cap.reason, lang)} [${cap.triggeredBy.join(', ')}]`, WIDTH, '  '));
+    }
+  }
+
+  // What the next level takes
+  const next = report.nextLevel;
+  if (next) {
+    const nextMeta = LEVELS[next.level];
+    lines.push('');
+    const scorePart =
+      next.pointsMissing > 0
+        ? `${next.scoreNeeded}/100 (+${next.pointsMissing} ${t(UI.pointsToGo, lang)})`
+        : `${next.scoreNeeded}/100 ✓`;
+    lines.push(
+      `${c.bold}${t(UI.nextLevelHeading, lang)}: Level ${next.level} — ${t(nextMeta.shortName, lang)}${c.reset} · ${t(UI.scoreNeeded, lang)} ${scorePart}${next.blockers.length > 0 ? ` · ${t(UI.plusGates, lang)}` : ''}`,
+    );
+    const byReason = new Map<string, string[]>();
+    for (const b of next.blockers) {
+      const key = requirementText(t(b.requirement, lang));
+      byReason.set(key, [...(byReason.get(key) ?? []), b.id]);
+    }
+    for (const [reason, ids] of byReason) {
+      lines.push(...wrap(`• ${t(UI.gateLabel, lang)}: ${ids.join(', ')} — ${reason}`, WIDTH, '  '));
     }
   }
 
@@ -138,35 +188,69 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
   }
   lines.push(`${c.gray}${'─'.repeat(72)}${c.reset}`);
 
-  // Top priorities
+  // Top priorities: full evidence and fix, once
+  const priorityRank = new Map(report.topPriorities.map((p, i) => [p.id, i + 1]));
+  const gain = (impact: number | undefined): string => (impact ? `+${impact % 1 === 0 ? impact : impact.toFixed(1)} ${t(UI.pts, lang)}` : '');
+  const gates = (id: string, station: string): boolean =>
+    next?.blockers.some((b) => b.id === id || b.id.startsWith(`${station} (`)) ?? false;
+
   if (report.topPriorities.length > 0) {
     lines.push('');
-    lines.push(`${c.bold}${t(UI.topPrioritiesHeading, lang)}${c.reset}`);
+    lines.push(`${c.bold}${t(UI.topPrioritiesHeading, lang)}${c.reset} ${c.dim}${t(UI.topPrioritiesOrder, lang)}${c.reset}`);
     for (let i = 0; i < report.topPriorities.length; i++) {
       const check = report.topPriorities[i]!;
+      const tags = [gain(check.impact), next && gates(check.id, check.station) ? `${t(UI.unblocks, lang)} Level ${next.level}` : ''].filter(Boolean);
       lines.push(
-        `  ${i + 1}. ${statusBadge(check.status, lang, c)} ${c.bold}${check.id}${c.reset} — ${t(check.title, lang)}`,
+        `  ${i + 1}. ${statusBadge(check.status, lang, c)} ${c.bold}${check.id}${c.reset} — ${t(check.title, lang)}${tags.length > 0 ? `  ${c.cyan}${tags.join(' · ')}${c.reset}` : ''}`,
       );
-      lines.push(`     ${c.dim}${t(UI.evidenceLabel, lang)}:${c.reset} ${check.evidence[0] ?? ''}`);
-      lines.push(`     ${c.dim}${t(UI.fixLabel, lang)}:${c.reset} ${t(check.fix, lang)}`);
-      lines.push(`     ${c.dim}${t(UI.docsLabel, lang)}:${c.reset} ${docsUrl(lang, check.docsPath)}`);
+      for (const ev of check.evidence.slice(0, 4)) {
+        lines.push(...wrap(`↳ ${ev}`, WIDTH, '     ').map((l) => `${c.gray}${l}${c.reset}`));
+      }
+      if (check.evidence.length > 4) lines.push(`     ${c.gray}↳ … +${check.evidence.length - 4}${c.reset}`);
+      lines.push(...wrap(`${t(UI.fixLabel, lang)}: ${t(check.fix, lang)}`, WIDTH, '     '));
+      lines.push(`     ${c.dim}${t(UI.docsLabel, lang)}: ${docsUrl(lang, check.docsPath)}${c.reset}`);
     }
   }
 
-  // Per-station detailed checks
+  // Per-station findings: what needs attention in full, what passes in one line
   lines.push('');
-  lines.push(`${c.bold}${t(UI.allChecksHeading, lang)}${c.reset}`);
+  lines.push(`${c.bold}${t(UI.allChecksHeading, lang)}${c.reset}${verbose ? '' : ` ${c.dim}${t(UI.verboseHint, lang)}${c.reset}`}`);
   for (const st of report.stations) {
     const meta = STATION_MAP[st.id];
     lines.push('');
     lines.push(`  ${c.bold}${meta.order}. ${t(meta.name, lang)} (${st.score}/100)${c.reset} ${c.dim}— ${t(meta.decision, lang)}${c.reset}`);
-    for (const check of st.checks) {
-      lines.push(`    ${statusBadge(check.status, lang, c)} ${c.bold}${check.id}${c.reset}: ${t(check.title, lang)}`);
-      for (const ev of check.evidence) {
-        lines.push(`      ${c.gray}↳ ${ev}${c.reset}`);
+    const short = (id: string): string => id.slice(id.indexOf('.') + 1);
+
+    const open = st.checks.filter((ch) => ch.status === 'fail' || ch.status === 'warn');
+    for (const check of open) {
+      const rank = priorityRank.get(check.id);
+      const head = `    ${statusBadge(check.status, lang, c)} ${c.bold}${check.id}${c.reset}: ${t(check.title, lang)}${check.impact ? ` ${c.cyan}${gain(check.impact)}${c.reset}` : ''}`;
+      if (rank !== undefined && !verbose) {
+        lines.push(`${head} ${c.dim}→ ${t(UI.seeTopFix, lang)} #${rank}${c.reset}`);
+        continue;
       }
-      if (check.status === 'fail' || check.status === 'warn') {
-        lines.push(`      ${c.dim}${t(UI.fixLabel, lang)}: ${t(check.fix, lang)}${c.reset}`);
+      lines.push(head);
+      for (const ev of check.evidence) {
+        lines.push(...wrap(`↳ ${ev}`, WIDTH, '      ').map((l) => `${c.gray}${l}${c.reset}`));
+      }
+      lines.push(...wrap(`${t(UI.fixLabel, lang)}: ${t(check.fix, lang)}`, WIDTH, '      ').map((l) => `${c.dim}${l}${c.reset}`));
+    }
+
+    const passed = st.checks.filter((ch) => ch.status === 'pass');
+    const infos = st.checks.filter((ch) => ch.status === 'info');
+    if (verbose) {
+      for (const check of [...passed, ...infos]) {
+        lines.push(`    ${statusBadge(check.status, lang, c)} ${c.bold}${check.id}${c.reset}: ${t(check.title, lang)}`);
+        for (const ev of check.evidence) {
+          lines.push(...wrap(`↳ ${ev}`, WIDTH, '      ').map((l) => `${c.gray}${l}${c.reset}`));
+        }
+      }
+    } else {
+      if (passed.length > 0) {
+        lines.push(...wrap(`${statusBadge('pass', lang, c)} ${passed.map((p) => short(p.id)).join(', ')}`, WIDTH + 12, '    '));
+      }
+      for (const check of infos) {
+        lines.push(...wrap(`${statusBadge('info', lang, c)} ${short(check.id)}: ${check.evidence[0] ?? ''}`, WIDTH + 12, '    ').map((l, i) => (i === 0 ? l : `${c.gray}  ${l}${c.reset}`)));
       }
     }
   }
@@ -213,8 +297,11 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
     lines.push('');
     lines.push(`${c.gray}${'─'.repeat(72)}${c.reset}`);
     lines.push(`${c.bold}${t(UI.nextStepsHeading, lang)}${c.reset}`);
+    if (report.scaffold.length > 0) {
+      lines.push(...wrap(`• ${t(UI.scaffoldHint, lang)} npx harness-audit init --dry-run  (${report.scaffold.join(', ')})`, WIDTH, '  '));
+    }
     lines.push(
-      `  • ${c.bold}${t(UI.fixPromptHint, lang)}${c.reset} npx @wondelai/harness-audit --prompt --out HARNESS-FIX-PROMPT.md`,
+      `  • ${c.bold}${t(UI.fixPromptHint, lang)}${c.reset} npx harness-audit --prompt --out HARNESS-FIX-PROMPT.md`,
     );
     lines.push(
       `  • ${c.bold}${t(UI.deepDiveBook, lang)}:${c.reset} ${t(report.recommendations.book.title, lang)} — ${report.recommendations.book.url}`,

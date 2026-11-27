@@ -4,53 +4,46 @@ import type { CheckResult } from '../types.js';
 export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
   const results: CheckResult[] = [];
 
-  const ghWorkflows = ctx.findFiles((f) => /^\.github\/workflows\/.+\.ya?ml$/.test(f));
-  const otherCi = [
-    '.gitlab-ci.yml',
-    '.circleci/config.yml',
-    'azure-pipelines.yml',
-    '.buildkite/pipeline.yml',
-    'Jenkinsfile',
-  ].filter((f) => ctx.hasFile(f));
-  const allCiFiles = [...ghWorkflows, ...otherCi];
+  const ci = ctx.ci;
+  const allCiFiles = ci.files;
+  const solo = ctx.isSolo;
 
   // 1. release.ci-pipeline
   {
-    let runsOnPr = false;
-    let runsTests = false;
-    let runsLint = false;
-    let runsTypecheck = false;
-
-    for (const wf of allCiFiles) {
-      const content = ctx.readText(wf) ?? '';
-      if (/\bpull_request\b|\bmerge_request\b/i.test(content)) runsOnPr = true;
-      if (/\b(test|pytest|vitest|jest|playwright|cargo test|go test|rspec|phpunit|dotnet test|vp test)\b/i.test(content)) {
-        runsTests = true;
-      }
-      if (/\b(lint|eslint|oxlint|biome|ruff|clippy|golangci-lint|rubocop|check)\b/i.test(content)) {
-        runsLint = true;
-      }
-      if (/\b(typecheck|type-check|tsc|mypy|pyright|astro check|cargo check|go vet|go build)\b/i.test(content)) {
-        runsTypecheck = true;
-      }
-    }
+    const prWorkflows = ci.workflows.filter((w) => w.onPullRequest);
+    const runsOnPr = prWorkflows.length > 0;
+    const gates = (kind: 'test' | 'lint' | 'typecheck'): boolean => ci.prKinds.has(kind);
+    const anywhere = (kind: 'test' | 'lint' | 'typecheck'): boolean => ci.workflows.some((w) => w.kinds.has(kind));
+    const mark = (kind: 'test' | 'lint' | 'typecheck'): string => (gates(kind) ? 'yes' : anywhere(kind) ? 'not on PRs' : 'no');
 
     const evidence: string[] = [];
     if (allCiFiles.length === 0) {
       evidence.push('No CI pipeline found (.github/workflows/*.yml, .gitlab-ci.yml, .circleci/config.yml, etc.)');
     } else {
-      evidence.push(`CI workflows: ${allCiFiles.slice(0, 5).join(', ')}`);
-      evidence.push(
-        `PR trigger: ${runsOnPr ? 'yes' : 'no'} · tests: ${runsTests ? 'yes' : 'no'} · lint: ${runsLint ? 'yes' : 'no'} · typecheck: ${runsTypecheck ? 'yes' : 'no'}`,
-      );
+      evidence.push(`CI workflows (${allCiFiles.length}): ${allCiFiles.slice(0, 5).join(', ')}${allCiFiles.length > 5 ? ', …' : ''}`);
+      evidence.push(`Pull requests are gated on — tests: ${mark('test')} · lint: ${mark('lint')} · typecheck: ${mark('typecheck')}`);
+      // The commands that provide the gate, so the reading can be checked at a glance.
+      const shown = new Set<string>();
+      for (const kind of ['test', 'lint', 'typecheck'] as const) {
+        const hit = ci.prCommands.find((c) => c.kinds.includes(kind));
+        if (hit && !shown.has(hit.command)) {
+          shown.add(hit.command);
+          const cmd = hit.command.length > 110 ? `${hit.command.slice(0, 110)}…` : hit.command;
+          evidence.push(`${hit.path}: \`${cmd}\` → ${hit.kinds.join(' + ')}`);
+        }
+      }
     }
 
     let status: CheckResult['status'] = 'fail';
-    if (allCiFiles.length > 0 && runsOnPr && runsTests && (runsLint || runsTypecheck)) {
+    if (runsOnPr && gates('test') && (gates('lint') || gates('typecheck'))) {
       status = 'pass';
-    } else if (allCiFiles.length > 0 && (runsTests || runsLint || runsTypecheck)) {
+    } else if (allCiFiles.length > 0 && (anywhere('test') || anywhere('lint') || anywhere('typecheck'))) {
       status = 'warn';
     }
+
+    const verify = ctx.verify;
+    const gateCommand = verify.unified?.command ?? verify.commands.filter((c) => c.kinds.includes('test') || c.kinds.includes('lint') || c.kinds.includes('typecheck')).slice(0, 3).map((c) => c.command).join('`, `');
+    const missingOnPr = (['test', 'lint', 'typecheck'] as const).filter((k) => !gates(k));
 
     results.push({
       id: 'release.ci-pipeline',
@@ -64,12 +57,18 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       },
       evidence,
       why: {
-        en: 'Agents will confidently report that a change works; independent CI running lint, typecheck, and tests on every pull request is what actually decides.',
-        pl: 'Agenci często pewnie zgłaszają, że zmiana działa — to niezależny potok CI uruchamiający lint, typecheck i testy na każdym PR realnie decyduje.',
+        en: 'Agents will confidently report that a change works; independent CI running static checks and tests on every pull request is what actually decides.',
+        pl: 'Agenci często pewnie zgłaszają, że zmiana działa — to niezależny potok CI uruchamiający sprawdzenia statyczne i testy na każdym PR realnie decyduje.',
       },
       fix: {
-        en: 'Add a CI workflow triggered on `pull_request` that installs from the lockfile and runs lint, typecheck, and tests before merge.',
-        pl: 'Dodaj workflow CI wyzwalany na `pull_request`, który instaluje zależności z lockfile’a i uruchamia lint, typecheck oraz testy przed scaleniem.',
+        en:
+          allCiFiles.length === 0
+            ? `Add a CI workflow triggered on \`pull_request\` that installs from the lockfile and runs ${gateCommand ? `\`${gateCommand}\`` : 'your lint, typecheck and test commands'} before merge.`
+            : `Run ${missingOnPr.join(' and ')} on \`pull_request\`${gateCommand ? ` (e.g. \`${gateCommand}\`)` : ''} so a red result blocks the merge, not just the main branch.`,
+        pl:
+          allCiFiles.length === 0
+            ? `Dodaj workflow CI wyzwalany na \`pull_request\`, który instaluje zależności z lockfile’a i uruchamia ${gateCommand ? `\`${gateCommand}\`` : 'lint, typecheck oraz testy'} przed scaleniem.`
+            : `Uruchamiaj na \`pull_request\` brakujące kroki (${missingOnPr.join(', ')})${gateCommand ? `, np. \`${gateCommand}\`` : ''}, aby czerwony wynik blokował scalenie, a nie tylko gałąź główną.`,
       },
       docsPath: 'method/lifecycle/deploy/',
     });
@@ -98,8 +97,16 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       if (hasEvidenceTerms) evidence.push('Prompts for verification evidence / risk notes');
 
       status = hasChecklist && hasEvidenceTerms ? 'pass' : 'warn';
+      if (!hasChecklist) evidence.push('No checklist items (`- [ ]`) for the author or agent to tick');
+      if (!hasEvidenceTerms) evidence.push('Does not ask for verification commands, results, risk or rollback notes');
     } else {
-      evidence.push('No pull request / merge request template found');
+      // Nobody else reads a solo repo's pull requests, so the missing template is a gap, not a failure.
+      status = solo ? 'warn' : 'fail';
+      evidence.push(
+        solo
+          ? 'No pull request template (one active contributor: agent-written PRs have no fixed evidence format to fill in)'
+          : 'No pull request / merge request template found',
+      );
     }
 
     results.push({
@@ -118,8 +125,12 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Na Poziomie 3–4 recenzenci przestają czytać każdą mechaniczną linię i oceniają pakiet dowodów: uruchomione komendy, wynik testów, klasę ryzyka i plan wycofania.',
       },
       fix: {
-        en: 'Add `.github/pull_request_template.md` requiring: summary, exact verification commands + results, risk/escalation paths touched (auth/money/migrations/tests/CI), and rollback notes.',
-        pl: 'Dodaj `.github/pull_request_template.md` wymagający: podsumowania, dokładnych komend weryfikacji z wynikami, listy wrażliwych ścieżek (auth/płatności/migracje/testy/CI) i planu wycofania.',
+        en: templatePath
+          ? `Extend ${templatePath} with what is missing above: a "Verification" section asking for the exact commands run and their results, and a checklist for risky paths touched (auth, money, migrations, tests, CI) with rollback notes.`
+          : 'Add `.github/pull_request_template.md` requiring: summary, exact verification commands + results, risk/escalation paths touched (auth/money/migrations/tests/CI), and rollback notes. `npx harness-audit init` writes one.',
+        pl: templatePath
+          ? `Uzupełnij ${templatePath} o brakujące elementy: sekcję „Weryfikacja” z dokładnymi komendami i ich wynikami oraz checklistę wrażliwych ścieżek (auth, płatności, migracje, testy, CI) z planem wycofania.`
+          : 'Dodaj `.github/pull_request_template.md` wymagający: podsumowania, dokładnych komend weryfikacji z wynikami, listy wrażliwych ścieżek (auth/płatności/migracje/testy/CI) i planu wycofania. `npx harness-audit init` utworzy taki plik.',
       },
       docsPath: 'workflows/ship/evidence-bundle/',
     });
@@ -185,11 +196,28 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       if (ctx.hasDependency(dep) && !signals.includes(label)) signals.push(label);
     }
 
-    const pyproject = ctx.readText('pyproject.toml') ?? '';
-    if (/sentry-sdk/i.test(pyproject)) signals.push('Sentry');
-    if (/opentelemetry/i.test(pyproject)) signals.push('OpenTelemetry');
-    if (/structlog/i.test(pyproject)) signals.push('structlog');
-    if (/alembic/i.test(pyproject)) signals.push('Alembic migrations');
+    // Manifests of the non-Node stacks, where telemetry is a line in a build file.
+    const manifestText = ctx
+      .findFiles(
+        (f) =>
+          f.split('/').length <= 3 &&
+          /(^|\/)(pyproject\.toml|requirements[\w.-]*\.txt|Package\.swift|project\.yml|Podfile|build\.gradle(\.kts)?|libs\.versions\.toml|pubspec\.yaml|go\.mod|Cargo\.toml|Gemfile|composer\.json|mix\.exs)$/.test(f),
+      )
+      .slice(0, 20)
+      .map((f) => ctx.readText(f) ?? '')
+      .join('\n');
+    const manifestSignals: Array<[RegExp, string]> = [
+      [/sentry/i, 'Sentry'],
+      [/opentelemetry|otel/i, 'OpenTelemetry'],
+      [/posthog/i, 'PostHog'],
+      [/crashlytics/i, 'Firebase Crashlytics'],
+      [/datadog|bugsnag|honeybadger|rollbar/i, 'Error tracking SDK'],
+      [/structlog|zerolog|\bzap\b|slog/i, 'Structured logging'],
+      [/alembic/i, 'Alembic migrations'],
+    ];
+    for (const [pattern, label] of manifestSignals) {
+      if (pattern.test(manifestText) && !signals.includes(label)) signals.push(label);
+    }
 
     if (ctx.findFiles((f) => /(^|\/)migrations\//.test(f)).length > 0) {
       signals.push('Versioned migrations directory');
@@ -201,7 +229,11 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       signals.push('CHANGELOG.md');
     }
 
-    const isApp = ctx.stack.frameworks.length > 0 || ctx.hasFile('wrangler.toml') || ctx.hasFile('Dockerfile');
+    const isApp =
+      ctx.stack.frameworks.length > 0 ||
+      ctx.stack.packageManagers.includes('xcodebuild') ||
+      ctx.hasFile('wrangler.toml') ||
+      ctx.hasFile('Dockerfile');
     let status: CheckResult['status'] = 'pass';
     if (signals.length >= 2) {
       status = 'pass';
@@ -212,7 +244,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       signals.push('No error tracking (Sentry/OTel/PostHog), structured logging, healthcheck, or migration discipline detected');
     } else {
       status = 'info';
-      signals.push('No runtime telemetry detected (typically optional for small libraries/CLIs)');
+      signals.push('No runtime telemetry detected (optional for a library, CLI or tooling repo)');
     }
 
     results.push({
@@ -241,20 +273,15 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
   // 5. release.deploy-safety
   {
     const evidence: string[] = [];
-    let hasDeployWorkflow = false;
-    let hasDeployGate = false;
-
-    for (const wf of allCiFiles) {
-      const content = ctx.readText(wf) ?? '';
-      if (/\b(deploy|publish|release)\b/i.test(wf) || /\b(wrangler deploy|vercel|flyctl|kubectl|terraform apply|npm publish|gh release)\b/i.test(content)) {
-        hasDeployWorkflow = true;
-        if (/\bneeds\s*:|environment\s*:|workflow_dispatch|if:\s*github\.ref\s*==/i.test(content)) {
-          hasDeployGate = true;
-          evidence.push(`${wf}: gated deploy/release workflow (uses needs/environment/branch condition)`);
-        } else {
-          evidence.push(`${wf}: deploy workflow detected without explicit job dependency (` + '`needs:`' + `) or environment gate`);
-        }
-      }
+    // A deploy is a command that ships; `wrangler deploy --dry-run` in a verify job is a build check.
+    const deployWorkflows = ci.workflows.filter((w) => w.deployCommands.length > 0);
+    const gated = deployWorkflows.filter((w) => w.deployGated);
+    const ungated = deployWorkflows.filter((w) => !w.deployGated);
+    for (const w of gated.slice(0, 3)) {
+      evidence.push(`${w.path}: deploys (\`${w.deployCommands[0]!.slice(0, 70)}\`) behind a job dependency, environment or branch/manual trigger`);
+    }
+    for (const w of ungated.slice(0, 3)) {
+      evidence.push(`${w.path}: deploys (\`${w.deployCommands[0]!.slice(0, 70)}\`) with no \`needs:\`, environment or branch condition in front of it`);
     }
 
     const claudeDeny = ctx.readJson<{ permissions?: { deny?: string[] } }>('.claude/settings.json')?.permissions?.deny ?? [];
@@ -263,16 +290,26 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       evidence.push('.claude/settings.json denies local agent deploy/production commands');
     }
 
+    // The repository can deploy from a laptop: a deploy script or a platform config is present.
+    const deployScripts = Object.keys(ctx.packageJson?.scripts ?? {}).filter((k) => /^(deploy|publish|release)([:._-].*)?$/.test(k));
+    const hasWrangler = ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json']) !== undefined;
+    const canDeployLocally = deployScripts.length > 0 || hasWrangler;
+
     let status: CheckResult['status'] = 'info';
-    if (hasDeployGate || blocksLocalDeploy) {
-      status = 'pass';
-    } else if (hasDeployWorkflow) {
+    if (ungated.length > 0) {
       status = 'warn';
+    } else if (gated.length > 0 || blocksLocalDeploy) {
+      status = 'pass';
+    } else if (canDeployLocally) {
+      status = 'warn';
+      evidence.push(
+        `Deploys happen outside CI (${deployScripts.length > 0 ? `package script \`${deployScripts[0]}\`` : 'wrangler config'} present) and nothing stops an agent running them from a local checkout`,
+      );
     } else {
-      status = 'info';
-      evidence.push('No automated deploy workflow detected in repo CI configs');
+      evidence.push('No deploy workflow or local deploy command detected');
     }
 
+    const denyExample = hasWrangler ? '`Bash(npx wrangler deploy:*)`, `Bash(bunx wrangler deploy:*)`' : deployScripts.length > 0 ? `\`Bash(npm run ${deployScripts[0]}:*)\`` : '`Bash(<your deploy command>:*)`';
     results.push({
       id: 'release.deploy-safety',
       station: 'release',
@@ -289,8 +326,14 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Wdrożenia powinny przechodzić wyłącznie przez bramkowane CI po zielonych testach — nigdy przez agenta uruchamiającego `deploy` bezpośrednio z lokalnego repozytorium.',
       },
       fix: {
-        en: 'Gate CI deploy jobs behind verification jobs (`needs: [test, lint, typecheck]`) and add local deploy commands to `.claude/settings.json` `permissions.deny`.',
-        pl: 'Uzależnij zadania deploy w CI od zielonej weryfikacji (`needs: [test, lint, typecheck]`) i dodaj lokalne komendy deploy do `permissions.deny` w `.claude/settings.json`.',
+        en:
+          ungated.length > 0
+            ? `Put the deploy job in ${ungated[0]!.path} behind the verify job (\`needs: [verify]\`) or a protected \`environment:\`, and deny local deploys in \`.claude/settings.json\` (${denyExample}).`
+            : `Deny local deploy commands for agents in \`.claude/settings.json\` \`permissions.deny\` (${denyExample}) and say in \`AGENTS.md\` which path is the only way to production.`,
+        pl:
+          ungated.length > 0
+            ? `Uzależnij zadanie deploy w ${ungated[0]!.path} od zadania weryfikacji (\`needs: [verify]\`) lub chronionego \`environment:\` i zablokuj lokalny deploy w \`.claude/settings.json\` (${denyExample}).`
+            : `Zablokuj agentom lokalne komendy deploy w \`permissions.deny\` w \`.claude/settings.json\` (${denyExample}) i napisz w \`AGENTS.md\`, która ścieżka jest jedyną drogą na produkcję.`,
       },
       docsPath: 'workflows/operate/codebase-health/',
     });

@@ -1,11 +1,33 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readdirSync, readFileSync } from 'node:fs';
-import { basename, extname, join, relative, resolve } from 'node:path';
-import type { GitStats, StackInfo, SupportedTool } from './types.js';
+import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
+import { describeCommand, detectVerifyCapabilities, type VerifyCapabilities } from './capabilities.js';
+import { analyzeCi, type CiFacts } from './ci.js';
+import type { GitStats, ScanInfo, StackInfo, SupportedTool } from './types.js';
 
-const IGNORED_DIRS = new Set([
+/**
+ * Directories that never hold first-party source, whatever git says about them. Applied to both
+ * scan modes: a vendored or committed dependency tree must not inflate source and test counts.
+ */
+const VENDORED_DIRS = new Set([
   '.git',
   'node_modules',
+  'vendor',
+  'third_party',
+  'Pods',
+  'Carthage',
+  '__pycache__',
+  '.venv',
+  'venv',
+  'docs-backup',
+  'ebooks-dist',
+]);
+
+/**
+ * Build output, caches and tool state. Only the filesystem walk needs these: in a git repository
+ * `.gitignore` already says what is generated, and a tracked `build/` or `dist/` is deliberate.
+ */
+const GENERATED_DIRS = new Set([
   'dist',
   'build',
   'out',
@@ -15,33 +37,53 @@ const IGNORED_DIRS = new Set([
   '.svelte-kit',
   '.vercel',
   '.wrangler',
+  '.open-next',
+  '.output',
   '.turbo',
   '.cache',
   '.parcel-cache',
+  '.expo',
+  '.dart_tool',
   'coverage',
   '.nyc_output',
   'target',
-  'vendor',
-  '__pycache__',
-  '.venv',
-  'venv',
   'env',
   '.pytest_cache',
   '.mypy_cache',
   '.ruff_cache',
-  'Pods',
   'DerivedData',
+  '.build',
+  '.swiftpm',
+  'xcuserdata',
   '.gradle',
-  'bin/Debug',
-  'bin/Release',
+  '.idea',
+  '.terraform',
   'obj',
-  'docs-backup',
-  'ebooks-dist',
   'playwright-report',
   'test-results',
 ]);
 
-const MAX_WALK_FILES = 12_000;
+function isIgnoredDir(name: string, rel: string, mode: ScanInfo['mode']): boolean {
+  if (VENDORED_DIRS.has(name)) return true;
+  if (mode === 'git') return false;
+  return (
+    GENERATED_DIRS.has(name) ||
+    /^\.?deriveddata/i.test(name) ||
+    rel === '.claude/worktrees' ||
+    rel === 'bin/Debug' ||
+    rel === 'bin/Release'
+  );
+}
+
+function pathIsVendored(rel: string): boolean {
+  const parts = rel.split('/');
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (VENDORED_DIRS.has(parts[i]!)) return true;
+  }
+  return false;
+}
+
+const MAX_SCAN_FILES = 60_000;
 const MAX_READ_BYTES = 512 * 1024; // 512 KiB per file safety bound
 
 const SOURCE_EXTENSIONS = new Set([
@@ -64,29 +106,41 @@ const SOURCE_EXTENSIONS = new Set([
   '.php',
   '.cs',
   '.swift',
+  '.m',
+  '.mm',
+  '.dart',
+  '.scala',
+  '.ex',
+  '.exs',
   '.cpp',
   '.cc',
   '.c',
   '.h',
+  '.hpp',
 ]);
+
+/** App-router entry files: a route folder called `test` is production code, not a test. */
+const ROUTE_ENTRY_NAME = /^(route|page|layout|loading|error|not-found|template|default)\.(ts|tsx|js|jsx)$/;
 
 export function isTestFilePath(relPath: string): boolean {
   const normalized = relPath.replace(/\\/g, '/').toLowerCase();
   const name = basename(normalized);
   if (
-    /\.(test|spec)\.(ts|tsx|js|jsx|mjs|cjs|py|rb|php|cs|swift)$/.test(name) ||
-    /_test\.(go|py|rs|rb)$/.test(name) ||
+    /\.(test|spec|e2e)\.(ts|tsx|js|jsx|mjs|cjs|py|rb|php|cs|swift|dart)$/.test(name) ||
+    /_test\.(go|py|rs|rb|dart|exs|c|cc|cpp)$/.test(name) ||
     /^test_.*\.(py|rb|sh)$/.test(name) ||
-    /test\.(java|kt|cs)$/.test(name) ||
-    /spec\.rb$/.test(name) ||
+    /tests?\.(java|kt|cs|swift|scala|php|m|mm)$/.test(name) ||
+    /spec\.(rb|scala|swift)$/.test(name) ||
     /\.node-check\.m?js$/.test(name)
   ) {
     return true;
   }
   if (
-    /(^|\/)(__tests__|tests|test|spec|e2e)\//.test(normalized) &&
+    (/(^|\/)(__tests__|tests|test|spec|specs|e2e|androidtest)\//.test(normalized) ||
+      /(^|\/)[^/]*(tests|uitests)\/[^/]*\.swift$/.test(normalized)) &&
     SOURCE_EXTENSIONS.has(extname(normalized)) &&
     !name.endsWith('.d.ts') &&
+    !ROUTE_ENTRY_NAME.test(name) &&
     !/^(setup|helpers?|utils?|fixtures?|mocks?|factories?|conftest|index)\./.test(name)
   ) {
     return true;
@@ -106,11 +160,12 @@ export function isSourceFilePath(relPath: string): boolean {
   ) {
     return false;
   }
-  if (
-    /^(vite|vitest|astro|tailwind|postcss|playwright|jest|eslint|next|nuxt|svelte|webpack|rollup|babel|tsup)\.config\./.test(
-      basename(normalized),
-    )
-  ) {
+  const name = basename(normalized);
+  if (/^(vite|vitest|astro|tailwind|postcss|playwright|jest|eslint|next|nuxt|svelte|webpack|rollup|babel|tsup)\.config\./.test(name)) {
+    return false;
+  }
+  // Build manifests written in the project's own language.
+  if (name === 'package.swift' || /\.gradle\.kts$/.test(name) || name === 'setup.py') {
     return false;
   }
   return true;
@@ -126,6 +181,106 @@ export interface PackageJsonShape {
   packageManager?: string;
 }
 
+interface FileListing {
+  files: string[];
+  /** Paths git tracks; undefined when the directory is not a git work tree. */
+  tracked?: Set<string>;
+  mode: ScanInfo['mode'];
+  truncated: boolean;
+}
+
+function depthOf(rel: string): number {
+  let depth = 0;
+  for (let i = 0; i < rel.length; i++) if (rel.charCodeAt(i) === 47) depth++;
+  return depth;
+}
+
+/** Shallow paths first, so a cap never drops the root manifests and agent config. */
+function capFiles(files: string[]): { files: string[]; truncated: boolean } {
+  if (files.length <= MAX_SCAN_FILES) return { files, truncated: false };
+  const sorted = [...files].sort((a, b) => depthOf(a) - depthOf(b) || (a < b ? -1 : a > b ? 1 : 0));
+  return { files: sorted.slice(0, MAX_SCAN_FILES), truncated: true };
+}
+
+/**
+ * The files git would show a teammate or a CI runner: tracked files plus untracked files that
+ * `.gitignore` does not exclude. Ignored build output, local env files and nested worktrees are
+ * not part of the versioned harness, so they are not part of the audit.
+ */
+function listGitFiles(root: string): FileListing | null {
+  const git = (args: string[]): string[] =>
+    execFileSync('git', ['-c', 'core.quotepath=off', 'ls-files', '-z', ...args], {
+      cwd: root,
+      encoding: 'utf8',
+      maxBuffer: 512 * 1024 * 1024,
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 30_000,
+    })
+      .split('\0')
+      .filter((p) => p.length > 0);
+
+  try {
+    const trackedAll = git(['--cached']);
+    // Nothing tracked under this path: a fresh `git init`, or a directory that merely sits inside
+    // someone else's work tree. The walk sees it as it is.
+    if (trackedAll.length === 0) return null;
+    const deleted = new Set(git(['--deleted']));
+    const tracked = trackedAll.filter((p) => !deleted.has(p) && !pathIsVendored(p));
+    // An untracked nested repository or worktree is listed as "dir/": not this repo's files.
+    const untracked = git(['--others', '--exclude-standard']).filter(
+      (p) => !p.endsWith('/') && !pathIsVendored(p),
+    );
+    const capped = capFiles([...new Set([...tracked, ...untracked])]);
+    return { files: capped.files, tracked: new Set(tracked), mode: 'git', truncated: capped.truncated };
+  } catch {
+    return null;
+  }
+}
+
+function walkFiles(root: string): FileListing {
+  const collected: string[] = [];
+  let truncated = false;
+  // Breadth-first: when a huge tree hits the cap, the root manifests and agent config are already in.
+  const queue: string[] = [root];
+
+  while (queue.length > 0 && !truncated) {
+    const dir = queue.shift()!;
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    entries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+
+    for (const entry of entries) {
+      if (collected.length >= MAX_SCAN_FILES) {
+        truncated = true;
+        break;
+      }
+      const fullPath = join(dir, entry.name);
+      const rel = relative(root, fullPath).replace(/\\/g, '/');
+
+      if (entry.isSymbolicLink()) {
+        // A symlinked file counts (CLAUDE.md -> AGENTS.md); a symlinked directory is not followed.
+        try {
+          if (statSync(fullPath).isFile()) collected.push(rel);
+        } catch {
+          // broken symlink
+        }
+        continue;
+      }
+      if (entry.isDirectory()) {
+        if (!isIgnoredDir(entry.name, rel, 'walk')) queue.push(fullPath);
+      } else if (entry.isFile()) {
+        collected.push(rel);
+      }
+    }
+  }
+
+  return { files: collected, mode: 'walk', truncated };
+}
+
 export class RepoContext {
   readonly root: string;
   readonly repoName: string;
@@ -133,79 +288,69 @@ export class RepoContext {
   readonly fileSet: Set<string>;
   readonly sourceFiles: string[];
   readonly testFiles: string[];
-  readonly truncated: boolean;
+  readonly scan: ScanInfo;
 
+  private readonly trackedSet: Set<string> | undefined;
   private readonly textCache = new Map<string, string | null>();
   private pkgCache: PackageJsonShape | null | undefined = undefined;
   private stackCache: StackInfo | undefined = undefined;
   private gitCache: GitStats | undefined = undefined;
+  private verifyCache: VerifyCapabilities | undefined = undefined;
+  private ciCache: CiFacts | undefined = undefined;
 
   constructor(repoPath: string) {
     this.root = resolve(repoPath);
     if (!existsSync(this.root)) {
       throw new Error(`Repository path does not exist: ${this.root}`);
     }
+    if (!statSync(this.root).isDirectory()) {
+      throw new Error(`Repository path is not a directory: ${this.root}`);
+    }
     this.repoName = basename(this.root);
 
-    const collected: string[] = [];
-    let truncated = false;
+    const listing = listGitFiles(this.root) ?? walkFiles(this.root);
+    this.files = listing.files;
+    this.fileSet = new Set(listing.files);
+    this.trackedSet = listing.tracked;
+    this.scan = { mode: listing.mode, fileCount: listing.files.length, truncated: listing.truncated };
+    this.testFiles = listing.files.filter(isTestFilePath);
+    this.sourceFiles = listing.files.filter(isSourceFilePath);
+  }
 
-    const walk = (dir: string): void => {
-      if (collected.length >= MAX_WALK_FILES) {
-        truncated = true;
-        return;
-      }
-      let entries;
-      try {
-        entries = readdirSync(dir, { withFileTypes: true });
-      } catch {
-        return;
-      }
-      entries.sort((a, b) => a.name.localeCompare(b.name));
+  /**
+   * Whether git tracks the file. `undefined` outside a git work tree, where nothing is known.
+   */
+  isTracked(relPath: string): boolean | undefined {
+    return this.trackedSet?.has(cleanRel(relPath));
+  }
 
-      for (const entry of entries) {
-        if (collected.length >= MAX_WALK_FILES) {
-          truncated = true;
-          return;
-        }
-        const fullPath = join(dir, entry.name);
-        const rel = relative(this.root, fullPath).replace(/\\/g, '/');
+  /**
+   * A file that is on disk but that git ignores: the person running the audit has it, a teammate
+   * or a CI agent does not. Always false outside a git work tree.
+   */
+  isLocalOnly(relPath: string): boolean {
+    if (this.scan.mode !== 'git') return false;
+    const clean = cleanRel(relPath);
+    return !this.fileSet.has(clean) && existsSync(join(this.root, clean));
+  }
 
-        if (entry.isSymbolicLink()) {
-          // Do not follow symlinks into loops; record only if it's a file at depth <= 3
-          try {
-            const st = lstatSync(fullPath);
-            if (!st.isDirectory()) {
-              collected.push(rel);
-            }
-          } catch {
-            // ignore broken symlink
-          }
-          continue;
-        }
-
-        if (entry.isDirectory()) {
-          if (IGNORED_DIRS.has(entry.name) || IGNORED_DIRS.has(rel)) {
-            continue;
-          }
-          walk(fullPath);
-        } else if (entry.isFile()) {
-          collected.push(rel);
-        }
-      }
-    };
-
-    walk(this.root);
-    this.files = collected;
-    this.fileSet = new Set(collected);
-    this.truncated = truncated;
-    this.testFiles = collected.filter(isTestFilePath);
-    this.sourceFiles = collected.filter(isSourceFilePath);
+  /**
+   * For a symlink that points at another file inside the repository, that file's relative path.
+   */
+  linkTarget(relPath: string): string | undefined {
+    const full = join(this.root, cleanRel(relPath));
+    try {
+      if (!lstatSync(full).isSymbolicLink()) return undefined;
+      const target = resolve(dirname(full), readlinkSync(full));
+      const rel = relative(realpathSync(this.root), realpathSync(target)).replace(/\\/g, '/');
+      return rel.startsWith('..') ? undefined : rel;
+    } catch {
+      return undefined;
+    }
   }
 
   hasFile(relPath: string): boolean {
-    const clean = relPath.replace(/\\/g, '/').replace(/^\.\//, '');
-    return this.fileSet.has(clean);
+    return this.fileSet.has(cleanRel(relPath));
   }
 
   hasAnyFile(relPaths: string[]): string | undefined {
@@ -219,33 +364,29 @@ export class RepoContext {
     return this.files.filter(predicate);
   }
 
+  /**
+   * Text of a scanned file, following a symlink to its target. `null` for a file outside the scan
+   * (ignored by git, vendored), a missing file, or one above the size bound.
+   */
   readText(relPath: string): string | null {
-    const clean = relPath.replace(/\\/g, '/').replace(/^\.\//, '');
-    if (this.textCache.has(clean)) {
-      return this.textCache.get(clean) ?? null;
-    }
-    if (!this.fileSet.has(clean)) {
-      // Also try direct check in case file was ignored during walk (e.g. .git/config not needed, but hidden files are walked)
-      const full = join(this.root, clean);
-      if (!existsSync(full)) {
-        this.textCache.set(clean, null);
-        return null;
+    const clean = cleanRel(relPath);
+    const cached = this.textCache.get(clean);
+    if (cached !== undefined) return cached;
+
+    let content: string | null = null;
+    if (this.fileSet.has(clean)) {
+      try {
+        const full = join(this.root, clean);
+        const stat = statSync(full);
+        if (stat.isFile() && stat.size <= MAX_READ_BYTES) {
+          content = readFileSync(full, 'utf8');
+        }
+      } catch {
+        content = null;
       }
     }
-    try {
-      const full = join(this.root, clean);
-      const stat = lstatSync(full);
-      if (!stat.isFile() || stat.size > MAX_READ_BYTES) {
-        this.textCache.set(clean, null);
-        return null;
-      }
-      const content = readFileSync(full, 'utf8');
-      this.textCache.set(clean, content);
-      return content;
-    } catch {
-      this.textCache.set(clean, null);
-      return null;
-    }
+    this.textCache.set(clean, content);
+    return content;
   }
 
   readJson<T = unknown>(relPath: string): T | null {
@@ -294,6 +435,82 @@ export class RepoContext {
     this.gitCache = detectGitStats(this.root);
     return this.gitCache;
   }
+
+  /** The verify commands the repository offers and the ones its brief documents. */
+  get verify(): VerifyCapabilities {
+    if (this.verifyCache) return this.verifyCache;
+    this.verifyCache = detectVerifyCapabilities(this);
+    return this.verifyCache;
+  }
+
+  /** What the CI configuration runs, and what of it gates a pull request. */
+  get ci(): CiFacts {
+    if (this.ciCache) return this.ciCache;
+    this.ciCache = analyzeCi(this);
+    return this.ciCache;
+  }
+
+  /**
+   * Which of the given paths git would ignore if they existed. In a git work tree this asks git
+   * (nested rules, negations and the user's global excludes included); elsewhere it reads the
+   * root `.gitignore` with a plain pattern match.
+   */
+  ignoredPaths(candidates: string[]): Set<string> {
+    if (this.scan.mode === 'git') {
+      try {
+        const out = execFileSync('git', ['check-ignore', '--no-index', '--', ...candidates], {
+          cwd: this.root,
+          encoding: 'utf8',
+          stdio: ['ignore', 'pipe', 'ignore'],
+          timeout: 5000,
+        });
+        return new Set(out.split('\n').filter(Boolean));
+      } catch (err) {
+        // Exit status 1: none of the paths is ignored.
+        if ((err as { status?: number }).status === 1) return new Set();
+      }
+    }
+    const patterns = (this.readText('.gitignore') ?? '')
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l && !l.startsWith('#') && !l.startsWith('!'));
+    return new Set(candidates.filter((candidate) => patterns.some((p) => gitignorePatternMatches(p, candidate))));
+  }
+
+  /** One human contributor in the last 90 days: there is nobody to be a second reviewer. */
+  get isSolo(): boolean {
+    return this.git.isGitRepo && this.git.gitAuthors90d <= 1;
+  }
+
+  /**
+   * Text of a file under the repository root that the scan leaves out on purpose, such as a
+   * tsconfig preset inside `node_modules`. For resolving references only, never for findings.
+   */
+  readUnscannedText(relPath: string): string | null {
+    const full = resolve(this.root, relPath);
+    if (relative(this.root, full).startsWith('..')) return null;
+    try {
+      const stat = statSync(full);
+      return stat.isFile() && stat.size <= MAX_READ_BYTES ? readFileSync(full, 'utf8') : null;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/** A plain reading of one `.gitignore` line: enough for `.env`, `.env*`, `*.pem`, `dir/`. */
+function gitignorePatternMatches(pattern: string, candidate: string): boolean {
+  const body = pattern.replace(/^\//, '').replace(/\/$/, '');
+  const source = body
+    .split('*')
+    .map((piece) => piece.replace(/[.+^$()|[\]{}?\\]/g, (ch) => `\\${ch}`))
+    .join('[^/]*');
+  const rx = new RegExp(`^${source}(?:/.*)?$`);
+  return rx.test(candidate) || rx.test(candidate.split('/').pop()!);
+}
+
+function cleanRel(relPath: string): string {
+  return relPath.replace(/\\/g, '/').replace(/^\.\//, '');
 }
 
 export function stripJsonComments(input: string): string {
@@ -338,6 +555,26 @@ export function stripJsonComments(input: string): string {
   // Remove trailing commas before } or ]
   return out.replace(/,\s*([}\]])/g, '$1');
 }
+
+const LANGUAGE_BY_EXT: Record<string, string> = {
+  '.py': 'Python',
+  '.js': 'JavaScript',
+  '.mjs': 'JavaScript',
+  '.ts': 'TypeScript',
+  '.go': 'Go',
+  '.rs': 'Rust',
+  '.java': 'Java',
+  '.kt': 'Kotlin',
+  '.swift': 'Swift',
+  '.rb': 'Ruby',
+  '.php': 'PHP',
+  '.cs': 'C#',
+  '.c': 'C/C++',
+  '.cpp': 'C/C++',
+  '.dart': 'Dart',
+  '.ex': 'Elixir',
+  '.scala': 'Scala',
+};
 
 function detectStack(ctx: RepoContext): StackInfo {
   const languages = new Set<string>();
@@ -438,9 +675,51 @@ function detectStack(ctx: RepoContext): StackInfo {
     languages.add('Java');
     packageManagers.add('maven');
   }
-  if (ctx.hasFile('build.gradle') || ctx.hasFile('build.gradle.kts')) {
-    languages.add(ctx.hasFile('build.gradle.kts') ? 'Kotlin' : 'Java');
+  if (ctx.hasAnyFile(['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts'])) {
+    const kotlin = ctx.sourceFiles.filter((f) => f.endsWith('.kt')).length;
+    const java = ctx.sourceFiles.filter((f) => f.endsWith('.java')).length;
+    if (kotlin > 0 || java === 0) languages.add('Kotlin');
+    if (java > 0) languages.add('Java');
     packageManagers.add('gradle');
+    const gradleText = ['build.gradle', 'build.gradle.kts', 'app/build.gradle', 'app/build.gradle.kts', 'gradle/libs.versions.toml']
+      .map((f) => ctx.readText(f) ?? '')
+      .join('\n');
+    if (/com\.android\.|android\s*\{|\bagp\b/.test(gradleText)) frameworks.add('Android');
+    if (/compose/i.test(gradleText)) frameworks.add('Jetpack Compose');
+    if (/spring-boot|org\.springframework/.test(gradleText)) frameworks.add('Spring Boot');
+  }
+
+  // Swift / Xcode
+  const xcodeProject = ctx.findFiles((f) => /(^|\/)[^/]+\.xcodeproj\/project\.pbxproj$/.test(f))[0];
+  const swiftFileCount = ctx.files.filter((f) => f.endsWith('.swift')).length;
+  if (ctx.hasFile('Package.swift') || xcodeProject || (ctx.hasFile('project.yml') && swiftFileCount > 0)) {
+    languages.add('Swift');
+    if (ctx.hasFile('Package.swift')) packageManagers.add('swiftpm');
+    if (xcodeProject || ctx.hasFile('project.yml')) packageManagers.add('xcodebuild');
+    if (ctx.hasFile('project.yml')) frameworks.add('XcodeGen');
+    const swiftSample = ctx.sourceFiles.filter((f) => f.endsWith('.swift')).slice(0, 40);
+    if (swiftSample.some((f) => /^import SwiftUI\b/m.test(ctx.readText(f) ?? ''))) frameworks.add('SwiftUI');
+  }
+
+  // Dart / Flutter
+  if (ctx.hasFile('pubspec.yaml')) {
+    languages.add('Dart');
+    packageManagers.add('pub');
+    if (/^\s*flutter\s*:/m.test(ctx.readText('pubspec.yaml') ?? '')) frameworks.add('Flutter');
+  }
+
+  // Elixir
+  if (ctx.hasFile('mix.exs')) {
+    languages.add('Elixir');
+    packageManagers.add('mix');
+    if (/:phoenix\b/.test(ctx.readText('mix.exs') ?? '')) frameworks.add('Phoenix');
+  }
+
+  // C / C++
+  const cFamily = ctx.sourceFiles.filter((f) => /\.(c|cc|cpp|h|hpp)$/.test(f)).length;
+  if (ctx.hasFile('CMakeLists.txt') || (cFamily >= 3 && languages.size === 0)) {
+    languages.add('C/C++');
+    packageManagers.add(ctx.hasFile('CMakeLists.txt') ? 'cmake' : 'make');
   }
 
   // Ruby
@@ -520,12 +799,22 @@ function detectStack(ctx: RepoContext): StackInfo {
     detectedTools.add('codex');
   }
 
+  // No manifest matched: name the language the source files are written in.
+  if (languages.size === 0) {
+    const byExt = new Map<string, number>();
+    for (const f of ctx.sourceFiles) byExt.set(extname(f), (byExt.get(extname(f)) ?? 0) + 1);
+    const top = [...byExt.entries()].sort((a, b) => b[1] - a[1])[0];
+    const label = top && top[1] >= 2 ? LANGUAGE_BY_EXT[top[0]] : undefined;
+    if (label) languages.add(label);
+  }
+
   return {
     languages: [...languages],
     frameworks: [...frameworks],
     packageManagers: [...packageManagers],
     monorepo,
     verifyScripts,
+    verifyCommands: ctx.verify.commands.slice(0, 8).map(describeCommand),
     detectedTools: [...detectedTools],
     sourceFileCount: ctx.sourceFiles.length,
     testFileCount: ctx.testFiles.length,

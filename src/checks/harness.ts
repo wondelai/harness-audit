@@ -14,7 +14,12 @@ const ARCHIVED_OR_BROKEN_MCP_PACKAGES: Array<{ pkg: string; note: string }> = [
 
 const SECRET_PATTERNS: Array<{ name: string; regex: RegExp }> = [
   { name: 'Anthropic API key', regex: /\bsk-ant-[A-Za-z0-9_-]{20,}\b/ },
-  { name: 'OpenAI API key', regex: /\bsk-(?:proj-|live-)?[A-Za-z0-9_-]{32,}\b/ },
+  { name: 'OpenRouter API key', regex: /\bsk-or-v1-[A-Za-z0-9]{32,}\b/ },
+  { name: 'Stripe secret key', regex: /\b[sr]k_live_[A-Za-z0-9]{20,}\b/ },
+  { name: 'OpenAI API key', regex: /\bsk-(?:proj-|live-|svcacct-)?[A-Za-z0-9_-]{32,}\b/ },
+  { name: 'Google API key', regex: /\bAIza[0-9A-Za-z_-]{35}\b/ },
+  { name: 'npm token', regex: /\bnpm_[A-Za-z0-9]{36}\b/ },
+  { name: 'PostHog personal API key', regex: /\bphx_[A-Za-z0-9]{32,}\b/ },
   { name: 'GitHub PAT', regex: /\b(?:ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,})\b/ },
   { name: 'AWS Access Key ID', regex: /\bAKIA[0-9A-Z]{16}\b/ },
   { name: 'Slack token', regex: /\bxox[baprs]-[A-Za-z0-9-]{16,}\b/ },
@@ -59,6 +64,8 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     const evidence: string[] = [];
     const criticalErrors: string[] = [];
     let hasPolicy = false;
+    const verifyAllows = ctx.verify.commands.slice(0, 3).map((c) => `Bash(${c.command})`);
+    const allowExample = verifyAllows.length > 0 ? verifyAllows.map((a) => `\`${a}\``).join(', ') : '`Bash(<your test command>)`';
 
     if (claudeSettings) {
       const allow = claudeSettings.permissions?.allow ?? [];
@@ -124,7 +131,16 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       }
     } else {
       status = 'fail';
-      evidence.push('No versioned agent permission policy found (.claude/settings.json, .codex/config.toml, or .cursor/cli.json)');
+      if (claudeSettings) {
+        const holds = Object.keys(claudeSettings).filter((k) => k !== '$schema');
+        evidence.push(
+          `.claude/settings.json is committed (${holds.join(', ') || 'empty'}) but sets no permissions.allow / permissions.deny`,
+        );
+      } else if (ctx.isLocalOnly('.claude/settings.json')) {
+        evidence.push('.claude/settings.json exists on this machine but git ignores it — the policy is not shared with teammates or CI agents');
+      } else {
+        evidence.push('No versioned agent permission policy found (.claude/settings.json, .codex/config.toml, or .cursor/cli.json)');
+      }
     }
 
     results.push({
@@ -145,10 +161,10 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       fix: {
         en: criticalErrors.length > 0
           ? 'Replace retired Codex `approval_policy = "untrusted"` with `"on-request"` (or `"never"` only in isolated CI) and remove any `bypassPermissions` defaults from repo settings.'
-          : 'Commit `.claude/settings.json` with explicit `permissions.allow` (test/lint/typecheck) and `permissions.deny` (deploy/prod scripts), and/or `.codex/config.toml` with `approval_policy = "on-request"` and `sandbox_mode = "workspace-write"`.',
+          : `Add \`permissions\` to a committed \`.claude/settings.json\`: allow the verify commands (${allowExample}) and deny deploy/production commands; for Codex add \`.codex/config.toml\` with \`approval_policy = "on-request"\` and \`sandbox_mode = "workspace-write"\`. \`npx harness-audit init\` writes a starter settings.json when none exists.`,
         pl: criticalErrors.length > 0
           ? 'Zastąp wycofane w Codex `approval_policy = "untrusted"` wartością `"on-request"` (lub `"never"` tylko w izolowanym CI) i usuń domyślne `bypassPermissions` z konfiguracji repozytorium.'
-          : 'Dodaj `.claude/settings.json` z jawną listą `permissions.allow` (test/lint/typecheck) oraz `permissions.deny` (deploy/produkcja) i/lub `.codex/config.toml` z `approval_policy = "on-request"` oraz `sandbox_mode = "workspace-write"`.',
+          : `Dodaj \`permissions\` do wersjonowanego \`.claude/settings.json\`: zezwól na komendy weryfikacji (${allowExample}) i zablokuj komendy deploy/produkcyjne; dla Codexa dodaj \`.codex/config.toml\` z \`approval_policy = "on-request"\` oraz \`sandbox_mode = "workspace-write"\`. \`npx harness-audit init\` utworzy startowy settings.json, jeśli go nie ma.`,
       },
       docsPath: 'workflows/harness/permissions-and-sandboxing/',
       meta: {
@@ -271,7 +287,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
 
     for (const file of mcpFiles) {
       const raw = ctx.readText(file) ?? '';
-      okNotes.push(`Inspected ${file}`);
+      okNotes.push(file);
 
       // Check archived/broken npm packages
       for (const bad of ARCHIVED_OR_BROKEN_MCP_PACKAGES) {
@@ -304,9 +320,6 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         if (servers && typeof servers === 'object') {
           for (const [serverName, cfg] of Object.entries(servers)) {
             if (!cfg || typeof cfg !== 'object') continue;
-            if (file === '.cursor/mcp.json' && cfg['command'] && !cfg['type']) {
-              warnings.push(`.cursor/mcp.json (${serverName}): missing explicit \`type: "stdio"\` on stdio server entry`);
-            }
             const envObj = cfg['env'];
             if (envObj && typeof envObj === 'object') {
               for (const [k, v] of Object.entries(envObj as Record<string, unknown>)) {
@@ -326,6 +339,26 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       }
     }
 
+    // The fix names what was found, nothing else.
+    const found = [...issues, ...warnings].join('\n');
+    const mcpFix = { en: [] as string[], pl: [] as string[] };
+    if (/references `@modelcontextprotocol/.test(found)) {
+      mcpFix.en.push('Remove the archived or non-existent `@modelcontextprotocol/server-*` entries (they fail at session start) and use the vendor\'s official server.');
+      mcpFix.pl.push('Usuń zarchiwizowane lub nieistniejące wpisy `@modelcontextprotocol/server-*` (psują start sesji) i użyj oficjalnego serwera dostawcy.');
+    }
+    if (/deprecated SSE/.test(found)) {
+      mcpFix.en.push('Move the `/sse` endpoints to Streamable HTTP: `"type": "http"` with the server\'s `/mcp` URL.');
+      mcpFix.pl.push('Przenieś endpointy `/sse` na Streamable HTTP: `"type": "http"` z adresem `/mcp` serwera.');
+    }
+    if (/hardcoded|plaintext secret/.test(found)) {
+      mcpFix.en.push('Rotate the exposed credential and replace it with `${VAR}` / `${env:VAR}` interpolation.');
+      mcpFix.pl.push('Zrotuj ujawniony sekret i zastąp go interpolacją `${VAR}` / `${env:VAR}`.');
+    }
+    if (/Misplaced/.test(found)) {
+      mcpFix.en.push('Move `.claude/mcp.json` to `.mcp.json` at the repository root, where Claude Code reads it.');
+      mcpFix.pl.push('Przenieś `.claude/mcp.json` do `.mcp.json` w katalogu głównym, skąd czyta go Claude Code.');
+    }
+
     let status: CheckResult['status'] = 'pass';
     const evidence: string[] = [];
     if (mcpFiles.length === 0) {
@@ -336,10 +369,10 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       evidence.push(...issues, ...warnings);
     } else if (warnings.length > 0) {
       status = 'warn';
-      evidence.push(...warnings, ...okNotes);
+      evidence.push(...warnings, `Inspected: ${mcpFiles.join(', ')}`);
     } else {
       status = 'pass';
-      evidence.push(`${okNotes.join(', ')} — no broken packages, deprecated /sse, or hardcoded tokens found`);
+      evidence.push(`Inspected ${okNotes.join(', ')} — no broken packages, deprecated /sse, or hardcoded tokens found`);
     }
 
     results.push({
@@ -358,11 +391,11 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Wycofane lub nieistniejące serwery MCP psują start sesji, przestarzałe endpointy `/sse` przestają działać, a wpisane na sztywno tokeny powodują wyciek sekretów w gicie.',
       },
       fix: {
-        en: issues.length > 0 || warnings.length > 0
-          ? 'Remove archived `@modelcontextprotocol/server-*` entries, migrate `/sse` to Streamable HTTP (`type: "http"`), replace plaintext secrets with `${VAR}` / `${env:VAR}`, and keep Claude Code MCP config in root `.mcp.json`.'
+        en: mcpFix.en.length > 0
+          ? mcpFix.en.join(' ')
           : 'Keep MCP configs lean, prefer official vendor MCP servers from the MCP registry, and always interpolate credentials via env vars.',
-        pl: issues.length > 0 || warnings.length > 0
-          ? 'Usuń zarchiwizowane pakiety `@modelcontextprotocol/server-*`, zmigruj `/sse` na Streamable HTTP (`type: "http"`), zastąp jawne sekrety zmiennymi `${VAR}` / `${env:VAR}` i trzymaj konfigurację Claude Code w głównym `.mcp.json`.'
+        pl: mcpFix.pl.length > 0
+          ? mcpFix.pl.join(' ')
           : 'Utrzymuj konfiguracje MCP zwięzłe, korzystaj z oficjalnych serwerów z rejestru MCP i zawsze przekazuj sekrety przez zmienne środowiskowe.',
       },
       docsPath: 'workflows/harness/permissions-and-sandboxing/',
@@ -374,39 +407,68 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
 
   // 4. harness.secret-hygiene
   {
-    const gitignore = ctx.readText('.gitignore') ?? '';
+    const stack = ctx.stack;
     const hasWrangler = ctx.hasFile('wrangler.toml') || ctx.hasFile('wrangler.jsonc') || ctx.hasFile('wrangler.json');
-    const missingIgnores: string[] = [];
-    if (!/(^|\n)\s*\.env(\b|\.|\/|\*|$)/m.test(gitignore)) missingIgnores.push('.env');
-    if (!/(^|\n)\s*(\.env\.local|\.env\.\*|\.env\*)/m.test(gitignore)) missingIgnores.push('.env.local');
-    if (hasWrangler && !/(^|\n)\s*\.dev\.vars/m.test(gitignore)) missingIgnores.push('.dev.vars');
-    if (!/(^|\n)\s*(\*\.pem|\*\.key)/m.test(gitignore)) missingIgnores.push('*.pem / *.key');
+    const hasEnvTemplate = ['.env.example', '.env.sample', '.env.template'].some((f) => ctx.hasFile(f));
+    // A Workers project keeps local secrets in .dev.vars; there .env is a habit to guard, not the convention.
+    const usesDotenv =
+      hasEnvTemplate ||
+      ctx.hasDependency('dotenv') ||
+      (!hasWrangler &&
+        (ctx.packageJson !== null || ['Python', 'Ruby', 'PHP', 'Go', 'Rust', 'Elixir'].some((l) => stack.languages.includes(l))));
+    const isAndroid = stack.frameworks.includes('Android');
 
-    const envExamples = ['.env.example', '.env.sample', '.env.template', '.dev.vars.example'].filter((f) =>
+    // The local secret files this stack produces; each must be ignored before an agent runs `git add`.
+    const required: string[] = [];
+    if (usesDotenv) required.push('.env', '.env.local');
+    if (hasWrangler) required.push('.dev.vars');
+    if (isAndroid) required.push('local.properties');
+    const advisory = [
+      ...(hasWrangler && !usesDotenv ? ['.env'] : []),
+      'secret.pem',
+      'secret.key',
+      ...(isAndroid ? ['release.jks', 'release.keystore'] : []),
+    ];
+    const ignored = ctx.ignoredPaths([...required, ...advisory]);
+    const missingIgnores = required.filter((p) => !ignored.has(p));
+    const missingAdvisory = advisory.filter((p) => !ignored.has(p)).map((p) => (p.startsWith('.') ? p : `*${p.slice(p.lastIndexOf('.'))}`));
+
+    const envExamples = ['.env.example', '.env.sample', '.env.template', '.dev.vars.example', 'secrets.defaults.properties'].filter((f) =>
       ctx.hasFile(f),
     );
 
-    // Scan config & root files (not tests or fixtures) for accidental hardcoded credentials
-    const scanCandidates = ctx.findFiles((f) => {
-      if (/(^|\/)(tests?|__tests__|fixtures?|mocks?)\//.test(f)) return false;
-      if (f.endsWith('.lock') || f.endsWith('package-lock.json') || f.endsWith('pnpm-lock.yaml')) return false;
-      return (
-        /^(AGENTS|CLAUDE|README)\.md$/i.test(f) ||
-        /^\.(claude|codex|cursor|github)\//.test(f) ||
-        /\.(json|toml|ya?ml|env\.example|sh)$/.test(f)
-      );
-    }).slice(0, 120);
+    // Config and root files (not tests or fixtures), shallow paths first so a large repository's
+    // root manifests are always inside the budget.
+    const scanCandidates = ctx
+      .findFiles((f) => {
+        if (/(^|\/)(tests?|__tests__|fixtures?|mocks?|testdata|snapshots?)\//.test(f)) return false;
+        if (/(\.lock|package-lock\.json|pnpm-lock\.yaml|\.resolved|\.min\.js)$/.test(f)) return false;
+        return (
+          /^(AGENTS|CLAUDE|README)\.md$/i.test(f) ||
+          /^\.(claude|codex|cursor|github)\//.test(f) ||
+          /\.(json|jsonc|toml|ya?ml|sh|properties|xcconfig|plist|tfvars)$/.test(f) ||
+          /(^|\/)\.?env(\.[\w.-]+)?$/.test(f) ||
+          /(^|\/)\.dev\.vars(\.[\w.-]+)?$/.test(f)
+        );
+      })
+      .sort((a, b) => a.split('/').length - b.split('/').length)
+      .slice(0, 400);
 
-    const leakedSecrets: string[] = [];
+    const trackedLeaks: string[] = [];
+    const untrackedLeaks: string[] = [];
     for (const file of scanCandidates) {
       const content = ctx.readText(file);
       if (!content) continue;
-      for (const sp of SECRET_PATTERNS) {
-        const match = content.match(sp.regex);
-        if (match && !isPlaceholderToken(match[0])) {
-          leakedSecrets.push(`${file}: possible hardcoded ${sp.name}`);
-          break;
-        }
+      const lines = content.split(/\r?\n/);
+      for (let i = 0; i < lines.length; i++) {
+        const hit = SECRET_PATTERNS.find((sp) => {
+          const m = sp.regex.exec(lines[i]!);
+          return m !== null && !isPlaceholderToken(m[0]);
+        });
+        if (!hit) continue;
+        // Outside a git work tree nothing is known about tracking: treat the file as shared.
+        if (ctx.isTracked(file) === false) untrackedLeaks.push(`${file}:${i + 1} ${hit.name} (untracked, not gitignored)`);
+        else trackedLeaks.push(`${file}:${i + 1} ${hit.name}${ctx.isTracked(file) ? ' (committed)' : ''}`);
       }
     }
 
@@ -418,27 +480,32 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     }) || ctx.hasFile('.gitleaks.toml');
 
     const evidence: string[] = [];
-    if (leakedSecrets.length > 0) evidence.push(...leakedSecrets.slice(0, 5));
-    if (missingIgnores.length > 0) evidence.push(`.gitignore missing patterns: ${missingIgnores.join(', ')}`);
-    else evidence.push('.gitignore covers .env, .env.local, and private key files');
+    evidence.push(...trackedLeaks.slice(0, 6));
+    if (trackedLeaks.length > 6) evidence.push(`… and ${trackedLeaks.length - 6} more committed credential(s)`);
+    evidence.push(...untrackedLeaks.slice(0, 3));
+    if (missingIgnores.length > 0) evidence.push(`Not gitignored: ${missingIgnores.join(', ')}`);
+    else if (required.length > 0) evidence.push(`Git ignores ${required.join(', ')}`);
+    else evidence.push('No env-file convention for this stack; nothing required in .gitignore');
+    if (missingAdvisory.length > 0 && trackedLeaks.length === 0) evidence.push(`Optional: also ignore ${missingAdvisory.join(', ')}`);
     if (envExamples.length > 0) evidence.push(`Template env files: ${envExamples.join(', ')}`);
     if (hasSecretScanner) evidence.push('Secret scanner configured (gitleaks/trufflehog/secretlint)');
 
     let status: CheckResult['status'] = 'pass';
-    if (leakedSecrets.length > 0) {
+    if (trackedLeaks.length > 0) {
       status = 'fail';
-    } else if (missingIgnores.includes('.env') || missingIgnores.includes('.dev.vars')) {
+    } else if (untrackedLeaks.length > 0 || missingIgnores.some((p) => p !== '.env.local')) {
       status = 'fail';
     } else if (missingIgnores.length > 0) {
       status = 'warn';
     }
 
+    const ignoreLines = [...missingIgnores, ...missingAdvisory].join(', ');
     results.push({
       id: 'harness.secret-hygiene',
       station: 'harness',
       weight: 20,
       status,
-      severity: leakedSecrets.length > 0 ? 'critical' : status === 'fail' ? 'high' : 'low',
+      severity: trackedLeaks.length > 0 ? 'critical' : status === 'fail' ? 'high' : 'low',
       title: {
         en: 'Secret hygiene & ignore rules',
         pl: 'Higiena sekretów i reguły .gitignore',
@@ -449,16 +516,24 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Agenci kodujący często uruchamiają `git add` lub tworzą pliki env; brak reguł `.gitignore` lub jawne klucze w konfiguracji prowadzą wprost do wycieku poświadczeń.',
       },
       fix: {
-        en: leakedSecrets.length > 0
-          ? 'Rotate any exposed credentials immediately, remove them from tracked files, and load them via environment variables.'
-          : 'Add `.env`, `.env.local`, `*.pem`, `*.key` (and `.dev.vars` for Cloudflare) to `.gitignore`, commit `.env.example`, and add `gitleaks` in CI.',
-        pl: leakedSecrets.length > 0
-          ? 'Natychmiast zrotuj ujawnione klucze, usuń je z wersjonowanych plików i ładuj przez zmienne środowiskowe.'
-          : 'Dodaj `.env`, `.env.local`, `*.pem`, `*.key` (oraz `.dev.vars` dla Cloudflare) do `.gitignore`, dodaj `.env.example` i włącz `gitleaks` w CI.',
+        en: trackedLeaks.length > 0
+          ? 'Rotate every credential listed above now (it is in git history even after you delete the line), move the values to your secret store (e.g. `wrangler secret put`, CI secrets, a gitignored env file), and add `gitleaks` to CI.'
+          : untrackedLeaks.length > 0
+            ? 'Add the listed files to `.gitignore` before the next `git add`, or move the credentials out of the working tree.'
+            : missingIgnores.length > 0
+              ? `Append to \`.gitignore\`: ${ignoreLines}.`
+              : 'Keep credentials in ignored env files or a secret store, and add `gitleaks` to CI as a backstop.',
+        pl: trackedLeaks.length > 0
+          ? 'Zrotuj teraz każdy wymieniony wyżej klucz (zostaje w historii gita nawet po usunięciu linii), przenieś wartości do magazynu sekretów (np. `wrangler secret put`, sekrety CI, ignorowany plik env) i dodaj `gitleaks` do CI.'
+          : untrackedLeaks.length > 0
+            ? 'Dodaj wymienione pliki do `.gitignore` przed kolejnym `git add` albo wynieś sekrety poza katalog roboczy.'
+            : missingIgnores.length > 0
+              ? `Dopisz do \`.gitignore\`: ${ignoreLines}.`
+              : 'Trzymaj sekrety w ignorowanych plikach env lub magazynie sekretów i dodaj `gitleaks` do CI jako bezpiecznik.',
       },
       docsPath: 'org/agent-identity-and-secrets/',
       meta: {
-        hasHardcodedSecrets: leakedSecrets.length > 0,
+        hasHardcodedSecrets: trackedLeaks.length > 0,
       },
     });
   }
