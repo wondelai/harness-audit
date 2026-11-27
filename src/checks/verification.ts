@@ -4,9 +4,15 @@ import type { CheckResult } from '../types.js';
 export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
   const results: CheckResult[] = [];
 
+  // A test command that comes from a manifest, a build tool or a checked-in script. Never from the
+  // brief alone: "run `bun test`" above the words "no tests yet" is not a suite.
+  const testCommands = ctx.verify.commands.filter((c) => c.kinds.includes('test') && c.source !== 'AGENTS.md' && c.source !== 'CLAUDE.md');
+  const allTestFiles = ctx.suiteFiles;
+  const commandTargets = allTestFiles.filter((f) => !ctx.testFiles.includes(f));
+
   // 1. verification.unit-tests
   {
-    const testCount = ctx.testFiles.length;
+    const testCount = allTestFiles.length;
     const srcCount = ctx.sourceFiles.length;
     const ratio = srcCount > 0 ? testCount / srcCount : testCount > 0 ? 1 : 0;
 
@@ -14,14 +20,23 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       `Detected ${testCount} test file(s) vs ${srcCount} source file(s) (ratio: ${srcCount > 0 ? (ratio * 100).toFixed(1) + '%' : 'n/a'})`,
     ];
     if (testCount > 0) {
-      evidence.push(`Sample: ${ctx.testFiles.slice(0, 4).join(', ')}`);
+      evidence.push(`Sample: ${allTestFiles.slice(0, 4).join(', ')}`);
     }
+    if (commandTargets.length > 0) evidence.push(`${commandTargets.length} of them are run by the test command without a test-style name (${commandTargets.slice(0, 2).join(', ')})`);
 
     let status: CheckResult['status'] = 'fail';
     if (testCount >= 3 && (ratio >= 0.12 || testCount >= 15)) {
       status = 'pass';
     } else if (testCount >= 1) {
       status = srcCount <= 10 && testCount >= 2 ? 'pass' : 'warn';
+    } else if (srcCount === 0 || (srcCount < 3 && ctx.stack.languages.length === 0)) {
+      // Documentation, prompts or configuration only: there is no program to test.
+      status = 'info';
+      evidence[0] = 'No source code detected (documentation / configuration repository) — nothing to unit-test';
+    } else if (testCommands.length > 0 && testCommands.some((c) => c.source !== 'Gradle' && c.source !== 'pytest')) {
+      // A real test script exists and something runs: the audit could not see the files, which is its limit, not a missing suite.
+      status = 'warn';
+      evidence.push(`A test command exists (\`${testCommands[0]!.command}\`, from ${testCommands[0]!.source}), but no file it runs could be identified — coverage unknown`);
     }
 
     results.push({
@@ -50,37 +65,90 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
   // 2. verification.e2e-tests
   {
     const e2eSignals: string[] = [];
-    if (ctx.hasAnyFile(['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs']) || ctx.hasDependency('@playwright/test')) {
+    if (ctx.hasAnyFile(['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs']) || ctx.hasDependency('@playwright/test') || ctx.hasDependency('playwright')) {
       e2eSignals.push('Playwright');
     }
+    const e2eNamed = ctx.findFiles((f) => /(^|\/)[\w.-]*e2e[\w.-]*\//i.test(f) || /\.e2e(-spec)?\.[jt]sx?$/.test(f)).length;
+    if (e2eNamed > 0) e2eSignals.push(`e2e suites (${e2eNamed} files in *e2e* paths)`);
+    // Rendered-UI tiers that run without a device: screenshot and Compose/SwiftUI snapshot tests.
+    const buildText = ['gradle/libs.versions.toml', 'build.gradle.kts', 'Package.swift', 'project.yml'].map((f) => ctx.readText(f) ?? '').join('\n');
+    // A declared library is not a test: look for sources that use it.
+    const uiTestSources = allTestFiles
+      .filter((f) => /\.(kt|java|swift)$/.test(f))
+      .slice(0, 400)
+      .filter((f) => /captureRoboImage|Paparazzi|createComposeRule|createAndroidComposeRule|RobolectricTestRunner|assertSnapshot|XCUIApplication/.test(ctx.readText(f) ?? '')).length;
+    if (uiTestSources > 0) e2eSignals.push(`Rendered-UI tests (${uiTestSources} files using Compose rules, Robolectric, Roborazzi/Paparazzi or snapshot assertions)`);
+    const uiLibsOnly = uiTestSources === 0 && /roborazzi|paparazzi|robolectric|ui-test-junit4|swift-snapshot-testing/i.test(buildText);
     if (ctx.hasAnyFile(['cypress.config.ts', 'cypress.config.js', 'cypress.json']) || ctx.hasDependency('cypress')) {
       e2eSignals.push('Cypress');
     }
+    // Tests that boot the real runtime or call the app through its request handler, by what they import.
+    const jsTests = allTestFiles.filter((f) => /\.[cm]?[jt]sx?$/.test(f)).slice(0, 300);
+    const bootsWorker = jsTests.filter((f) => /from ['"]miniflare['"]|require\(['"]miniflare['"]\)|new Miniflare\(|cloudflare:test|unstable_dev|unstable_startWorker|getPlatformProxy/.test(ctx.readText(f) ?? ''));
     if (ctx.hasDependency('@cloudflare/vitest-pool-workers') || ctx.findFiles((f) => /^tests\/workers\//.test(f)).length > 0) {
       e2eSignals.push('Cloudflare Workers runtime tests');
+    } else if (bootsWorker.length > 0) {
+      e2eSignals.push(`Cloudflare Workers runtime tests (${bootsWorker.length} file(s) boot the Worker in Miniflare/workerd, e.g. ${bootsWorker[0]})`);
     }
+    const callsHandler = jsTests.filter((f) => /\bapp\.request\(|\.fetch\(\s*new Request\(|\bSELF\.fetch\(|\b(?:worker|app|handler|server)\.fetch\(/.test(ctx.readText(f) ?? '')).length;
     if (ctx.hasDependency('supertest') || ctx.hasDependency('httpx')) {
       e2eSignals.push('HTTP/API contract tests');
+    } else if (callsHandler > 0 && bootsWorker.length === 0) {
+      e2eSignals.push(`HTTP contract tests (${callsHandler} test file(s) call the app through its request handler)`);
     }
     const e2eDirs = ctx.findFiles((f) => /(^|\/)(e2e|integration)\//.test(f));
     if (e2eDirs.length > 0) {
       e2eSignals.push(`e2e/integration files (${e2eDirs.length})`);
     }
+    const androidUi = ctx.findFiles((f) => /\/androidTest\//.test(f)).length;
+    if (androidUi > 0) e2eSignals.push(`Android instrumented tests (${androidUi} files in androidTest/)`);
+    const xcUi = ctx.findFiles((f) => /UITests\/[^/]+\.swift$/.test(f)).length;
+    if (xcUi > 0) e2eSignals.push(`XCUITest UI tests (${xcUi} files)`);
+    if (ctx.findFiles((f) => /^\.maestro\//.test(f)).length > 0) e2eSignals.push('Maestro flows');
+    if (ctx.hasDependency('detox')) e2eSignals.push('Detox');
+    if (ctx.findFiles((f) => /(^|\/)integration_test\/.+\.dart$/.test(f)).length > 0) e2eSignals.push('Flutter integration tests');
 
+    const isMobileApp = ctx.stack.frameworks.some((fw) => ['Android', 'SwiftUI', 'Flutter', 'Expo'].includes(fw)) || ctx.stack.packageManagers.includes('xcodebuild');
     const isWebOrService =
+      isMobileApp ||
       ctx.stack.frameworks.some((fw) =>
-        ['Next.js', 'Astro', 'React', 'Vue', 'Nuxt', 'Svelte', 'SvelteKit', 'Express', 'Fastify', 'Hono', 'NestJS', 'FastAPI', 'Django', 'Flask', 'Rails', 'Laravel', 'Cloudflare Workers'].includes(fw),
+        ['Next.js', 'Astro', 'React', 'Vue', 'Nuxt', 'Svelte', 'SvelteKit', 'Express', 'Fastify', 'Hono', 'NestJS', 'FastAPI', 'Django', 'Flask', 'Rails', 'Laravel', 'Phoenix', 'Spring Boot', 'Cloudflare Workers'].includes(fw),
       );
 
+    // A suite pointed at a deployed site and left out of CI cannot be run by an agent as a check.
+    const pwConfig = ['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs'].map((f) => ctx.readText(f) ?? '').join('\n');
+    const liveBase = /baseURL\s*:\s*(?:process\.env\.\w+\s*(?:\?\?|\|\|)\s*)?['"`]https:\/\/(?!localhost|127\.)[^'"`]+['"`]/.exec(pwConfig)?.[0];
+    const e2eInCi = ctx.ci.workflows.some((w) => w.commands.some((c) => /playwright|e2e|cypress/i.test(c)));
+    const liveOnly = e2eSignals.length > 0 && liveBase !== undefined && !e2eInCi && !/webServer\s*:/.test(pwConfig);
+
+    // A browser suite that CI never starts and the verify script never calls checks nothing on its own.
+    const browserSuite = e2eSignals.filter((s) => s === 'Playwright' || s === 'Cypress');
+    const scripts = ctx.packageJson?.scripts ?? {};
+    const e2eInVerify = ['verify', 'check', 'ci', 'validate', 'test'].some((n) => /playwright|cypress|e2e/i.test(scripts[n] ?? ''));
+    const neverRun = browserSuite.length > 0 && ctx.ci.files.length > 0 && !e2eInCi && !e2eInVerify && !liveOnly;
+    const otherTiers = e2eSignals.filter((s) => /runtime tests|contract tests|instrumented|XCUITest|Maestro|Detox|Flutter|Rendered-UI/.test(s)).length;
+    if (neverRun) e2eSignals.push(`${browserSuite.join(' / ')} is set up, but no CI job and no verify script runs it`);
+
     let status: CheckResult['status'] = 'pass';
-    if (e2eSignals.length > 0) {
+    if (liveOnly) {
+      status = 'warn';
+      e2eSignals.push('The Playwright suite targets a deployed URL, starts no local server and is not run in CI: an agent cannot use it as a check');
+    } else if (neverRun && otherTiers === 0) {
+      status = 'warn';
+    } else if (e2eSignals.length > 0) {
       status = 'pass';
     } else if (isWebOrService) {
       status = 'warn';
-      e2eSignals.push('Web/service stack detected without E2E or runtime contract test suite');
+      e2eSignals.push(
+        isMobileApp
+          ? uiLibsOnly
+            ? 'UI test libraries are declared in the build files, but no test source uses them'
+            : 'Mobile app without a UI or end-to-end test suite (XCUITest, Espresso/androidTest, Maestro)'
+          : 'Web/service stack detected without E2E or runtime contract test suite',
+      );
     } else {
       status = 'info';
-      e2eSignals.push('No separate browser E2E suite (library/CLI repo — CLI/integration tests suffice)');
+      e2eSignals.push('No app or service surface detected (library, CLI or tooling repo) — unit and integration tests suffice');
     }
 
     results.push({
@@ -99,8 +167,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Testy jednostkowe mockują routing, autoryzację, serializację i granice runtime — czyli dokładnie te miejsca, gdzie kod agentów psuje się najczęściej.',
       },
       fix: {
-        en: 'Add a focused must-have E2E or runtime contract tier (e.g., Playwright, Workers pool, or HTTP contract tests) covering critical user/API flows.',
-        pl: 'Dodaj szybki zestaw krytycznych testów E2E lub kontraktowych runtime (np. Playwright, Workers pool lub testy HTTP) pokrywający kluczowe ścieżki użytkownika/API.',
+        en: isMobileApp
+          ? 'Add a small must-pass UI tier for the critical flows (XCUITest, Espresso under `androidTest/`, or Maestro flows) that an agent can run headlessly.'
+          : 'Add a focused must-have E2E or runtime contract tier (e.g., Playwright, Workers pool, or HTTP contract tests) covering critical user/API flows.',
+        pl: isMobileApp
+          ? 'Dodaj mały, obowiązkowy zestaw testów UI dla krytycznych ścieżek (XCUITest, Espresso w `androidTest/` lub scenariusze Maestro), który agent uruchomi bez nadzoru.'
+          : 'Dodaj szybki zestaw krytycznych testów E2E lub kontraktowych runtime (np. Playwright, Workers pool lub testy HTTP) pokrywający kluczowe ścieżki użytkownika/API.',
       },
       docsPath: 'workflows/test/oracle-strength/',
     });
@@ -113,40 +185,64 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     let protectsOracle = false;
 
     if (codeownersPath) {
-      const content = ctx.readText(codeownersPath) ?? '';
-      const guardsTests = /(^|\s)\/?(tests?|__tests__|e2e|spec)\b/m.test(content);
-      const guardsCi = /(^|\s)\/?\.github\b/m.test(content);
-      const guardsBrief = /(^|\s)\/?(AGENTS\.md|CLAUDE\.md|\.claude|\.codex)/m.test(content);
+      // A rule guards the oracle when its pattern covers the tests or the CI definitions, not
+      // when it merely names a file that lives under .github/.
+      const patterns = (ctx.readText(codeownersPath) ?? '')
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l && !l.startsWith('#'))
+        .map((l) => l.split(/\s+/))
+        // A pattern with no owner after it assigns nobody: it protects nothing.
+        .filter((tokens) => tokens.slice(1).some((t) => t.includes('@')))
+        .map((tokens) => tokens[0]!);
+      const catchAll = patterns.some((p) => p === '*' || p === '/' || p === '**');
+      const guardsTests = catchAll || patterns.some((p) => /^\/?(\*\*\/)?(tests?|__tests__|e2e|specs?|Tests)(\/|\/\*\*?|$)/.test(p) || /\*\.(test|spec)\./.test(p));
+      // The whole workflows directory, not one workflow file.
+      const guardsCi = catchAll || patterns.some((p) => /^\/?\.github(\/(\*\*?)?|\/workflows(\/(\*\*?)?)?)?$/.test(p));
+      const guardsBrief = catchAll || patterns.some((p) => /^\/?(AGENTS\.md|CLAUDE\.md|\.claude(\/.*)?|\.codex(\/.*)?)$/.test(p));
+      const covered = [guardsTests ? 'tests' : '', guardsCi ? 'CI workflows' : '', guardsBrief ? 'agent rules' : ''].filter(Boolean);
       evidence.push(
-        `${codeownersPath} present (guards: ${[guardsTests ? 'tests' : '', guardsCi ? '.github' : '', guardsBrief ? 'agent rules' : ''].filter(Boolean).join(', ') || 'general paths'})`,
+        covered.length > 0
+          ? `${codeownersPath} covers ${covered.join(', ')}`
+          : `${codeownersPath} exists but covers neither tests nor .github/workflows (${patterns.length} rule(s): ${patterns.slice(0, 3).join(', ')}${patterns.length > 3 ? ', …' : ''})`,
       );
       if (guardsTests || guardsCi) protectsOracle = true;
     }
 
     // Also check if .claude/settings.json denies editing tests or CI workflows
-    const claudeRaw = ctx.readText('.claude/settings.json') ?? '';
-    if (/"(?:Edit|Write)\([^)]*(?:tests|\.github|playwright|vitest)/i.test(claudeRaw)) {
+    // Only a deny rule restricts: `Edit(tests/**)` under `allow` grants the very thing.
+    const editDenies = ctx.readJson<{ permissions?: { deny?: string[] } }>('.claude/settings.json')?.permissions?.deny ?? [];
+    if (editDenies.some((rule) => /^(?:Edit|Write|MultiEdit)\([^)]*(?:tests?\b|\.github|playwright|vitest|e2e)/i.test(rule))) {
       evidence.push('.claude/settings.json restricts agent edits to test/CI paths');
       protectsOracle = true;
     }
 
-    // Check CI workflows for oracle / protected-path guard
+    // A CI job that fails (or flags) a change which weakens tests or edits protected paths
     const workflows = ctx.findFiles((f) => /^\.github\/workflows\/.+\.ya?ml$/.test(f));
     for (const wf of workflows) {
-      const body = ctx.readText(wf) ?? '';
-      if (/protected.*path|oracle|CODEOWNERS|test.*modified/i.test(body)) {
-        evidence.push(`${wf} includes protected-path / oracle guard`);
+      // The workflow as it runs: a comment that plans a guard is not one.
+      const body = (ctx.readText(wf) ?? '').split(/\r?\n/).filter((l) => !/^\s*#/.test(l)).join('\n');
+      if (/protected[-_ ]paths?|oracle[-_ ]guard|test[-_ ]?(files?)?[-_ ](deleted|removed|weakened|guard)|guard[-_ ]tests/i.test(body)) {
+        evidence.push(`${wf} guards protected paths / test changes`);
         protectsOracle = true;
       }
     }
 
+    const solo = ctx.isSolo;
     let status: CheckResult['status'] = 'fail';
     if (protectsOracle) {
       status = 'pass';
-    } else if (codeownersPath) {
+    } else if (codeownersPath || solo) {
+      // With one contributor there is nobody for CODEOWNERS to route a review to; the gap is real
+      // but smaller, and the fix is a guard rather than a second reviewer.
       status = 'warn';
-    } else {
-      evidence.push('No CODEOWNERS or CI/harness protection found for tests/, .github/workflows/, or rule files');
+    }
+    if (!protectsOracle && !codeownersPath) {
+      evidence.push(
+        solo
+          ? `${ctx.teamLabel}: no CI or harness guard stops an agent from weakening tests or editing .github/workflows to get to green`
+          : 'No CODEOWNERS or CI/harness protection found for tests/, .github/workflows/, or rule files',
+      );
     }
 
     results.push({
@@ -165,8 +261,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Agent, który może osłabić testy, usunąć asercje lub zmienić workflow CI, aby uzyskać zielony wynik, zamienia bramkę weryfikacji w fikcję.',
       },
       fix: {
-        en: 'Add `.github/CODEOWNERS` protecting `tests/`, `.github/`, `AGENTS.md`, and linter/tsconfig files, and require Code Owner review on protected branches.',
-        pl: 'Dodaj `.github/CODEOWNERS` chroniący `tests/`, `.github/`, `AGENTS.md` oraz konfigurację lintera/TS i wymagaj zatwierdzenia Code Owners na chronionych gałęziach.',
+        en: solo
+          ? 'Solo repo, so skip CODEOWNERS and add a guard instead: a CI step that fails when a pull request deletes test files, adds `.skip`/`.only`, or edits `.github/workflows/` without an explicit label; or deny agent edits to CI config in `.claude/settings.json` (`"deny": ["Edit(.github/workflows/**)"]`).'
+          : 'Add `.github/CODEOWNERS` rules for `tests/`, `.github/workflows/`, `AGENTS.md` and the lint/type config, and require Code Owner review on the protected branch.',
+        pl: solo
+          ? 'Repozytorium jednoosobowe, więc zamiast CODEOWNERS dodaj bezpiecznik: krok CI, który pada, gdy pull request usuwa pliki testów, dodaje `.skip`/`.only` lub zmienia `.github/workflows/` bez jawnej etykiety; albo zablokuj agentom edycję konfiguracji CI w `.claude/settings.json` (`"deny": ["Edit(.github/workflows/**)"]`).'
+          : 'Dodaj reguły `.github/CODEOWNERS` dla `tests/`, `.github/workflows/`, `AGENTS.md` oraz konfiguracji lintera/typów i wymagaj zatwierdzenia Code Owners na chronionej gałęzi.',
       },
       docsPath: 'workflows/test/protect-the-oracle/',
     });
@@ -180,9 +280,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     const tautologyHits: string[] = [];
     let tsIgnoreCount = 0;
     let eslintDisableCount = 0;
+    const tsIgnoreFiles: Array<{ file: string; count: number }> = [];
 
-    // Scan up to 150 test files for test anti-patterns
-    const sampleTests = ctx.testFiles.slice(0, 150);
+    // The whole suite up to a generous bound; the evidence says so when a bound applied.
+    const sampleTests = allTestFiles.slice(0, 1500);
     for (const tf of sampleTests) {
       const content = ctx.readText(tf);
       if (!content) continue;
@@ -194,21 +295,27 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         const trimmed = line.trim();
         if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('#')) continue;
 
-        if (/\b(?:it|test|describe|context)\.only\s*\(/.test(trimmed) || /\bf(?:it|describe)\s*\(/.test(trimmed)) {
+        // Matchers are anchored to the start of the statement: the same call quoted inside a
+        // string (a fixture a test writes to disk) is data, not a test.
+        if (/^(?:(?:test|describe)\.)?(?:it|test|describe|context)\.only\b/.test(trimmed) || /^f(?:it|describe)\s*\(/.test(trimmed)) {
           onlyHits.push(`${tf}:${idx + 1}`);
         }
+        // A skipped test is declared with a title: `it.skip('…')`. `test.skip(isMobile, 'why')`
+        // inside a test body is a runtime condition, which is how Playwright scopes a test.
         if (
-          /\b(?:it|test|describe)\.skip\s*\(/.test(trimmed) ||
-          /\bx(?:it|test|describe)\s*\(/.test(trimmed) ||
-          /@pytest\.mark\.skip\b/.test(trimmed)
+          /^(?:(?:test|describe)\.)?(?:it|test|describe)\.(?:skip|todo|fixme)\s*\(\s*['"`]/.test(trimmed) ||
+          /^x(?:it|test|describe)\s*\(/.test(trimmed) ||
+          /@pytest\.mark\.skip\b|@unittest\.skip\b/.test(trimmed) ||
+          /^@(?:Ignore|Disabled)\b/.test(trimmed) ||
+          /\bt\.Skip\(\)/.test(trimmed)
         ) {
           skipHits.push(`${tf}:${idx + 1}`);
         }
-        if (/\b(?:it|test)\s*\([^)]+,\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{\s*\}\s*\)/.test(trimmed)) {
+        if (/^(?:it|test)\s*\([^)]+,\s*(?:async\s*)?\([^)]*\)\s*=>\s*\{\s*\}\s*\)/.test(trimmed)) {
           emptyTestHits.push(`${tf}:${idx + 1}`);
         }
         if (
-          /\bexpect\s*\(\s*(true|false|\d+|['"][^'"]*['"])\s*\)\s*\.\s*(?:toBe|toEqual|toStrictEqual)\s*\(\s*\1\s*\)/.test(
+          /^(?:await\s+)?expect\s*\(\s*(true|false|\d+|['"][^'"]*['"])\s*\)\s*\.\s*(?:toBe|toEqual|toStrictEqual)\s*\(\s*\1\s*\)/.test(
             trimmed,
           ) ||
           /^\s*assert\s+True\s*$/.test(line)
@@ -218,41 +325,88 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       }
     }
 
-    // Scan up to 250 source files for suppression sprawl
-    const sampleSources = ctx.sourceFiles.slice(0, 250);
+    const sampleSources = ctx.sourceFiles.slice(0, 5000);
     for (const sf of sampleSources) {
       const content = ctx.readText(sf);
       if (!content) continue;
-      const tsMatches = content.match(/@ts-(?:ignore|nocheck)\b/g);
-      if (tsMatches) tsIgnoreCount += tsMatches.length;
-      const esMatches = content.match(/\beslint-disable(?:-next-line|-line)?\b|#\s*type:\s*ignore\b/g);
+      // A suppression only works as the start of a comment; the same words inside a string or a
+      // regular expression (a linter's own source, a prompt) suppress nothing.
+      const tsMatches = content.match(/(?:\/\/|\/\*)\s*@ts-(?:ignore|nocheck)\b/g);
+      if (tsMatches) {
+        tsIgnoreCount += tsMatches.length;
+        tsIgnoreFiles.push({ file: sf, count: tsMatches.length });
+      }
+      const esMatches = content.match(/(?:\/\/|\/\*)\s*(?:eslint|oxlint|biome)-(?:disable|ignore)(?:-next-line|-line)?\b|#\s*type:\s*ignore\b|@Suppress(?:Warnings)?\(|\/\/\s*swiftlint:disable\b/g);
       if (esMatches) eslintDisableCount += esMatches.length;
     }
 
+    const suppressionRate = sampleSources.length > 0 ? (tsIgnoreCount + eslintDisableCount) / sampleSources.length : 0;
+    // Five are worth a warning anywhere; a failure needs both volume and density, so a large
+    // codebase with a few dozen is not graded like a small one riddled with them.
+    const tsIgnoreWarn = tsIgnoreCount >= 5;
+    // Empty and constant-to-constant tests: one in a hundred test files is where it becomes a pattern.
+    const placeholders = tautologyHits.length + emptyTestHits.length;
+    const tsIgnoreFail = tsIgnoreCount >= 15 && tsIgnoreCount / Math.max(sampleSources.length, 1) > 0.02;
+
     const evidence: string[] = [];
-    if (sampleTests.length === 0) {
-      evidence.push('No test files to scan');
+    const nothingToTest =
+      sampleTests.length === 0 && (ctx.sourceFiles.length === 0 || (ctx.sourceFiles.length < 3 && ctx.stack.languages.length === 0));
+    // A test command runs, but its files could not be identified: nothing to scan, and no verdict.
+    const unseenSuite = sampleTests.length === 0 && testCommands.length > 0;
+    if (nothingToTest) {
+      evidence.push('No source code detected — nothing to scan');
+    } else if (unseenSuite) {
+      evidence.push(`The files \`${testCommands[0]!.command}\` runs could not be identified, so they were not scanned`);
+    } else if (sampleTests.length === 0) {
+      evidence.push('No test files to scan (counted once, under verification.unit-tests)');
     } else {
-      evidence.push(`Scanned ${sampleTests.length} test file(s) and ${sampleSources.length} source file(s)`);
+      const of = (read: number, total: number): string => (read < total ? `${read} of ${total}` : String(read));
+      evidence.push(`Scanned ${of(sampleTests.length, allTestFiles.length)} test file(s) and ${of(sampleSources.length, ctx.sourceFiles.length)} source file(s)`);
     }
     if (onlyHits.length > 0) evidence.push(`.only() left in tests (${onlyHits.length}): ${onlyHits.slice(0, 3).join(', ')}`);
     if (emptyTestHits.length > 0) evidence.push(`Empty test blocks (${emptyTestHits.length}): ${emptyTestHits.slice(0, 3).join(', ')}`);
     if (tautologyHits.length > 0) evidence.push(`Constant-to-constant tautology assertions (${tautologyHits.length}): ${tautologyHits.slice(0, 3).join(', ')}`);
     if (skipHits.length > 0) evidence.push(`Skipped tests (${skipHits.length}): ${skipHits.slice(0, 3).join(', ')}`);
     if (tsIgnoreCount > 0 || eslintDisableCount > 0) {
-      evidence.push(`Suppressions in source: ${tsIgnoreCount} @ts-ignore/@ts-nocheck, ${eslintDisableCount} eslint-disable/type:ignore`);
+      evidence.push(`Suppressions in ${sampleSources.length} source file(s): ${tsIgnoreCount} @ts-ignore/@ts-nocheck, ${eslintDisableCount} lint/type suppressions`);
+    }
+    if (tsIgnoreWarn) {
+      const worst = tsIgnoreFiles.sort((a, b) => b.count - a.count).slice(0, 3);
+      evidence.push(`@ts-ignore/@ts-nocheck in: ${worst.map((w) => `${w.file} (${w.count})`).join(', ')}`);
     }
 
-    const suppressionRate = sampleSources.length > 0 ? (tsIgnoreCount + eslintDisableCount) / sampleSources.length : 0;
     let status: CheckResult['status'] = 'pass';
-    if (sampleTests.length === 0) {
+    if (nothingToTest || unseenSuite || sampleTests.length === 0) {
+      // No suite to read: verification.unit-tests carries that finding once.
+      status = 'info';
+    } else if (onlyHits.length > 0 || placeholders >= Math.max(2, Math.ceil(sampleTests.length * 0.01)) || tsIgnoreFail) {
       status = 'fail';
-    } else if (onlyHits.length > 0 || tautologyHits.length > 0 || emptyTestHits.length >= 2 || tsIgnoreCount >= 15) {
-      status = 'fail';
-    } else if (skipHits.length >= 5 || emptyTestHits.length > 0 || suppressionRate > 0.35 || tsIgnoreCount >= 5) {
+    } else if (skipHits.length >= 5 || placeholders > 0 || suppressionRate > 0.35 || tsIgnoreWarn) {
       status = 'warn';
     } else {
       evidence.push('No .only(), empty test blocks, constant tautologies, or heavy suppression sprawl detected');
+    }
+
+    // One sentence per kind of finding, so the fix never talks about something the scan did not see.
+    const qualityFix = { en: [] as string[], pl: [] as string[] };
+    if (onlyHits.length > 0) {
+      qualityFix.en.push('Remove the `.only()` calls listed above (they silently drop every other test from the run).');
+      qualityFix.pl.push('Usuń wymienione wyżej wywołania `.only()` (po cichu wyłączają pozostałe testy).');
+    }
+    if (tautologyHits.length > 0 || emptyTestHits.length > 0) {
+      qualityFix.en.push('Replace the empty and constant-to-constant tests with assertions on real behaviour against hand-computed values.');
+      qualityFix.pl.push('Zastąp puste i tautologiczne testy asercjami realnego zachowania wobec ręcznie wyliczonych wartości.');
+    }
+    if (skipHits.length >= 5) {
+      qualityFix.en.push('Un-skip or delete the skipped tests listed above; a skipped test that stays is a hole agents learn to dig.');
+      qualityFix.pl.push('Włącz lub usuń wymienione wyżej pominięte testy; pominięty test, który zostaje, to furtka, z której agenci nauczą się korzystać.');
+    }
+    if (tsIgnoreWarn) {
+      qualityFix.en.push('Replace `@ts-ignore` in the files listed above with proper narrowing, or with `@ts-expect-error` plus a reason so it fails once the cause is gone.');
+      qualityFix.pl.push('Zastąp `@ts-ignore` w wymienionych plikach właściwym zawężaniem typów albo `@ts-expect-error` z uzasadnieniem, aby zgłaszał błąd, gdy przyczyna zniknie.');
+    } else if (suppressionRate > 0.35) {
+      qualityFix.en.push(`${eslintDisableCount} lint/type suppression comments in ${sampleSources.length} files: remove the ones that hide a real problem and give each one that stays a reason. A suppression only means something when the linter it silences runs.`);
+      qualityFix.pl.push(`${eslintDisableCount} komentarzy wyciszających linter/typy w ${sampleSources.length} plikach: usuń te, które ukrywają realny problem, a pozostałym dodaj uzasadnienie. Wyciszenie ma sens tylko wtedy, gdy wyciszany linter faktycznie działa.`);
     }
 
     results.push({
@@ -271,8 +425,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Tautologiczne asercje (`expect(true).toBe(true)`), `.only()`, pominięte testy i nadmiar `@ts-ignore` dają zielone buildy, które niczego nie dowodzą.',
       },
       fix: {
-        en: 'Remove `.only()`, delete or replace tautological/empty tests with behavioral assertions against hand-computed expected values, and replace `@ts-ignore` with proper narrowing or `@ts-expect-error` with rationale.',
-        pl: 'Usuń `.only()`, zastąp puste i tautologiczne testy asercjami zachowania wobec ręcznie wyliczonych oczekiwań oraz zamień `@ts-ignore` na właściwe typowanie.',
+        en: sampleTests.length === 0
+          ? 'Write the first tests (see verification.unit-tests); this scan has nothing to read until they exist.'
+          : qualityFix.en.join(' ') || 'Keep it this way: no `.only()`, no title-skipped tests, no constant assertions.',
+        pl: sampleTests.length === 0
+          ? 'Napisz pierwsze testy (patrz verification.unit-tests); dopóki ich nie ma, ten skan nie ma czego czytać.'
+          : qualityFix.pl.join(' ') || 'Utrzymaj ten stan: bez `.only()`, bez testów pomijanych po tytule, bez asercji na stałych.',
       },
       docsPath: 'workflows/test/oracle-strength/',
     });
@@ -330,13 +488,48 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     if (ctx.hasAnyFile(['.size-limit.json', '.size-limit.cjs']) || ctx.hasDependency('size-limit')) fitnessSignals.push('size-limit bundle budget');
 
     const pkg = ctx.packageJson;
+    const unwiredChecks: string[] = [];
     if (pkg?.scripts) {
+      // An invariant check counts when the loop runs it: another script calls it, or CI does. A
+      // script someone runs by hand to look at production jobs is a monitor, not a fitness function.
+      const ciText = ctx.ci.files.map((f) => ctx.readText(f) ?? '').join('\n');
+      const unwired = unwiredChecks;
+      const wired = (name: string): boolean => {
+        const call = new RegExp(`(?:^|[\\s"'])${name.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&')}(?:$|[\\s"'&;])`, 'm');
+        // Called by name, or the program it runs is also run by another script or by CI.
+        const programs = (pkg.scripts?.[name] ?? '').match(/\bscripts?\/[\w./-]+/g) ?? [];
+        // The scripts that make up the loop: an alias that runs the same program is not one of them.
+        const loop = Object.entries(pkg.scripts ?? {}).filter(([other]) => other !== name && /^(?:pre[\w:-]*|lint|check|verify|test|ci|validate|build|deploy)$/.test(other)).map(([, body]) => body);
+        const runs = /^(lint|check|verify|test|ci|validate)$/.test(name) || call.test(ciText) || loop.some((body) => call.test(body) || programs.some((p) => body.includes(p))) || programs.some((p) => ciText.includes(p));
+        if (!runs && /^(check|lint|verify|guard|validate)[:-]/.test(name) && !unwired.includes(name)) unwired.push(name);
+        return runs;
+      };
       for (const [k, v] of Object.entries(pkg.scripts)) {
-        if (/(audit|seo|budget|check:links|check:size|architecture|arch)/i.test(k) || /seo-audit|check-links|size-limit|depcruise/i.test(v)) {
+        if (
+          /(^|[:._-])(audit|seo|budget|links|size|architecture|arch|a11y|deps|boundaries|knip|deadcode)($|[:._-])/i.test(k) ||
+          /\b(seo-audit|check-links|size-limit|depcruise|knip|madge|lhci|pa11y|linkinator|lychee|ts-prune|bundlesize)\b/i.test(v)
+        ) {
           fitnessSignals.push(`script: ${k}`);
         }
+        // A repository's own invariant checks: `check:design`, or a lint script that runs scripts/check-*.mjs.
+        const ownChecks = wired(k) ? v.match(/\bscripts\/check-[\w.-]+/g) : null;
+        if (ownChecks) fitnessSignals.push(`invariant checks in \`${k}\`: ${[...new Set(ownChecks)].slice(0, 3).join(', ')}`);
+        // `check:design`, `lint:design`, `verify:deps`: a named check that runs the repository's own program.
+        else if (wired(k) && /^(check|lint|verify|guard|validate):(?!types?$|ts$|fix$)[\w-]+$/.test(k) && /\b(node|bun|tsx|deno|python3?)\s+\S*scripts?\//.test(v)) {
+          fitnessSignals.push(`invariant check: \`${k}\``);
+        } else if (wired(k) && /^check:(?!types?$|ts$)[\w-]+$/.test(k)) fitnessSignals.push(`script: ${k}`);
       }
     }
+    if (ctx.hasAnyFile(['knip.json', 'knip.jsonc', 'knip.ts', '.knip.json'])) fitnessSignals.push('Knip (unused code and dependencies)');
+    // A lint rule that fences one layer off from another is an architecture test that runs on every lint.
+    const lintConfig = ['eslint.config.js', 'eslint.config.mjs', 'eslint.config.cjs', 'eslint.config.ts', '.eslintrc.json', '.eslintrc.js', '.eslintrc.cjs', '.oxlintrc.json', 'oxlint.json', 'biome.json', 'biome.jsonc', 'vite.config.ts'].find((f) =>
+      /no-restricted-imports|no-restricted-paths|noRestrictedImports|boundaries\/element-types|import\/no-cycle/.test(ctx.readText(f) ?? ''),
+    );
+    if (lintConfig) fitnessSignals.push(`Import-boundary lint rule in ${lintConfig}`);
+    if (ctx.hasFile('.periphery.yml')) fitnessSignals.push('Periphery (unused Swift code)');
+    const gradleCatalog = `${ctx.readText('gradle/libs.versions.toml') ?? ''}\n${ctx.readText('build.gradle.kts') ?? ''}`;
+    if (/kover|jacoco/i.test(gradleCatalog)) fitnessSignals.push('JVM coverage tooling (Kover/JaCoCo)');
+    if (/dependency-?guard|dependencyAnalysis/i.test(gradleCatalog)) fitnessSignals.push('Gradle dependency guard');
 
     // Coverage thresholds in vitest/jest/pyproject
     const testConfigs = ['vitest.config.ts', 'vite.config.ts', 'jest.config.ts', 'jest.config.js', 'pyproject.toml'];
@@ -347,7 +540,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       }
     }
 
-    const status: CheckResult['status'] = fitnessSignals.length > 0 ? 'pass' : 'warn';
+    if (fitnessSignals.length === 0 && unwiredChecks.length > 0) {
+      fitnessSignals.push(`Defined but run by neither the verify script nor CI: ${unwiredChecks.slice(0, 4).map((n) => `\`${n}\``).join(', ')}`);
+    }
+    const status: CheckResult['status'] = fitnessSignals.length > 0 && unwiredChecks.length === 0 ? 'pass' : fitnessSignals.some((s) => !s.startsWith('Defined but')) ? 'pass' : 'warn';
 
     results.push({
       id: 'verification.fitness-functions',

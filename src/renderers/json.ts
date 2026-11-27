@@ -13,6 +13,8 @@ export function renderJson(report: AuditReport, options: RenderOptions = {}): st
     repoPath: report.repoPath,
     lang,
     overallScore: report.overallScore,
+    stationScore: report.stationScore,
+    criticalPenalty: report.criticalPenalty,
     rawLevel: report.rawLevel,
     level: report.level,
     levelName: t(levelMeta.shortName, lang),
@@ -22,6 +24,20 @@ export function renderJson(report: AuditReport, options: RenderOptions = {}): st
       triggeredBy: cap.triggeredBy,
       reason: t(cap.reason, lang),
     })),
+    ...(report.nextLevel
+      ? {
+          nextLevel: {
+            level: report.nextLevel.level,
+            levelName: t(LEVELS[report.nextLevel.level].shortName, lang),
+            scoreNeeded: report.nextLevel.scoreNeeded,
+            pointsMissing: report.nextLevel.pointsMissing,
+            blockers: report.nextLevel.blockers.map((b) => ({ id: b.id, requirement: t(b.requirement, lang) })),
+          },
+        }
+      : {}),
+    topPriorities: report.topPriorities.map((c) => c.id),
+    scaffold: report.scaffold,
+    scan: report.scan,
     stack: report.stack,
     git: report.git,
     stations: report.stations.map((st) => ({
@@ -40,6 +56,7 @@ export function renderJson(report: AuditReport, options: RenderOptions = {}): st
       weight: c.weight,
       status: c.status,
       severity: c.severity,
+      ...(c.impact !== undefined ? { impact: c.impact } : {}),
       title: t(c.title, lang),
       evidence: c.evidence,
       why: t(c.why, lang),

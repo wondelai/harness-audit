@@ -1,8 +1,12 @@
 import { docsUrl, LEVELS, STATION_MAP, t } from './i18n.js';
+import { selectTopPriorities, unblocksNextLevel } from './scoring.js';
 import type { AuditReport, Lang } from './types.js';
 
 export function generateFixPrompt(report: AuditReport, lang: Lang = report.lang): string {
-  const actionable = report.checks.filter((c) => c.status === 'fail' || c.status === 'warn');
+  // The report's own order (critical, next-level gates, severity, points), so an agent that runs
+  // out of budget stops in the right place.
+  const next = report.nextLevel;
+  const actionable = selectTopPriorities(report.checks, Number.POSITIVE_INFINITY, next);
   const fails = actionable.filter((c) => c.status === 'fail');
   const warns = actionable.filter((c) => c.status === 'warn');
   const levelMeta = LEVELS[report.level];
@@ -12,7 +16,11 @@ export function generateFixPrompt(report: AuditReport, lang: Lang = report.lang)
     report.stack.frameworks.length > 0 ? `Frameworks: ${report.stack.frameworks.join(', ')}` : '',
     report.stack.packageManagers.length > 0 ? `Package managers: ${report.stack.packageManagers.join(', ')}` : '',
     `Layout: ${report.stack.monorepo ? 'Monorepo' : 'Single repository'} (${report.stack.sourceFileCount} source, ${report.stack.testFileCount} test files)`,
-    report.stack.verifyScripts.length > 0 ? `Detected verify scripts: ${report.stack.verifyScripts.join(', ')}` : '',
+    report.stack.verifyCommands.length > 0 ? `Verify commands found: ${report.stack.verifyCommands.join(' ; ')}` : '',
+    report.git.isGitRepo ? `Contributors (90 days): ${report.git.gitAuthors90d}` : '',
+    next
+      ? `Next level: ${next.level} needs score ${next.scoreNeeded} (now ${report.overallScore})${next.blockers.length > 0 ? ` and these gates cleared: ${next.blockers.map((b) => b.id).join(', ')}` : ''}`
+      : '',
   ]
     .filter(Boolean)
     .map((line) => `- ${line}`)
@@ -23,7 +31,7 @@ export function generateFixPrompt(report: AuditReport, lang: Lang = report.lang)
       .map((c, i) => {
         const stationName = t(STATION_MAP[c.station].name, lang);
         return [
-          `### ${i + 1}. \`${c.id}\` (${stationName} · ${c.status.toUpperCase()} · ${c.severity})`,
+          `### ${i + 1}. \`${c.id}\` (${stationName} · ${c.status.toUpperCase()} · ${c.severity}${c.impact ? ` · +${c.impact} pts` : ''}${next && unblocksNextLevel(c, next) ? ` · gates Level ${next.level}` : ''})`,
           `- **Issue:** ${t(c.title, lang)}`,
           `- **Observed evidence:** ${c.evidence.join(' ; ')}`,
           `- **Required fix:** ${t(c.fix, lang)}`,
@@ -70,11 +78,11 @@ ${warns.length > 0 ? formatList(warns) : '_Brak ostrzeżeń (WARN)._'}
 
 ## Końcowy raport weryfikacji (wymagany format zakończenia)
 
-Zakończ pracę wyłącznie po ponownym uruchomieniu \`npx @wondelai/harness-audit\` oraz wszystkich komend weryfikacji repozytorium. Wypisz poniższą tabelę dowodów (każde twierdzenie bez komendy i realnego wyniku uznajemy za niezweryfikowane):
+Zakończ pracę wyłącznie po ponownym uruchomieniu \`npx harness-audit\` oraz wszystkich komend weryfikacji repozytorium. Wypisz poniższą tabelę dowodów (każde twierdzenie bez komendy i realnego wyniku uznajemy za niezweryfikowane):
 
 | Twierdzenie / naprawiony check | Uruchomiona komenda | Kod wyjścia i skrót wyniku |
 | --- | --- | --- |
-| np. \`intent.single-source\` | \`npx @wondelai/harness-audit --format json\` | \`0 — status: pass\` |
+| np. \`intent.single-source\` | \`npx harness-audit --format json\` | \`0 — status: pass\` |
 `;
   }
 
@@ -115,10 +123,10 @@ ${warns.length > 0 ? formatList(warns) : '_No warnings remaining._'}
 
 ## Required Verification Ledger (End Your Response With This Table)
 
-Before finishing, re-run \`npx @wondelai/harness-audit\` and the repository's own verification commands. End with a claims → command → output ledger (any claim without an executed command and observed output is treated as unverified):
+Before finishing, re-run \`npx harness-audit\` and the repository's own verification commands. End with a claims → command → output ledger (any claim without an executed command and observed output is treated as unverified):
 
 | Claim / Check Fixed | Command Executed | Exit Code & Observed Output |
 | --- | --- | --- |
-| e.g. \`intent.single-source\` | \`npx @wondelai/harness-audit --format json\` | \`0 — status: pass\` |
+| e.g. \`intent.single-source\` | \`npx harness-audit --format json\` | \`0 — status: pass\` |
 `;
 }

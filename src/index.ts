@@ -1,17 +1,21 @@
 import { runAllChecks } from './checks/index.js';
 import { RepoContext } from './fs-scanner.js';
 import { STATIONS, TOOL_VERSION } from './i18n.js';
+import { planInit } from './init.js';
 import {
+  assignImpact,
   buildRecommendations,
+  criticalPenalty,
   computeOverallScore,
   evaluateLevel,
+  nextLevelFor,
   scoreStation,
   selectTopPriorities,
 } from './scoring.js';
 import type { AuditOptions, AuditReport } from './types.js';
 
 export { RepoContext } from './fs-scanner.js';
-export { initHarness } from './init.js';
+export { initHarness, planInit } from './init.js';
 export { INTERVIEW_QUESTIONS, runInteractiveInterview, scoreInterview } from './interview.js';
 export { buildDeepPromptPayload, runDeepReview } from './deep.js';
 export { generateFixPrompt } from './prompt-gen.js';
@@ -24,10 +28,17 @@ export function auditRepo(repoPath: string, options: AuditOptions = {}): AuditRe
   const ctx = new RepoContext(repoPath);
   const checks = runAllChecks(ctx);
 
+  assignImpact(checks);
   const stations = STATIONS.map((s) => scoreStation(s.id, checks));
-  const overallScore = computeOverallScore(stations);
+  const stationScore = computeOverallScore(stations);
+  const penalty = criticalPenalty(checks);
+  const overallScore = Math.max(0, stationScore - penalty.points);
   const { rawLevel, level, caps } = evaluateLevel(overallScore, stations, checks);
-  const topPriorities = selectTopPriorities(checks, 5);
+  const nextLevel = nextLevelFor(level, overallScore, stations, checks);
+  const topPriorities = selectTopPriorities(checks, 5, nextLevel);
+  const scaffold = planInit(ctx)
+    .filter((a) => a.action === 'create')
+    .map((a) => a.path);
   const recommendations = buildRecommendations({
     lang,
     level,
@@ -37,18 +48,23 @@ export function auditRepo(repoPath: string, options: AuditOptions = {}): AuditRe
   });
 
   return {
-    schemaVersion: '1.0.0',
+    schemaVersion: '1.1.0',
     toolVersion: TOOL_VERSION,
     auditedAt: new Date().toISOString(),
     repoPath: ctx.root,
     repoName: ctx.repoName,
     lang,
+    scan: ctx.scan,
     stack: ctx.stack,
     git: ctx.git,
     overallScore,
+    stationScore,
+    criticalPenalty: { points: penalty.points, checks: penalty.checks },
     rawLevel,
     level,
     levelCaps: caps,
+    nextLevel,
+    scaffold,
     stations,
     checks,
     topPriorities,

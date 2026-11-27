@@ -1,5 +1,6 @@
 import { docsUrl, LEVELS, STATION_MAP, t, UI } from '../i18n.js';
 import type { AuditReport, RenderOptions } from '../types.js';
+import { branchNotes, describeGate, uncappedGates } from './gates.js';
 
 export function renderMarkdown(report: AuditReport, options: RenderOptions = {}): string {
   const lang = options.lang ?? report.lang;
@@ -14,7 +15,13 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
   lines.push('');
   lines.push('| Metric | Value |');
   lines.push('| --- | --- |');
-  lines.push(`| **${t(UI.overallScore, lang)}** | **${report.overallScore}/100** |`);
+  lines.push(
+    `| **${t(UI.overallScore, lang)}** | **${report.overallScore}/100**${
+      report.criticalPenalty.points > 0
+        ? ` ${t(UI.penaltyLine, lang).replace('{stations}', String(report.stationScore)).replace('{points}', String(report.criticalPenalty.points)).replace('{checks}', report.criticalPenalty.checks.join(', '))}`
+        : ''
+    } |`,
+  );
   lines.push(
     `| **${t(UI.autonomyLevel, lang)}** | **Level ${report.level} — ${t(levelMeta.shortName, lang)}** (${t(levelMeta.shapiroName, lang)}) |`,
   );
@@ -26,9 +33,12 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
   );
   if (report.git.isGitRepo) {
     lines.push(
-      `| **Git Activity** | ${report.git.gitAuthors90d} ${t(UI.contributors90d, lang)} · ${report.git.commits30d} ${t(UI.commits30d, lang)} |`,
+      `| **Git Activity** | ${report.git.gitAuthors90d} ${t(report.git.gitAuthors90d === 1 ? UI.contributor90d : UI.contributors90d, lang)} · ${report.git.commits30d} ${t(UI.commits30d, lang)} |`,
     );
+    const notes = branchNotes(report, lang);
+    if (notes.length > 0) lines.push(`| **Branch** | ⚠ ${notes.join(' ')} |`);
   }
+  lines.push(`| **Scan** | ${report.scan.fileCount} ${t(report.scan.mode === 'git' ? UI.scanGit : UI.scanWalk, lang)}${report.scan.truncated ? ` — ${t(UI.scanTruncated, lang)}` : ''} |`);
   lines.push(`| **Audited At** | ${report.auditedAt} |`);
   lines.push('');
   lines.push(t(levelMeta.summary, lang));
@@ -38,7 +48,24 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
     lines.push(`## ${t(UI.levelCapsHeading, lang)}`);
     lines.push('');
     for (const cap of report.levelCaps) {
-      lines.push(`- **Level ${cap.cappedTo} cap:** ${t(cap.reason, lang)} (\`${cap.triggeredBy.join('`, `')}\`)`);
+      const needs = cap.triggeredBy.map((id) => describeGate(id, report, lang)).join(' · ');
+      lines.push(`- **Level ${cap.cappedTo + 1}+ ${t(UI.capNeeds, lang)}:** ${needs}`);
+      lines.push(`  - ${t(cap.reason, lang)}`);
+    }
+  }
+
+  if (report.nextLevel) {
+    const next = report.nextLevel;
+    lines.push('');
+    lines.push(`## ${t(UI.nextLevelHeading, lang)}: Level ${next.level} — ${t(LEVELS[next.level].shortName, lang)}`);
+    lines.push('');
+    lines.push(
+      next.pointsMissing > 0
+        ? `- **${next.scoreNeeded}/100** (+${next.pointsMissing} ${t(UI.pointsToGo, lang)})`
+        : `- **${next.scoreNeeded}/100** ✓`,
+    );
+    for (const id of uncappedGates(report)) {
+      lines.push(`- **${t(UI.gateLabel, lang)}:** ${describeGate(id, report, lang)}`);
     }
   }
 
@@ -61,7 +88,7 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
     for (let i = 0; i < report.topPriorities.length; i++) {
       const c = report.topPriorities[i]!;
       lines.push(
-        `${i + 1}. **[${c.status.toUpperCase()}] \`${c.id}\` — ${t(c.title, lang)}**`,
+        `${i + 1}. **[${c.status.toUpperCase()}] \`${c.id}\` — ${t(c.title, lang)}**${c.impact ? ` (+${c.impact} ${t(UI.pts, lang)})` : ''}`,
       );
       lines.push(`   - **${t(UI.evidenceLabel, lang)}:** ${c.evidence.join(' ; ')}`);
       lines.push(`   - **${t(UI.fixLabel, lang)}:** ${t(c.fix, lang)}`);
@@ -116,7 +143,7 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
     lines.push('');
     lines.push(`## ${t(UI.nextStepsHeading, lang)}`);
     lines.push('');
-    lines.push(`- **${t(UI.fixPromptHint, lang)}** \`npx @wondelai/harness-audit --prompt --out HARNESS-FIX-PROMPT.md\``);
+    lines.push(`- **${t(UI.fixPromptHint, lang)}** \`npx harness-audit --prompt --out HARNESS-FIX-PROMPT.md\``);
     lines.push(
       `- **${t(UI.deepDiveBook, lang)}:** [${t(report.recommendations.book.title, lang)}](${report.recommendations.book.url}) — ${t(report.recommendations.book.reason, lang)}`,
     );

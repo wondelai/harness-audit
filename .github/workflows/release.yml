@@ -1,0 +1,35 @@
+name: Release
+
+# Push a tag that matches package.json (`npm version minor && git push --follow-tags`) and this
+# publishes the same build as @wondelai/harness-audit and harness-audit, then checks that both
+# names serve the new version through npx.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write # create the GitHub release
+  id-token: write # npm trusted publishing (OIDC): no token secret to rotate
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      # Trusted publishing needs npm >= 11.5.1.
+      - run: npm install -g npm@latest
+      - run: npm ci
+      - name: Tag matches package.json
+        run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
+      - run: npm run verify
+      - run: node scripts/publish.mjs
+      - name: Both names serve this version through npx
+        run: node scripts/publish.mjs --check
+      - name: GitHub release
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes
+        env:
+          GH_TOKEN: ${{ github.token }}
