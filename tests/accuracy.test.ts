@@ -132,9 +132,10 @@ describe('instruction files', () => {
   it('counts nested briefs and a routed doc map as scoped context, and ignores a rules README', () => {
     const repo = temp('ha-scoped-');
     repo.write('package.json', JSON.stringify({ name: 'app' }));
-    repo.write('AGENTS.md', '# App\n\n## Read before you touch\n- Payments → `src/payments/README.md`\n- Tests → `tests/e2e/README.md`\n');
+    repo.write('AGENTS.md', '# App\n\n## Read before you touch\n- Payments → `src/payments/README.md`\n- Tests → `tests/e2e/README.md`\n- Auth → `src/auth/README.md`\n');
     repo.write('src/payments/README.md', '# Payments rules\n');
     repo.write('tests/e2e/README.md', '# E2E rules\n');
+    repo.write('src/auth/README.md', '# Auth rules\n');
     repo.write('migrations/CLAUDE.md', '# Migration rules\n');
     repo.write('.cursor/rules/README.md', '# How these rules are organised\n');
     repo.write('.cursor/rules/api.mdc', '---\nglobs: "src/api/**"\n---\nKeep handlers thin.\n');
@@ -143,7 +144,7 @@ describe('instruction files', () => {
     const report = auditRepo(repo.dir);
     expect(check(report, 'intent.scoped-rules').status).toBe('pass');
     expect(evidence(report, 'intent.scoped-rules')).toContain('migrations/CLAUDE.md');
-    expect(evidence(report, 'intent.scoped-rules')).toContain('routes agents to 2 area docs');
+    expect(evidence(report, 'intent.scoped-rules')).toContain('routes agents to 3 area docs');
     expect(check(report, 'intent.instructions-file').status).toBe('pass');
   });
 });
@@ -568,8 +569,11 @@ describe('weak evidence is no claim', () => {
     const repo = temp('ha-reach-');
     repo.write('package.json', JSON.stringify({ name: 'api', scripts: { dev: 'wrangler dev --remote' } }));
     repo.write('CLAUDE.md', '# API\n\nLocal API talks to production D1, R2, and secrets.\nNever force-push to main.\nA\nB\n');
-    const sandbox = check(auditRepo(repo.dir), 'harness.sandbox-readiness');
+    const reachReport = auditRepo(repo.dir);
+    const sandbox = check(reachReport, 'harness.sandbox-readiness');
     expect(sandbox.status).toBe('fail');
+    // "Never force-push to main" is a rule about history, not about the reach, yet it is a written
+    // boundary: the reach is high, and it becomes critical only where nothing governs it at all.
     expect(sandbox.severity).toBe('high');
     expect(sandbox.evidence.join('\n')).toContain('CLAUDE.md:3 says local work reaches production');
     expect(sandbox.fix.en).toContain('local or preview bindings');
@@ -787,5 +791,170 @@ describe('init does not create a second brief', () => {
     expect(ci.content).toContain('- run: npm ci');
     expect(ci.content).toContain('- run: npm run lint');
     expect(ci.content).toContain('- run: npm test');
+  });
+});
+
+describe('levels rest on what is certain', () => {
+  it('caps the level only where local production reach is ungoverned', () => {
+    const repo = temp('ha-ungoverned-');
+    repo.write('package.json', JSON.stringify({ name: 'api', scripts: { dev: 'wrangler dev --remote' } }));
+    repo.write('CLAUDE.md', '# API\n\nRun the app with the dev script.\nA\nB\nC\n');
+    const bare = check(auditRepo(repo.dir), 'harness.sandbox-readiness');
+    expect(bare.severity).toBe('critical');
+    expect(bare.meta?.['localDevReachesProduction']).toBe(true);
+
+    repo.write('CLAUDE.md', '# API\n\nLive means production: write to it only when the write is the task, and say so first.\nA\nB\nC\n');
+    const governed = check(auditRepo(repo.dir), 'harness.sandbox-readiness');
+    expect(governed.status).toBe('fail');
+    expect(governed.meta?.['localDevReachesProduction']).toBe(false);
+  });
+
+  it('never takes a test command from prose: no test script and no test file is a critical gap', () => {
+    const repo = temp('ha-prose-');
+    repo.write('package.json', JSON.stringify({ name: 'plugins', scripts: { check: 'bun check', lint: 'oxlint' }, devDependencies: { oxlint: '^1.0.0', typescript: '^6.0.0' } }));
+    repo.write('tsconfig.json', '{ "compilerOptions": { "strict": true } }');
+    repo.write('CLAUDE.md', '# Plugins\n\nRun `bun test` before finishing. No tests yet.\nRun `bun run check` and `bun run lint`.\nA\nB\n');
+    for (let i = 0; i < 12; i++) repo.write(`src/plugin${i}.ts`, 'export {};\n');
+    const report = auditRepo(repo.dir);
+    const tests = check(report, 'verification.unit-tests');
+    expect(tests.status).toBe('fail');
+    expect(tests.severity).toBe('critical');
+    // One finding for the missing suite, not two.
+    expect(check(report, 'verification.test-quality-scan').status).toBe('info');
+    expect(report.stack.verifyCommands.join(' ')).not.toContain('bun test');
+    expect(check(report, 'release.ci-pipeline').fix.en).not.toContain('e.g. `bun run check`');
+  });
+
+  it('does not count a compile step or a helper script as a test', () => {
+    const repo = temp('ha-helpers-');
+    repo.write(
+      'package.json',
+      JSON.stringify({ name: 'app', scripts: { test: 'bun run i18n:compile && bash scripts/ensure-dev-server.sh && bun test', 'i18n:compile': 'node scripts/i18n-compile.mjs' } }),
+    );
+    repo.write('scripts/i18n-compile.mjs', 'export {};\n');
+    repo.write('scripts/ensure-dev-server.sh', '#!/bin/bash\n');
+    repo.write('src/a.test.ts', "it('adds', () => { expect(1 + 1).toBe(2); });\n");
+    const report = auditRepo(repo.dir);
+    expect(report.stack.testFileCount).toBe(1);
+    expect(evidence(report, 'verification.unit-tests')).not.toContain('i18n-compile');
+  });
+
+  it('reads a boundary through emoji, bold and either word order', () => {
+    const forms = [
+      '🚨 **PRODUCTION DEPLOYS — ONE WAY ONLY**: `bun run update:production` is Michał\'s call, never an agent\'s.',
+      '- `bun run deploy` — debug only. It bypasses the pipeline and can push stale local code.',
+      'Live means production: write to it only when the write _is_ the task, and say so first.',
+      'Remote D1 is production\'s database: migrations reach it only through the owner.',
+    ];
+    for (const sentence of forms) {
+      const repo = temp('ha-forms-');
+      repo.write('AGENTS.md', `# App\n\n${sentence}\nA\nB\nC\n`);
+      const text = check(auditRepo(repo.dir), 'harness.sandbox-readiness').evidence.join('\n');
+      expect(text, sentence).toContain('Boundary rule at AGENTS.md:3');
+    }
+  });
+
+  it('fails on a test-mode or provider-less credential without capping the level on it', () => {
+    const repo = temp('ha-testkey-');
+    repo.write('package.json', JSON.stringify({ name: 'app' }));
+    repo.write('.gitignore', '.env\n.env.local\n');
+    repo.write('.env.development', `STRIPE_SECRET_KEY=sk_test_${'a1B2c3D4'.repeat(4)}\n`);
+    repo.commit();
+    const secret = check(auditRepo(repo.dir), 'harness.secret-hygiene');
+    expect(secret.status).toBe('fail');
+    expect(secret.evidence[0]).toBe('.env.development:1 Stripe test-mode secret key (committed)');
+    expect(secret.severity).toBe('high');
+    expect(secret.meta?.['hasHardcodedSecrets']).toBe(false);
+  });
+
+  it('treats a missing ignore rule as a precaution until the file is there', () => {
+    const repo = temp('ha-absent-');
+    repo.write('package.json', JSON.stringify({ name: 'w' }));
+    repo.write('wrangler.toml', 'name = "w"\n');
+    repo.write('.gitignore', '.env.local\n');
+    repo.commit();
+    const absent = check(auditRepo(repo.dir), 'harness.secret-hygiene');
+    expect(absent.status).toBe('warn');
+    expect(absent.evidence.join('\n')).toContain('Not gitignored: .dev.vars');
+
+    repo.write('.dev.vars', 'MODE=local\n');
+    const present = check(auditRepo(repo.dir), 'harness.secret-hygiene');
+    expect(present.status).toBe('fail');
+    expect(present.evidence.join('\n')).toContain('Present and not ignored: .dev.vars');
+  });
+
+  it('credits a PreToolUse guard hook that decides on deploy commands', () => {
+    const repo = temp('ha-guard-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { deploy: 'wrangler deploy' } }));
+    repo.write('wrangler.toml', 'name = "app"\n[observability]\nenabled = true\n');
+    repo.write('.claude/hooks/guard-shell.sh', '#!/bin/bash\n# deny wrangler deploy and --remote inside worktrees\nexit 0\n');
+    repo.write('.claude/settings.json', JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: '.claude/hooks/guard-shell.sh' }] }] } }));
+    const report = auditRepo(repo.dir);
+    expect(check(report, 'release.deploy-safety').status).toBe('pass');
+    expect(evidence(report, 'release.deploy-safety')).toContain('.claude/hooks/guard-shell.sh');
+    expect(check(report, 'harness.permissions-policy').status).toBe('warn');
+    // Workers Logs switched on in the Worker config is telemetry.
+    expect(evidence(report, 'release.observability-and-safety')).toContain('Workers observability');
+    expect(check(report, 'release.observability-and-safety').status).toBe('pass');
+  });
+
+  it('wants UI test sources, not UI test libraries', () => {
+    const repo = temp('ha-uilibs-');
+    repo.write('gradlew', '#!/bin/sh\n');
+    repo.write('build.gradle.kts', 'plugins { id("com.android.application") }\ndependencies { testImplementation("org.robolectric:robolectric:4.14") }\n');
+    repo.write('app/src/main/kotlin/App.kt', 'class App\n');
+    repo.write('app/src/test/kotlin/MathTest.kt', 'class MathTest { fun adds() { check(1 + 1 == 2) } }\n');
+    const declared = check(auditRepo(repo.dir), 'verification.e2e-tests');
+    expect(declared.status).toBe('warn');
+    expect(declared.evidence.join('\n')).toContain('declared in the build files, but no test source uses them');
+
+    repo.write('app/src/test/kotlin/ScreenTest.kt', '@RunWith(RobolectricTestRunner::class)\nclass ScreenTest { val rule = createComposeRule() }\n');
+    expect(check(auditRepo(repo.dir), 'verification.e2e-tests').status).toBe('pass');
+  });
+
+  it('names a stub AGENTS.md for what it is and measures the real brief', () => {
+    const repo = temp('ha-stub-');
+    repo.write('AGENTS.md', '<!-- BEGIN:turborepo -->\n# Turborepo\nUse turbo run.\n<!-- END:turborepo -->\n');
+    repo.write('CLAUDE.md', `# App\n\n${Array.from({ length: 60 }, (_, i) => `- Rule ${i}: keep handlers thin and run \`pnpm test\`.`).join('\n')}\n`);
+    const report = auditRepo(repo.dir);
+    const single = check(report, 'intent.single-source');
+    expect(single.status).toBe('fail');
+    expect(single.evidence[0]).toContain('AGENTS.md is a 4-line stub');
+    expect(single.evidence[0]).not.toContain('duplication');
+    expect(evidence(report, 'intent.instruction-budget')).toContain('CLAUDE.md: 62 lines');
+  });
+
+  it('builds permission rules only from clean commands and keeps the runner the brief uses', () => {
+    const repo = temp('ha-rules-');
+    repo.write('package.json', JSON.stringify({ name: 'admin' }));
+    repo.write('wrangler.jsonc', '{ "name": "admin" }');
+    repo.write(
+      'CLAUDE.md',
+      '# Admin\n\n| Task | Command |\n| --- | --- |\n| Migrate | `bunx wrangler d1 migrations apply admin-db [--local\\|--remote]` |\n| Ship | `bunx wrangler deploy` |\n| New worktree | `bin/wt new <slug>` |\n',
+    );
+    repo.write('bin/wt', '#!/bin/bash\nbun install && bun run build\n');
+    const report = auditRepo(repo.dir);
+    const deploy = evidence(report, 'release.deploy-safety');
+    expect(deploy).toContain('bunx wrangler deploy');
+    expect(deploy).not.toContain('[');
+    expect(deploy).not.toContain('npx wrangler deploy');
+    // A worktree helper is not a verify command, whatever it runs inside.
+    expect(evidence(report, 'loop.single-command-verify')).not.toContain('bin/wt');
+  });
+
+  it('runs every package\'s own test suite, not only the root one', () => {
+    const repo = temp('ha-members-');
+    repo.write('pyproject.toml', '[project]\nname = "core"\n[tool.pytest.ini_options]\ntestpaths = ["tests"]\n');
+    repo.write('tests/test_core.py', 'def test_ok():\n    assert 1 + 1 == 2\n');
+    repo.write('retriever/package.json', JSON.stringify({ name: 'retriever', scripts: { test: 'vitest run' } }));
+    repo.write('retriever/wrangler.jsonc', '{ "name": "retriever", "r2_buckets": [{ "binding": "B", "bucket_name": "b", "remote": true }] }');
+    repo.write('retriever/src/index.ts', 'export default {};\n');
+    const report = auditRepo(repo.dir);
+    expect(report.stack.frameworks).toContain('Cloudflare Workers');
+    const plan = initHarness(repo.dir, { dryRun: true, tools: ['claude-code'] });
+    const agents = plan.actions.find((a) => a.path === 'AGENTS.md')!.content;
+    expect(agents).toContain('pytest');
+    expect(agents).toContain('npm --prefix retriever run test');
+    expect(evidence(report, 'harness.sandbox-readiness')).toContain('retriever/wrangler.jsonc marks 1 binding(s) `remote: true`');
   });
 });

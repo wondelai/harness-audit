@@ -132,11 +132,17 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     const missing = [!hasTest ? 'tests' : '', !hasStatic ? 'lint or typecheck' : ''].filter(Boolean);
     if (missing.length > 0 && verify.commands.length > 0) evidence.push(`Missing from the loop: ${missing.join(', ')}`);
 
+    // Documentation, prompts or configuration only: nothing to verify by running it.
+    const noProgram = ctx.sourceFiles.length === 0 && verify.commands.length === 0;
     let status: CheckResult['status'] = 'fail';
     if (hasTest && hasStatic && (documented.length > 0 || !hasBrief)) {
       status = 'pass';
     } else if (hasTest || hasStatic) {
       status = 'warn';
+    } else if (noProgram) {
+      status = 'info';
+      evidence.length = 0;
+      evidence.push('No source code detected (documentation / configuration repository) — no verify loop to run');
     }
 
     const quote = verify.unified ?? verify.commands.find((c) => c.kinds.includes('test')) ?? verify.commands[0];
@@ -359,7 +365,8 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
 
     // Android Lint ships with the Android Gradle plugin: on its own it formats nothing and knows no Kotlin style.
     const androidLintOnly = toolsFound.length === 1 && toolsFound[0]!.startsWith('Android Lint');
-    const status: CheckResult['status'] = androidLintOnly || formatterOnly ? 'warn' : toolsFound.length > 0 ? 'pass' : customLintOnly ? 'warn' : 'fail';
+    const noCode = toolsFound.length === 0 && !customLintOnly && ctx.sourceFiles.length === 0;
+    const status: CheckResult['status'] = noCode ? 'info' : androidLintOnly || formatterOnly ? 'warn' : toolsFound.length > 0 ? 'pass' : customLintOnly ? 'warn' : 'fail';
 
     results.push({
       id: 'loop.formatter-linter',
@@ -380,7 +387,9 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
             ? [`Configured: ${toolsFound.join(', ')}`]
           : customLintOnly
             ? [`\`${lintCommand.command}\` exists${lintBody ? ` (${lintBody.length > 90 ? `${lintBody.slice(0, 90)}…` : lintBody})` : ''}, but no general-purpose linter or formatter is configured`]
-            : ['No formatter or linter configured (looked for oxlint, Biome, ESLint, Prettier, dprint, Ruff, golangci-lint, SwiftLint, detekt/ktlint, clang-format and similar)'],
+            : noCode
+              ? ['No source code detected — nothing to lint']
+              : ['No formatter or linter configured (looked for oxlint, Biome, ESLint, Prettier, dprint, Ruff, golangci-lint, SwiftLint, detekt/ktlint, clang-format and similar)'],
       why: {
         en: 'Fast deterministic linters and formatters remove style arguments from agent prompts and catch dead code, unsafe patterns, and formatting noise automatically.',
         pl: 'Szybkie deterministyczne lintery i formattery eliminują dyskusje o stylu z promptów i automatycznie wyłapują martwy kod oraz ryzykowne wzorce.',

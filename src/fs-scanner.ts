@@ -300,6 +300,7 @@ export class RepoContext {
   private ciCache: CiFacts | undefined = undefined;
   private briefCache: BriefFacts | undefined = undefined;
   private workspaceCache: Array<{ path: string; manifest: PackageJsonShape }> | undefined = undefined;
+  private suiteCache: string[] | undefined = undefined;
 
   constructor(repoPath: string) {
     this.root = resolve(repoPath);
@@ -498,6 +499,27 @@ export class RepoContext {
     return new Set(candidates.filter((candidate) => patterns.some((p) => gitignorePatternMatches(p, candidate))));
   }
 
+  /**
+   * The test suite as the repository runs it: files named like tests, plus programs a `test*`
+   * package script runs directly whose path says fixture, test, spec or e2e. A compile step or a
+   * server bootstrap chained in front of the runner is not a test.
+   */
+  get suiteFiles(): string[] {
+    if (this.suiteCache) return this.suiteCache;
+    const scripts = this.packageJson?.scripts ?? {};
+    const targets = new Set<string>();
+    for (const [name, body] of Object.entries(scripts)) {
+      if (!/^test([:._-]|$)/.test(name)) continue;
+      for (const segment of body.split(/&&|;|\|\|/)) {
+        const m = /^\s*(?:bun|node|tsx|deno run|python3?|npx tsx)\s+(?:run\s+)?((?:\.\/)?[\w./-]+\.(?:ts|tsx|js|mjs|cjs|py))\b/.exec(segment);
+        const path = m?.[1]?.replace(/^\.\//, '');
+        if (path && /(fixture|test|spec|e2e)/i.test(path) && this.hasFile(path) && !this.testFiles.includes(path)) targets.add(path);
+      }
+    }
+    this.suiteCache = [...this.testFiles, ...targets];
+    return this.suiteCache;
+  }
+
   /** What the root AGENTS.md / CLAUDE.md say. */
   get brief(): BriefFacts {
     if (this.briefCache) return this.briefCache;
@@ -692,6 +714,7 @@ function detectStack(ctx: RepoContext): StackInfo {
       if (ctx.hasDependency(dep)) frameworks.add(label);
     }
 
+
     const scripts = pkg.scripts ?? {};
     const verifyKeys = ['check', 'verify', 'ci', 'test', 'lint', 'typecheck', 'type-check', 'build', 'fmt:check', 'format:check'];
     for (const key of verifyKeys) {
@@ -857,6 +880,11 @@ function detectStack(ctx: RepoContext): StackInfo {
     detectedTools.add('codex');
   }
 
+  // A Worker is a Worker by its config, wherever it sits and however wrangler is invoked.
+  if (ctx.findFiles((f) => /(^|\/)wrangler\.(toml|jsonc|json)$/.test(f) && f.split('/').length <= 3 && !/(^|\/)(examples?|templates?|fixtures?|tests?|docs?)\//.test(f)).length > 0) {
+    frameworks.add('Cloudflare Workers');
+  }
+
   // No manifest matched: name the language the source files are written in.
   if (languages.size === 0) {
     const byExt = new Map<string, number>();
@@ -866,8 +894,15 @@ function detectStack(ctx: RepoContext): StackInfo {
     if (label) languages.add(label);
   }
 
+  // The language most of the code is written in comes first: advice is worded for it.
+  const shareOf = (lang: string): number => {
+    const exts = Object.entries(LANGUAGE_BY_EXT).filter(([, l]) => l === lang).map(([e]) => e);
+    return ctx.sourceFiles.filter((f) => exts.includes(extname(f))).length;
+  };
+  const ranked = [...languages].sort((a, b) => shareOf(b) - shareOf(a));
+
   return {
-    languages: [...languages],
+    languages: ranked,
     frameworks: [...frameworks],
     packageManagers: [...packageManagers],
     monorepo,
@@ -875,7 +910,7 @@ function detectStack(ctx: RepoContext): StackInfo {
     verifyCommands: ctx.verify.commands.slice(0, 8).map(describeCommand),
     detectedTools: [...detectedTools],
     sourceFileCount: ctx.sourceFiles.length,
-    testFileCount: ctx.testFiles.length,
+    testFileCount: ctx.suiteFiles.length,
   };
 }
 

@@ -230,7 +230,10 @@ export function planInit(ctx: RepoContext, options: InitOptions = {}): InitActio
       return { path: item.path, action: 'skip', reason: 'already exists (pass --force to overwrite)', content: item.content };
     }
     const action: InitAction['action'] = alreadyExists ? 'overwrite' : 'create';
-    return { path: item.path, action, reason: `would ${action}`, content: item.content };
+    // A file git ignores is written but never shared: say so where the plan is read.
+    const ignored = ctx.ignoredPaths([item.path]).size > 0;
+    const note = ignored ? ` — git ignores this path here, so it will not be committed; un-ignore it first (e.g. \`.claude/*\` plus \`!.claude/settings.json\`)` : '';
+    return { path: item.path, action, reason: `would ${action}${note}`, content: item.content };
   }
 }
 

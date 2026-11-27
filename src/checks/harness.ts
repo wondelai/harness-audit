@@ -35,7 +35,7 @@ const SECRET_PATTERNS: Array<{ name: string; regex: RegExp }> = [
  * `FAL_KEY = "a1b2…"` in wrangler.toml `[vars]`, `API_TOKEN=…` in a tracked env file.
  * Names that are public by design (publishable keys, site keys, client ids) are left alone.
  */
-const NAMED_CREDENTIAL = /^\s*(?:export\s+)?["']?([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?))["']?\s*[:=]\s*["']([^"'\s]{20,})["']?\s*,?\s*(?:#.*)?$/;
+const NAMED_CREDENTIAL = /^\s*(?:export\s+)?["']?([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?))["']?\s*[:=]\s*["']?([^"'\s]{20,})["']?\s*,?\s*(?:#.*)?$/;
 const PUBLIC_BY_DESIGN = /PUBLIC|PUBLISHABLE|SITE_?KEY|CLIENT_?ID|ANON|PROJECT_?(API_)?KEY|WRITE_?KEY|DSN|KEY_?ID|ACCESS_KEY_ID/i;
 
 function looksLikeCredential(value: string): boolean {
@@ -65,6 +65,24 @@ interface ClaudeSettings {
   };
   hooks?: Record<string, unknown>;
   sandbox?: Record<string, unknown>;
+}
+
+/**
+ * A PreToolUse hook that inspects shell commands in code: its command line, or the script it runs,
+ * mentions deploys, wrangler or `--remote`. Such a hook is a permission policy written as a program.
+ */
+export function guardHooks(ctx: RepoContext): string[] {
+  const settings = ctx.readJson<ClaudeSettings>('.claude/settings.json');
+  const pre = settings?.hooks?.['PreToolUse'];
+  if (!pre) return [];
+  const serialized = JSON.stringify(pre);
+  const guards: string[] = [];
+  for (const path of new Set(serialized.match(/(?:\.claude\/hooks|scripts|bin|\.github\/scripts)\/[\w./-]+/g) ?? [])) {
+    const body = ctx.readText(path);
+    if (body && /deploy|wrangler|--remote|publish|force/i.test(body)) guards.push(path);
+  }
+  if (guards.length === 0 && /deploy|wrangler|--remote/i.test(serialized)) guards.push('.claude/settings.json PreToolUse command');
+  return guards;
 }
 
 export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
@@ -157,6 +175,10 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       if (status === 'warn') {
         evidence.push('Allow rules exist, but no explicit deny rules or sandbox policy configured');
       }
+    } else if (guardHooks(ctx).length > 0) {
+      // No allow/deny lists, but the rules exist as code that runs before every shell command.
+      status = 'warn';
+      evidence.push(`No permissions.allow / permissions.deny, but a PreToolUse guard decides on shell commands: ${guardHooks(ctx).join(', ')}`);
     } else {
       status = 'fail';
       if (claudeSettings) {
@@ -277,6 +299,9 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       ctx.hasFile('lefthook.yml') || ctx.hasFile('.lefthook.yml') ? 'lefthook.yml' : '',
       ctx.hasFile('.pre-commit-config.yaml') ? '.pre-commit-config.yaml' : '',
       ctx.findFiles((f) => /^\.githooks\//.test(f)).length > 0 ? '.githooks/' : '',
+      ctx.findFiles((f) => /^\.vite-hooks\/[^.]/.test(f)).length > 0 ? '.vite-hooks/ (vite-plus staged hooks)' : '',
+      ctx.hasDependency('simple-git-hooks') ? 'simple-git-hooks' : '',
+      /core\.hooksPath/.test(Object.values(ctx.packageJson?.scripts ?? {}).join('\n')) ? 'core.hooksPath set by a package script' : '',
     ].filter(Boolean);
 
     if (gitHookConfigs.length > 0) {
@@ -519,6 +544,9 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
 
     const trackedLeaks: string[] = [];
     const untrackedLeaks: string[] = [];
+    // Only a recognised live credential blocks a level: a test-mode key or a provider-less value
+    // under a secret-sounding name is worth fixing, but the audit cannot be sure enough to cap on it.
+    let liveCredentials = 0;
     for (const file of scanCandidates) {
       const content = ctx.readText(file);
       if (!content) continue;
@@ -535,8 +563,10 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         const named = envLike ? NAMED_CREDENTIAL.exec(line) : null;
         const namedHit = named && !PUBLIC_BY_DESIGN.test(named[1]!) && !isPlaceholderToken(named[2]!) && !named[2]!.includes('${') && looksLikeCredential(named[2]!);
         if (!provider && !namedHit) continue;
+        const testMode = /\b[sr]k_test_[A-Za-z0-9]{10,}/.test(line) && !provider;
         const specific = provider && provider.name !== 'OpenAI API key' ? provider.name : undefined;
-        const label = specific ?? (named ? `credential in \`${named[1]}\`` : provider!.name);
+        const label = testMode ? 'Stripe test-mode secret key' : (specific ?? (named ? `credential in \`${named[1]}\`` : provider!.name));
+        if (provider && ctx.isTracked(file) !== false) liveCredentials++;
         // Outside a git work tree nothing is known about tracking: treat the file as shared.
         if (ctx.isTracked(file) === false) untrackedLeaks.push(`${file}:${i + 1} ${label} (untracked, not gitignored)`);
         else trackedLeaks.push(`${file}:${i + 1} ${label}${ctx.isTracked(file) ? ' (committed)' : ''}`);
@@ -564,15 +594,20 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     evidence.push(...untrackedLeaks.slice(0, 3));
     if (missingIgnores.length > 0) evidence.push(`Not gitignored: ${missingIgnores.join(', ')}`);
     else if (required.length > 0) evidence.push(`Git ignores ${required.join(', ')}`);
-    else evidence.push('No env-file convention for this stack; nothing required in .gitignore');
+    else if (ctx.findFiles((f) => /\.xcconfig(\.example)?$/.test(f)).length > 0) {
+      const local = ctx.ignoredPaths(['Config/Local.xcconfig', 'Local.xcconfig']);
+      evidence.push(local.size > 0 ? 'Git ignores the local .xcconfig that holds team ids and client keys' : 'Build settings live in tracked .xcconfig files; keep keys in an ignored Local.xcconfig');
+    } else evidence.push('No env-file convention for this stack; nothing required in .gitignore');
     if (missingAdvisory.length > 0 && trackedLeaks.length === 0) evidence.push(`Optional: also ignore ${missingAdvisory.join(', ')}`);
     if (envExamples.length > 0) evidence.push(`Template env files: ${envExamples.join(', ')}`);
     if (hasSecretScanner) evidence.push('Secret scanner configured (gitleaks/trufflehog/secretlint)');
 
+    // A missing ignore rule is a failure when the file it should cover is sitting in the tree,
+    // unignored; for a file that does not exist it is a precaution.
+    const exposed = missingIgnores.filter((p) => ctx.hasFile(p));
+    if (exposed.length > 0) evidence.push(`Present and not ignored: ${exposed.join(', ')}`);
     let status: CheckResult['status'] = 'pass';
-    if (trackedLeaks.length > 0) {
-      status = 'fail';
-    } else if (untrackedLeaks.length > 0 || missingIgnores.some((p) => p !== '.env.local')) {
+    if (trackedLeaks.length > 0 || untrackedLeaks.length > 0 || exposed.length > 0) {
       status = 'fail';
     } else if (missingIgnores.length > 0) {
       status = 'warn';
@@ -584,7 +619,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       station: 'harness',
       weight: 20,
       status,
-      severity: trackedLeaks.length > 0 ? 'critical' : status === 'fail' ? 'high' : 'low',
+      severity: liveCredentials > 0 ? 'critical' : status === 'fail' ? 'high' : 'low',
       title: {
         en: 'Secret hygiene & ignore rules',
         pl: 'Higiena sekretów i reguły .gitignore',
@@ -612,7 +647,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       },
       docsPath: 'org/agent-identity-and-secrets/',
       meta: {
-        hasHardcodedSecrets: trackedLeaks.length > 0,
+        hasHardcodedSecrets: liveCredentials > 0,
       },
     });
   }
@@ -638,6 +673,13 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         if (/^(dev|start|serve)$/.test(name) && /--remote\b/.test(body)) reach.push(`${m.path} script \`${name}\` runs against remote bindings (\`--remote\`)`);
       }
     }
+    // The default dev path writes real data: this, not a single remote bucket, is what caps a level.
+    const devReachesProduction = reach.length > 0;
+    // Individual bindings marked remote in the Worker config: local runs read and write them for real.
+    for (const cfg of ctx.findFiles((f) => /(^|\/)wrangler\.(toml|jsonc|json)$/.test(f) && f.split('/').length <= 3).slice(0, 4)) {
+      const remote = ((ctx.readText(cfg) ?? '').match(/"?remote"?\s*[:=]\s*true/g) ?? []).length;
+      if (remote > 0) reach.push(`${cfg} marks ${remote} binding(s) \`remote: true\`: a local run reads and writes them for real`);
+    }
 
     const rules = brief.boundaryRules;
     const evidence: string[] = [];
@@ -653,6 +695,10 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     let status: CheckResult['status'] = sandboxes.length > 0 && rules.length > 0 ? 'pass' : sandboxes.length > 0 || rules.length > 0 ? 'warn' : 'fail';
     // An agent's ordinary local run can write production: that outranks everything else here.
     if (reach.length > 0 && sandboxes.length === 0) status = 'fail';
+
+    // Reaching production with no sandbox, no written rule about it and no guard hook is what caps
+    // a level; a repository that documents the reach and governs it has a risk, not a blind spot.
+    const ungovernedReach = devReachesProduction && sandboxes.length === 0 && rules.length === 0 && guardHooks(ctx).length === 0;
 
     const needSandbox = {
       en: 'Give agents an OS-level boundary: enable the tool sandbox (`"sandbox": { "enabled": true }` in `.claude/settings.json`, or `sandbox_mode = "workspace-write"` in `.codex/config.toml`) or commit a `.devcontainer/`.',
@@ -672,7 +718,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       station: 'harness',
       weight: 15,
       status,
-      severity: reach.length > 0 && status === 'fail' ? 'high' : status === 'fail' ? 'medium' : 'low',
+      severity: ungovernedReach ? 'critical' : reach.length > 0 && status === 'fail' ? 'high' : status === 'fail' ? 'medium' : 'low',
       title: {
         en: 'Sandbox & production boundary readiness',
         pl: 'Gotowość piaskownicy i granice środowiska produkcyjnego',
@@ -687,6 +733,9 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         pl: [reach.length > 0 ? cutReach.pl : '', sandboxes.length === 0 ? needSandbox.pl : '', rules.length === 0 ? needBoundary.pl : ''].filter(Boolean).join(' ') || 'Aktualizuj ustawienia piaskownicy i zasady granic wraz z nowymi środowiskami.',
       },
       docsPath: 'workflows/harness/permissions-and-sandboxing/',
+      meta: {
+        localDevReachesProduction: ungovernedReach,
+      },
     });
   }
 

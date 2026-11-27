@@ -248,6 +248,18 @@ function capsAt(rawLevel: AutonomyLevel, stations: StationScore[], checks: Check
     }
   }
 
+  // Cap 3b: No Level 3+ while an ordinary local run writes production
+  if (rawLevel >= 3 && Boolean(checkMeta('harness.sandbox-readiness')['localDevReachesProduction'])) {
+    caps.push({
+      cappedTo: 2,
+      triggeredBy: ['harness.sandbox-readiness'],
+      reason: {
+        en: 'Capped at Level 2: local development reaches production, so an agent running the app or its tests on a whole task can write real data.',
+        pl: 'Ograniczenie do Poziomu 2: lokalny development sięga produkcji, więc agent uruchamiający aplikację lub testy przy całym zadaniu może zapisać prawdziwe dane.',
+      },
+    });
+  }
+
   // Cap 4: No Level 4+ without strong Verification (>=70), Loop (>=70), passing CI, and non-failing test quality scan
   if (rawLevel >= 4) {
     const triggers: string[] = [];

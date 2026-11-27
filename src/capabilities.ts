@@ -289,10 +289,12 @@ function parseRecipes(text: string, tool: RecipeBook['tool']): RecipeBook {
 
 /** A checked-in script a command line runs: `./scripts/ci.sh`, `bash scripts/test-kit.sh`, `node scripts/check.mjs`. */
 const SCRIPT_FILE = /(?:^|[\s"'=])(?:\.\/)?((?:scripts?|bin|ci|tools|\.github\/scripts)\/[\w./-]+)/;
+/** A script whose name says it verifies. `bin/wt` or `scripts/seed.sh` may run a build inside, but running them is not a check. */
+const VERIFY_NAMED = /(verify|check|test|lint|typecheck|preflight|validate|(^|[-_/])ci([-_.]|$))/i;
 
 /** Tools that ship: a command that runs one is a deploy, not a check. */
 export const DEPLOY_TOOL =
-  /\b(?:wrangler\s+(?:deploy|publish|pages\s+deploy|versions\s+deploy|d1\s+(?:migrations\s+apply|execute)\s+[^\n]*--remote)|opennextjs-cloudflare\s+deploy|vercel\s+(?:deploy|--prod)|netlify\s+deploy|flyctl\s+deploy|fly\s+deploy|gcloud\s+(?:run|app|functions)\s+deploy|kubectl\s+apply|helm\s+upgrade|terraform\s+apply|cdk\s+deploy|sst\s+deploy|serverless\s+deploy|firebase\s+deploy|npm\s+publish|pnpm\s+publish|bun\s+publish|cargo\s+publish|twine\s+upload|gh\s+release\s+create|aws\s+s3\s+sync|docker\s+push|eas\s+submit|fastlane\s+(?:\S+\s+)?(?:release|deploy|beta|upload\w*))\b/;
+  /\b(?:wrangler\s+(?:deploy|publish|pages\s+deploy|versions\s+deploy|d1\s+migrations\s+apply\s+[^\n]*--remote)|opennextjs-cloudflare\s+deploy|vercel\s+(?:deploy|--prod)|netlify\s+deploy|flyctl\s+deploy|fly\s+deploy|gcloud\s+(?:run|app|functions)\s+deploy|kubectl\s+apply|helm\s+upgrade|terraform\s+apply|cdk\s+deploy|sst\s+deploy|serverless\s+deploy|firebase\s+deploy|npm\s+publish|pnpm\s+publish|bun\s+publish|cargo\s+publish|twine\s+upload|gh\s+release\s+create|aws\s+s3\s+sync|docker\s+push|eas\s+submit|fastlane\s+(?:\S+\s+)?(?:release|deploy|beta|upload\w*))\b/;
 
 /** The command line runs a deploy tool for real: not a dry run, not a tool name inside a quoted message. */
 export function runsDeployTool(cmd: string): boolean {
@@ -331,7 +333,7 @@ export class CommandClassifier {
       if (!cmd || /^(#|echo\b|printf\b|export\b|cd\b|set\b)/.test(cmd)) continue;
 
       const scriptFile = SCRIPT_FILE.exec(cmd)?.[1];
-      if (scriptFile && this.ctx.hasFile(scriptFile)) {
+      if (scriptFile && VERIFY_NAMED.test(scriptFile.split('/').pop()!) && this.ctx.hasFile(scriptFile)) {
         for (const k of this.classifyFile(scriptFile, seen)) kinds.add(k);
       }
 
@@ -522,7 +524,8 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
     for (const name of SCRIPT_PRIORITY.filter((n) => n in memberScripts)) {
       const kinds = sortKinds(memberClassifier.classifyScript(name));
       const covered = new Set(commands.flatMap((c) => c.kinds));
-      if (kinds.length === 0 || kinds.every((k) => covered.has(k))) continue;
+      // A member's test script is always its own suite; other kinds only fill what is missing.
+      if (kinds.length === 0 || (!kinds.includes('test') && kinds.every((k) => covered.has(k)))) continue;
       if (memberClassifier.deploys(memberScripts[name]!)) continue;
       const runIn = run(name).replace(/^(bun run|pnpm run|yarn|npm run|npm)\b/, (runner) =>
         runner.startsWith('bun') ? `bun run --cwd ${dir}` : runner.startsWith('pnpm') ? `pnpm --dir ${dir} run` : runner.startsWith('yarn') ? `yarn --cwd ${dir}` : `npm --prefix ${dir} run`,
@@ -557,6 +560,12 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   if (ctx.hasFile('Package.swift')) {
     add('swift build', ['build', 'typecheck'], 'Package.swift');
     if (ctx.testFiles.some((f) => f.endsWith('.swift'))) add('swift test', ['test', 'typecheck'], 'Package.swift');
+  }
+  // A Swift package inside an Xcode project (Packages/Kit, AppKit/) is built and tested in place.
+  for (const manifest of ctx.findFiles((f) => /^(?:[^/]+\/){1,2}Package\.swift$/.test(f)).slice(0, 3)) {
+    const dir = manifest.replace(/\/Package\.swift$/, '');
+    add(`swift build --package-path ${dir}`, ['build', 'typecheck'], manifest);
+    if (ctx.testFiles.some((f) => f.startsWith(`${dir}/`) && f.endsWith('.swift'))) add(`swift test --package-path ${dir}`, ['test', 'typecheck'], manifest);
   }
   if (ctx.hasFile('Cargo.toml')) {
     add('cargo test', ['test', 'typecheck'], 'Cargo.toml');
@@ -612,8 +621,16 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
       documented.push({ command: cmd, kinds, source: briefFile });
     }
   }
-  // A documented command the tool did not already derive (e.g. an `xcodebuild` line with its scheme).
-  for (const doc of documented.slice(0, 8)) add(doc.command, doc.kinds, doc.source);
+  // A documented command the tool did not already derive (an `xcodebuild` line with its scheme)
+  // adds to the loop only when it runs a real program: a build tool or a checked-in verify script.
+  // "Run `bun test`" in prose, in a repository with no test script and no test file, proves nothing.
+  const backed = (cmd: string): boolean => {
+    const file = SCRIPT_FILE.exec(cmd)?.[1];
+    if (file && ctx.hasFile(file)) return true;
+    const program = programOf(cmd)?.program ?? '';
+    return /^(gradlew|gradle|xcodebuild|swift|cargo|go|make|just|mvn|mvnw|dotnet|flutter|dart|mix)$/.test(program);
+  };
+  for (const doc of documented.slice(0, 8)) if (backed(doc.command)) add(doc.command, doc.kinds, doc.source);
 
   const kinds = new Set<VerifyKind>(commands.flatMap((c) => c.kinds));
   const unified =
@@ -635,8 +652,16 @@ export function minimalVerifySet(caps: VerifyCapabilities): string[] {
   for (const kind of ['typecheck', 'lint', 'test', 'build'] as const) {
     if (chosen.some((c) => c.kinds.includes(kind))) continue;
     // The most specific command for the kind: `npm run lint` before a broader script that also lints.
-    const next = caps.commands.filter((c) => c.kinds.includes(kind)).sort((a, b) => a.kinds.length - b.kinds.length)[0];
+    const isMember = (c: VerifyCommand): boolean => c.source.endsWith('package.json') && c.source !== 'package.json';
+    // The root's own command first; a member's suite is added below, next to it, not instead of it.
+    const next = caps.commands
+      .filter((c) => c.kinds.includes(kind))
+      .sort((a, b) => Number(isMember(a)) - Number(isMember(b)) || a.kinds.length - b.kinds.length)[0];
     if (next) chosen.push(next);
+  }
+  // Each package's own test suite is a separate thing to run: one root `pytest` does not test the Worker next to it.
+  for (const member of caps.commands.filter((c) => c.source.endsWith('package.json') && c.source !== 'package.json' && c.kinds.includes('test')).slice(0, 4)) {
+    if (!chosen.includes(member)) chosen.push(member);
   }
   return chosen.map((c) => c.command);
 }
@@ -664,16 +689,23 @@ export function localDeployCommands(ctx: RepoContext): string[] {
   const workerConfigs = ctx.findFiles(
     (f) => /(^|\/)wrangler\.(toml|jsonc|json)$/.test(f) && f.split('/').length <= 3 && !/(^|\/)(examples?|templates?|fixtures?|tests?|docs?)\//.test(f),
   );
-  if (workerConfigs.length > 0) commands.push('npx wrangler deploy');
   if (ctx.hasFile('vercel.json')) commands.push('npx vercel --prod');
   if (ctx.hasFile('fly.toml')) commands.push('fly deploy');
   if (ctx.hasFile('netlify.toml')) commands.push('npx netlify deploy --prod');
   // Deploy commands the brief itself spells out (a manual `wrangler pages deploy`, a remote migration).
   for (const briefFile of ['AGENTS.md', 'CLAUDE.md']) {
     for (const quoted of quotedCommands(ctx.readText(briefFile) ?? '', (p) => ctx.hasFile(p))) {
-      const tool = DEPLOY_TOOL.exec(quoted)?.[0].replace(/\s+/g, ' ');
-      if (tool && !/--dry-run\b/.test(quoted)) commands.push(/^(wrangler|vercel|netlify)\b/.test(tool) ? `npx ${tool}` : tool);
+      const hit = DEPLOY_TOOL.exec(quoted);
+      // A cell like `apply db [--local|--remote]` is notation, not a command anyone runs.
+      if (!hit || /--dry-run\b/.test(quoted) || /[\[\]|<>]/.test(quoted)) continue;
+      // Up to the tool and its subcommand, with the runner the brief uses (`bunx wrangler …`).
+      const runner = /(?:^|\s)((?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)$/.exec(quoted.slice(0, hit.index))?.[1] ?? '';
+      const command = `${runner}${hit[0].replace(/\s+/g, ' ').replace(/\s+\S*[\[\]|<>].*$/, '').replace(/\s+--remote$/, ' --remote')}`.trim();
+      // Only plain words: a table cell like `[--local|--remote` must never become a permission rule.
+      if (/^[\w@./: =-]+$/.test(command)) commands.push(command);
     }
   }
+  // The platform CLI itself, unless the brief already named it with its own runner (`bunx wrangler deploy`).
+  if (workerConfigs.length > 0 && !commands.some((c) => /wrangler deploy/.test(c))) commands.push('npx wrangler deploy');
   return [...new Set(commands)];
 }

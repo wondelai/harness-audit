@@ -177,6 +177,23 @@ describe('scoring engine & level gating caps', () => {
     expect(lone[0]!.impact).toBe(25);
   });
 
+  it('caps at Level 2 while local development reaches production', () => {
+    const checks: CheckResult[] = [
+      makeCheck('intent.instructions-file', 'intent', 'pass', 100),
+      makeCheck('harness.permissions-policy', 'harness', 'pass', 85),
+      makeCheck('harness.sandbox-readiness', 'harness', 'fail', 15, { localDevReachesProduction: true }),
+      makeCheck('loop.single-command-verify', 'loop', 'pass', 100),
+      makeCheck('graph.worktree-isolation', 'graph', 'pass', 100),
+      makeCheck('verification.unit-tests', 'verification', 'pass', 100),
+      makeCheck('release.ci-pipeline', 'release', 'pass', 100),
+    ];
+    const stations = STATIONS.map((s) => scoreStation(s.id, checks));
+    const { rawLevel, level, caps } = evaluateLevel(computeOverallScore(stations), stations, checks);
+    expect(rawLevel).toBe(5);
+    expect(level).toBe(2);
+    expect(caps.find((c) => c.cappedTo === 2)?.triggeredBy).toEqual(['harness.sandbox-readiness']);
+  });
+
   it('caps a 95+ score at Level 4 when oracle protection is missing', () => {
     const checks: CheckResult[] = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),

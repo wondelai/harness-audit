@@ -4,24 +4,11 @@ import type { CheckResult } from '../types.js';
 export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
   const results: CheckResult[] = [];
 
-  // Tests the way the repository runs them: files the test command names (a fixture runner under
-  // scripts/, a directory of cases) count even when their names follow no test convention.
-  const testCommands = ctx.verify.commands.filter((c) => c.kinds.includes('test'));
-  const scripts = ctx.packageJson?.scripts ?? {};
-  const commandTargets = new Set<string>();
-  const follow = (body: string, depth: number): void => {
-    for (const token of body.split(/[\s"'=]+/)) {
-      const path = token.replace(/^\.\//, '').replace(/[;&|)]+$/, '');
-      if (path.includes('/') && ctx.hasFile(path) && !ctx.testFiles.includes(path)) commandTargets.add(path);
-    }
-    if (depth >= 3) return;
-    for (const m of body.matchAll(/\b(?:bun|npm|pnpm|yarn|vp)\s+(?:run\s+)?([\w:.-]+)/g)) {
-      const next = scripts[m[1]!];
-      if (next) follow(next, depth + 1);
-    }
-  };
-  for (const name of Object.keys(scripts).filter((n) => /^test([:._-]|$)/.test(n))) follow(scripts[name]!, 0);
-  const allTestFiles = [...ctx.testFiles, ...commandTargets];
+  // A test command that comes from a manifest, a build tool or a checked-in script. Never from the
+  // brief alone: "run `bun test`" above the words "no tests yet" is not a suite.
+  const testCommands = ctx.verify.commands.filter((c) => c.kinds.includes('test') && c.source !== 'AGENTS.md' && c.source !== 'CLAUDE.md');
+  const allTestFiles = ctx.suiteFiles;
+  const commandTargets = allTestFiles.filter((f) => !ctx.testFiles.includes(f));
 
   // 1. verification.unit-tests
   {
@@ -35,7 +22,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     if (testCount > 0) {
       evidence.push(`Sample: ${allTestFiles.slice(0, 4).join(', ')}`);
     }
-    if (commandTargets.size > 0) evidence.push(`${commandTargets.size} of them are run by the test command without a test-style name (${[...commandTargets].slice(0, 2).join(', ')})`);
+    if (commandTargets.length > 0) evidence.push(`${commandTargets.length} of them are run by the test command without a test-style name (${commandTargets.slice(0, 2).join(', ')})`);
 
     let status: CheckResult['status'] = 'fail';
     if (testCount >= 3 && (ratio >= 0.12 || testCount >= 15)) {
@@ -46,10 +33,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       // Documentation, prompts or configuration only: there is no program to test.
       status = 'info';
       evidence[0] = 'No source code detected (documentation / configuration repository) — nothing to unit-test';
-    } else if (testCommands.length > 0) {
-      // A test command exists and something runs: the audit could not see the files, which is its limit, not a missing suite.
+    } else if (testCommands.length > 0 && testCommands.some((c) => c.source !== 'Gradle' && c.source !== 'pytest')) {
+      // A real test script exists and something runs: the audit could not see the files, which is its limit, not a missing suite.
       status = 'warn';
-      evidence.push(`A test command exists (\`${testCommands[0]!.command}\`), but no file it runs could be identified — coverage unknown`);
+      evidence.push(`A test command exists (\`${testCommands[0]!.command}\`, from ${testCommands[0]!.source}), but no file it runs could be identified — coverage unknown`);
     }
 
     results.push({
@@ -85,9 +72,13 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     if (e2eNamed > 0) e2eSignals.push(`e2e suites (${e2eNamed} files in *e2e* paths)`);
     // Rendered-UI tiers that run without a device: screenshot and Compose/SwiftUI snapshot tests.
     const buildText = ['gradle/libs.versions.toml', 'build.gradle.kts', 'Package.swift', 'project.yml'].map((f) => ctx.readText(f) ?? '').join('\n');
-    if (/roborazzi|paparazzi/i.test(buildText)) e2eSignals.push('Screenshot tests (Roborazzi / Paparazzi)');
-    else if (/robolectric|ui-test-junit4/i.test(buildText)) e2eSignals.push('Robolectric / Compose UI tests');
-    if (/swift-snapshot-testing|SnapshotTesting/.test(buildText)) e2eSignals.push('Snapshot tests (swift-snapshot-testing)');
+    // A declared library is not a test: look for sources that use it.
+    const uiTestSources = allTestFiles
+      .filter((f) => /\.(kt|java|swift)$/.test(f))
+      .slice(0, 400)
+      .filter((f) => /captureRoboImage|Paparazzi|createComposeRule|createAndroidComposeRule|RobolectricTestRunner|assertSnapshot|XCUIApplication/.test(ctx.readText(f) ?? '')).length;
+    if (uiTestSources > 0) e2eSignals.push(`Rendered-UI tests (${uiTestSources} files using Compose rules, Robolectric, Roborazzi/Paparazzi or snapshot assertions)`);
+    const uiLibsOnly = uiTestSources === 0 && /roborazzi|paparazzi|robolectric|ui-test-junit4|swift-snapshot-testing/i.test(buildText);
     if (ctx.hasAnyFile(['cypress.config.ts', 'cypress.config.js', 'cypress.json']) || ctx.hasDependency('cypress')) {
       e2eSignals.push('Cypress');
     }
@@ -123,7 +114,9 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       status = 'warn';
       e2eSignals.push(
         isMobileApp
-          ? 'Mobile app without a UI or end-to-end test suite (XCUITest, Espresso/androidTest, Maestro)'
+          ? uiLibsOnly
+            ? 'UI test libraries are declared in the build files, but no test source uses them'
+            : 'Mobile app without a UI or end-to-end test suite (XCUITest, Espresso/androidTest, Maestro)'
           : 'Web/service stack detected without E2E or runtime contract test suite',
       );
     } else {
@@ -311,7 +304,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         tsIgnoreCount += tsMatches.length;
         tsIgnoreFiles.push({ file: sf, count: tsMatches.length });
       }
-      const esMatches = content.match(/(?:\/\/|\/\*)\s*(?:eslint|oxlint|biome)-(?:disable|ignore)(?:-next-line|-line)?\b|#\s*type:\s*ignore\b|#\s*noqa\b|@Suppress(?:Warnings)?\(|\/\/\s*swiftlint:disable\b/g);
+      const esMatches = content.match(/(?:\/\/|\/\*)\s*(?:eslint|oxlint|biome)-(?:disable|ignore)(?:-next-line|-line)?\b|#\s*type:\s*ignore\b|@Suppress(?:Warnings)?\(|\/\/\s*swiftlint:disable\b/g);
       if (esMatches) eslintDisableCount += esMatches.length;
     }
 
@@ -319,6 +312,8 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     // Five are worth a warning anywhere; a failure needs both volume and density, so a large
     // codebase with a few dozen is not graded like a small one riddled with them.
     const tsIgnoreWarn = tsIgnoreCount >= 5;
+    // Empty and constant-to-constant tests: one in a hundred test files is where it becomes a pattern.
+    const placeholders = tautologyHits.length + emptyTestHits.length;
     const tsIgnoreFail = tsIgnoreCount >= 15 && tsIgnoreCount / Math.max(sampleSources.length, 1) > 0.02;
 
     const evidence: string[] = [];
@@ -331,7 +326,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     } else if (unseenSuite) {
       evidence.push(`The files \`${testCommands[0]!.command}\` runs could not be identified, so they were not scanned`);
     } else if (sampleTests.length === 0) {
-      evidence.push('No test files to scan');
+      evidence.push('No test files to scan (counted once, under verification.unit-tests)');
     } else {
       const of = (read: number, total: number): string => (read < total ? `${read} of ${total}` : String(read));
       evidence.push(`Scanned ${of(sampleTests.length, allTestFiles.length)} test file(s) and ${of(sampleSources.length, ctx.sourceFiles.length)} source file(s)`);
@@ -349,13 +344,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     }
 
     let status: CheckResult['status'] = 'pass';
-    if (nothingToTest || unseenSuite) {
+    if (nothingToTest || unseenSuite || sampleTests.length === 0) {
+      // No suite to read: verification.unit-tests carries that finding once.
       status = 'info';
-    } else if (sampleTests.length === 0) {
+    } else if (onlyHits.length > 0 || placeholders >= Math.max(2, Math.ceil(sampleTests.length * 0.01)) || tsIgnoreFail) {
       status = 'fail';
-    } else if (onlyHits.length > 0 || tautologyHits.length > 0 || emptyTestHits.length >= 2 || tsIgnoreFail) {
-      status = 'fail';
-    } else if (skipHits.length >= 5 || emptyTestHits.length > 0 || suppressionRate > 0.35 || tsIgnoreWarn) {
+    } else if (skipHits.length >= 5 || placeholders > 0 || suppressionRate > 0.35 || tsIgnoreWarn) {
       status = 'warn';
     } else {
       evidence.push('No .only(), empty test blocks, constant tautologies, or heavy suppression sprawl detected');

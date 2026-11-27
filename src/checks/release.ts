@@ -1,4 +1,5 @@
 import { localDeployCommands, minimalVerifySet } from '../capabilities.js';
+import { guardHooks } from './harness.js';
 import type { RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
 
@@ -40,6 +41,10 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       status = 'pass';
     } else if (allCiFiles.length > 0 && (anywhere('test') || anywhere('lint') || anywhere('typecheck'))) {
       status = 'warn';
+    } else if (ctx.sourceFiles.length === 0 && ctx.verify.commands.length === 0) {
+      // Documentation or configuration only: there is no program for CI to verify.
+      status = 'info';
+      evidence.push('No source code detected — no verification pipeline to require');
     }
 
     // The same minimal set a brief should quote: never a watcher, always the build when there is one.
@@ -65,11 +70,15 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
         en:
           allCiFiles.length === 0
             ? `Add a CI workflow triggered on \`pull_request\` that installs from the lockfile and runs ${gateCommand ? `\`${gateCommand}\`` : 'your lint, typecheck and test commands'} before merge.`
-            : `Run ${missingOnPr.join(' and ')} on \`pull_request\`${gateCommand ? ` (e.g. \`${gateCommand}\`)` : ''} so a red result blocks the merge, not just the main branch.`,
+            : !ctx.verify.kinds.has('test') && missingOnPr.includes('test')
+              ? `There is no test command to run yet: write the first tests (see verification.unit-tests), then add them to the pull-request workflow next to ${gateCommand ? `\`${gateCommand}\`` : 'the static checks'}.`
+              : `Run ${missingOnPr.join(' and ')} on \`pull_request\`${gateCommand ? ` (e.g. \`${gateCommand}\`)` : ''} so a red result blocks the merge, not just the main branch.`,
         pl:
           allCiFiles.length === 0
             ? `Dodaj workflow CI wyzwalany na \`pull_request\`, który instaluje zależności z lockfile’a i uruchamia ${gateCommand ? `\`${gateCommand}\`` : 'lint, typecheck oraz testy'} przed scaleniem.`
-            : `Uruchamiaj na \`pull_request\` brakujące kroki (${missingOnPr.join(', ')})${gateCommand ? `, np. \`${gateCommand}\`` : ''}, aby czerwony wynik blokował scalenie, a nie tylko gałąź główną.`,
+            : !ctx.verify.kinds.has('test') && missingOnPr.includes('test')
+              ? `Nie ma jeszcze komendy testów: napisz pierwsze testy (patrz verification.unit-tests), a potem dodaj je do workflow na pull requestach obok ${gateCommand ? `\`${gateCommand}\`` : 'sprawdzeń statycznych'}.`
+              : `Uruchamiaj na \`pull_request\` brakujące kroki (${missingOnPr.join(', ')})${gateCommand ? `, np. \`${gateCommand}\`` : ''}, aby czerwony wynik blokował scalenie, a nie tylko gałąź główną.`,
       },
       docsPath: 'method/lifecycle/deploy/',
     });
@@ -224,6 +233,12 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       if (pattern.test(manifestText) && !signals.includes(label)) signals.push(label);
     }
 
+    // Workers Logs and Traces switched on in the Worker config are structured telemetry.
+    const workerConfigs = ctx.findFiles((f) => /(^|\/)wrangler\.(toml|jsonc|json)$/.test(f) && f.split('/').length <= 3);
+    if (workerConfigs.some((f) => /\[observability[\w.]*\][\s\S]{0,200}?enabled\s*=\s*true|"observability"\s*:\s*\{[\s\S]{0,200}?"enabled"\s*:\s*true/.test(ctx.readText(f) ?? ''))) {
+      signals.push('Workers observability (logs/traces enabled in wrangler config)');
+    }
+    const telemetrySignals = signals.length;
     if (ctx.findFiles((f) => /(^|\/)migrations\//.test(f)).length > 0) {
       signals.push('Versioned migrations directory');
     }
@@ -240,10 +255,12 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       ctx.hasFile('wrangler.toml') ||
       ctx.hasFile('Dockerfile');
     let status: CheckResult['status'] = 'pass';
-    if (signals.length >= 2) {
+    if (isApp && telemetrySignals === 0 && signals.length > 0) {
+      // Migrations are versioned, but nothing reports an error from the running app.
+      status = 'warn';
+      signals.push('No error tracking or structured logging detected (Sentry, OpenTelemetry, PostHog, Workers observability)');
+    } else if (signals.length >= 1) {
       status = 'pass';
-    } else if (signals.length === 1) {
-      status = isApp ? 'pass' : 'pass';
     } else if (isApp) {
       status = 'warn';
       signals.push('No error tracking (Sentry/OTel/PostHog), structured logging, healthcheck, or migration discipline detected');
@@ -292,16 +309,18 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     // The platform deploys from git only when someone wrote that down: "Workers Builds" (the
     // product that does exactly this) or a sentence saying deploys happen on merge or push. A
     // brand name on its own ("Vercel AI SDK") says nothing about how this repository ships.
-    const GIT_DEPLOY = /\bWorkers Builds\b|\bdeploy\w*\b[^.\n]{0,60}\b(?:on|after|upon)\s+(?:every\s+|each\s+)?(?:merge|push)\b/i;
+    // "Workers Builds" next to a word about shipping, or "deploys … on merge/push". The product's
+    // name beside something else ("Workers Builds reads packageManager") is not a statement about deploys.
+    const GIT_DEPLOY = /\bWorkers Builds\b[^.\n]{0,40}\b(?:deploy\w*|ships?|builds? (?:every|each|on)|releases?)\b|\b(?:deploy\w*|ships?|merg\w+)\b[^.\n]{0,60}\bWorkers Builds\b|\bdeploy\w*\b[^.\n]{0,60}\b(?:on|after|upon)\s+(?:every\s+|each\s+)?(?:merge|push)\b/i;
     const platformLine = [...ctx.brief.files, ...ci.files]
       .flatMap((f) => (ctx.readText(f) ?? '').split(/\r?\n/).map((text, i) => ({ f, line: i + 1, text })))
       .find((l) => GIT_DEPLOY.test(l.text));
     const platform = platformLine !== undefined;
     if (platformLine && deployWorkflows.length === 0) {
-      // Quote the words that say it, not the start of a long line.
-      const at = GIT_DEPLOY.exec(platformLine.text)!;
-      const quote = platformLine.text.slice(Math.max(0, at.index - 30), at.index + at[0].length + 40).trim();
-      evidence.push(`${platformLine.f}:${platformLine.line} mentions a git-triggered deploy: "…${quote}…"`);
+      // Quote the sentence that says it, whole words only.
+      const sentence = platformLine.text.split(/(?<=[.!?;])\s+/).find((s) => GIT_DEPLOY.test(s))!.trim().replace(/^[-*#>\s]+/, '');
+      const quote = sentence.length > 120 ? `${sentence.slice(0, sentence.lastIndexOf(' ', 120))}…` : sentence;
+      evidence.push(`${platformLine.f}:${platformLine.line} mentions a git-triggered deploy: "${quote}"`);
     }
 
     // What can ship from a laptop, and which of it a committed deny rule stops.
@@ -312,8 +331,11 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       const needle = command.replace(/^(npx|bunx)\s+/, '').replace(/^(?:npm|pnpm|bun|yarn|vp)\s+(?:run\s+)?/, '');
       return claudeDeny.some((rule) => rule.includes(needle));
     };
-    const unguarded = localDeploys.filter((c) => !denied(c));
-    if (localDeploys.length > 0) {
+    const guards = guardHooks(ctx);
+    const unguarded = guards.length > 0 ? [] : localDeploys.filter((c) => !denied(c));
+    if (localDeploys.length > 0 && guards.length > 0) {
+      evidence.push(`A PreToolUse guard hook decides on deploy commands before they run: ${guards.join(', ')} (read it for what it allows from the main checkout)`);
+    } else if (localDeploys.length > 0) {
       evidence.push(
         unguarded.length === 0
           ? `.claude/settings.json denies every local deploy command (${localDeploys.map((c) => `\`${c}\``).join(', ')})`

@@ -204,6 +204,30 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         },
         docsPath: 'workflows/harness/agent-ready-codebase/',
       });
+    } else if (ctx.brief.stub && ctx.brief.stub.file === 'AGENTS.md') {
+      // AGENTS.md is a template or a tool-managed block; the rules are in CLAUDE.md, which only Claude Code reads.
+      const { lines, real } = ctx.brief.stub;
+      results.push({
+        id: 'intent.single-source',
+        station: 'intent',
+        weight: 20,
+        status: 'fail',
+        severity: 'high',
+        title: {
+          en: 'Single source of truth for agent instructions',
+          pl: 'Jedno źródło prawdy dla instrukcji agentów',
+        },
+        evidence: [`AGENTS.md is a ${lines}-line stub (a template or a tool-managed block); the brief is ${real} (${claudeLines} lines), which Codex and Cursor never read`],
+        why: {
+          en: 'Codex and Cursor read AGENTS.md. When it holds a stub and the rules live in CLAUDE.md, those tools work in this repository without them.',
+          pl: 'Codex i Cursor czytają AGENTS.md. Gdy jest tam tylko szkielet, a zasady są w CLAUDE.md, te narzędzia pracują w repozytorium bez nich.',
+        },
+        fix: {
+          en: `Move the content of ${real} into AGENTS.md (keep any tool-managed block where the tool put it) and reduce CLAUDE.md to a bare \`@AGENTS.md\` line plus Claude-only notes.`,
+          pl: `Przenieś treść ${real} do AGENTS.md (zostaw blok zarządzany przez narzędzie tam, gdzie go umieściło) i skróć CLAUDE.md do gołej linii \`@AGENTS.md\` oraz notatek tylko dla Claude.`,
+        },
+        docsPath: 'workflows/harness/agent-ready-codebase/',
+      });
     } else if (hasAgentsMd && hasClaudeMd) {
       const imp = hasBareAgentsImport(claudeText);
       if (imp.bare && claudeLines <= 45) {
@@ -360,7 +384,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
   // 3. intent.instruction-budget
   {
     // The file that holds the brief: behind a pointer, the file it points to.
-    const primaryFile = ctx.brief.pointer?.to ?? (hasAgentsMd ? 'AGENTS.md' : hasClaudeMd ? 'CLAUDE.md' : undefined);
+    const primaryFile = ctx.brief.pointer?.to ?? ctx.brief.stub?.real ?? (hasAgentsMd ? 'AGENTS.md' : hasClaudeMd ? 'CLAUDE.md' : undefined);
     if (!primaryFile) {
       results.push({
         id: 'intent.instruction-budget',
@@ -450,7 +474,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
       }
     }
 
-    const routesToDocs = routedDocs.length >= 2;
+    const routesToDocs = routedDocs.length >= 3;
     const totalScoped = cursorMdcFiles.length + claudeRuleFiles.length + nestedBriefs.length + (routesToDocs ? routedDocs.length : 0);
     const evidence: string[] = [];
     if (claudeRuleFiles.length > 0) evidence.push(`.claude/rules/*.md: ${claudeRuleFiles.length}`);
@@ -507,22 +531,22 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
 
   // 5. intent.skills-and-specs
   {
-    const skillFiles = ctx.findFiles((f) =>
-      /^(\.claude|\.agents|\.cursor)\/skills\/.+\/SKILL\.md$/i.test(f),
-    );
+    // Skills in a tool's folder, or anywhere in a repository that is itself a skill collection.
+    const skillFiles = ctx.findFiles((f) => /(^|\/)SKILL\.md$/.test(f) && !/(^|\/)(node_modules|vendor)\//.test(f));
     const prTemplate = ctx.hasAnyFile([
       '.github/pull_request_template.md',
       '.github/PULL_REQUEST_TEMPLATE.md',
       'docs/pull_request_template.md',
     ]) ?? ctx.findFiles((f) => /^\.github\/PULL_REQUEST_TEMPLATE\/.+\.md$/i.test(f))[0];
     const issueTemplates = ctx.findFiles((f) => /^\.github\/ISSUE_TEMPLATE\/.+\.(md|ya?ml)$/i.test(f));
-    const SPEC_NAME = /(architecture|design|spec|standards|testing|contract|security|conventions|adr|rfc|decision)/i;
+    const SPEC_NAME = /(architecture|design|spec|standards|testing|contract|security|conventions|adr|rfc|decision|roadmap|api)/i;
     const specDocs = [
       ...new Set([
         ...ctx.findFiles(
           (f) =>
-            /^(DESIGN|PRODUCT|CODING_STANDARDS|TESTING|ARCHITECTURE|CONTRIBUTING|SECURITY|CONVENTIONS)\.md$/i.test(f) ||
-            /^docs\/(adr|adrs|specs?|rfcs?|architecture|decisions)\//i.test(f) ||
+            /^(DESIGN|PRODUCT|CODING_STANDARDS|TESTING|ARCHITECTURE|CONTRIBUTING|SECURITY|CONVENTIONS|SPEC|CONTEXT|ROADMAP)\.md$/i.test(f) ||
+            /^(plans|specs?|adr|adrs|rfcs?)\/.+\.mdx?$/i.test(f) ||
+            /^docs\/(?:[^/]+\/)*(adr|adrs|specs?|rfcs?|architecture|decisions|plans)\//i.test(f) ||
             (/^docs\/[^/]+\.mdx?$/i.test(f) && SPEC_NAME.test(f)),
         ),
         // Docs the brief or the README sends readers to are the repository's standing specs.
