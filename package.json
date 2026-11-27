@@ -7,7 +7,7 @@
   "homepage": "https://developertoolkit.ai/en/harness-audit/",
   "repository": {
     "type": "git",
-    "url": "https://github.com/wondelai/harness-audit.git"
+    "url": "git+https://github.com/wondelai/harness-audit.git"
   },
   "bugs": {
     "url": "https://github.com/wondelai/harness-audit/issues"
@@ -31,7 +31,7 @@
     "node": ">=20.0.0"
   },
   "bin": {
-    "harness-audit": "./dist/cli.js"
+    "harness-audit": "dist/cli.js"
   },
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
