@@ -343,6 +343,13 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       if (stack.frameworks.includes('Android')) found('Android Lint (`./gradlew lint`)');
     }
 
+    // Biome with its linter switched off is a formatter.
+    const biome = ctx.readJson<{ linter?: { enabled?: boolean } }>('biome.json') ?? ctx.readJson<{ linter?: { enabled?: boolean } }>('biome.jsonc');
+    const biomeLintOff = biome?.linter?.enabled === false;
+    const FORMAT_ONLY = /^(Prettier|dprint|oxfmt|Black|SwiftFormat|Spotless|rustfmt \/ clippy)$/;
+    const linters = toolsFound.filter((tool) => !FORMAT_ONLY.test(tool) && !(tool === 'Biome' && biomeLintOff) && !tool.startsWith('Android Lint') && tool !== 'pre-commit hooks');
+    const formatterOnly = toolsFound.length > 0 && linters.length === 0 && !toolsFound.some((tool) => tool.startsWith('Android Lint'));
+
     // A `lint` command that runs only the repository's own programs is a check, not a linter.
     const lintCommand = ctx.verify.commands
       .filter((c) => c.kinds.includes('lint') || c.kinds.includes('format'))
@@ -352,7 +359,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
 
     // Android Lint ships with the Android Gradle plugin: on its own it formats nothing and knows no Kotlin style.
     const androidLintOnly = toolsFound.length === 1 && toolsFound[0]!.startsWith('Android Lint');
-    const status: CheckResult['status'] = androidLintOnly ? 'warn' : toolsFound.length > 0 ? 'pass' : customLintOnly ? 'warn' : 'fail';
+    const status: CheckResult['status'] = androidLintOnly || formatterOnly ? 'warn' : toolsFound.length > 0 ? 'pass' : customLintOnly ? 'warn' : 'fail';
 
     results.push({
       id: 'loop.formatter-linter',
@@ -367,7 +374,9 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       evidence:
         androidLintOnly
           ? ['Android Lint is available through the Android Gradle plugin; no formatter or Kotlin linter (ktlint, detekt, Spotless) is configured']
-          : toolsFound.length > 0
+          : formatterOnly
+            ? [`Formatter only: ${toolsFound.map((tool) => (tool === 'Biome' && biomeLintOff ? 'Biome (linter disabled in biome.json)' : tool)).join(', ')} — nothing lints the code`]
+            : toolsFound.length > 0
             ? [`Configured: ${toolsFound.join(', ')}`]
           : customLintOnly
             ? [`\`${lintCommand.command}\` exists${lintBody ? ` (${lintBody.length > 90 ? `${lintBody.slice(0, 90)}…` : lintBody})` : ''}, but no general-purpose linter or formatter is configured`]
@@ -454,7 +463,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     if (ciPins.length > 0) runtimePins.push(`CI pins ${ciPins.join(', ')}`);
 
     // make, cmake and xcodebuild build the project; they do not resolve dependencies to lock.
-    const hasManager = stack.packageManagers.some((pm) => !['make', 'cmake', 'xcodebuild'].includes(pm));
+    const resolvesPackages = stack.packageManagers.some((pm) => !['make', 'cmake', 'xcodebuild'].includes(pm));
     // Two JavaScript package managers' lockfiles at the root: each install resolves a different tree.
     const jsLockOwners: Record<string, string> = { 'package-lock.json': 'npm', 'npm-shrinkwrap.json': 'npm', 'pnpm-lock.yaml': 'pnpm', 'yarn.lock': 'yarn', 'bun.lock': 'bun', 'bun.lockb': 'bun' };
     const rootJsManagers = [...new Set(lockfiles.filter((f) => f in jsLockOwners).map((f) => jsLockOwners[f]!))];
@@ -464,12 +473,41 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     const competingLocks = rootJsManagers.length > 1;
     // Swift packages that declare no external dependency have nothing to resolve.
     const swiftManifests = ctx.findFiles((f) => /(^|\/)Package\.swift$/.test(f) && f.split('/').length <= 4);
-    const swiftHasDeps = swiftManifests.some((f) => /\.package\(\s*(url|id)\s*:/.test(ctx.readText(f) ?? ''));
+    // Remote Swift packages: in Package.swift, in an XcodeGen project.yml, or in the Xcode project itself.
+    const projectYml = ctx.readText('project.yml') ?? '';
+    const xcodeProjectFile = ctx.findFiles((f) => /\.xcodeproj\/project\.pbxproj$/.test(f))[0];
+    const swiftHasDeps =
+      swiftManifests.some((f) => /\.package\(\s*(url|id)\s*:/.test(ctx.readText(f) ?? '')) ||
+      /^packages:\s*\n(?:\s+.*\n)*?\s+(url|github):/m.test(projectYml) ||
+      (xcodeProjectFile !== undefined && /XCRemoteSwiftPackageReference/.test(ctx.readText(xcodeProjectFile) ?? ''));
+    // An Xcode project that pulls remote packages resolves dependencies too.
+    const hasManager = resolvesPackages || swiftHasDeps;
+    const swiftFloating = /^\s+(from|majorVersion|minorVersion|branch):/m.test(projectYml) || swiftManifests.some((f) => /from:\s*"|branch:\s*"|\.upToNext/.test(ctx.readText(f) ?? ''));
+
+    // Each ecosystem with a root manifest needs its own lock: an npm lockfile in a demo folder
+    // does not pin the Python core next to it.
+    const pyManifest = ctx.hasAnyFile(['pyproject.toml', 'requirements.txt', 'setup.py']);
+    const pyLocked =
+      ctx.hasAnyFile(['uv.lock', 'poetry.lock', 'Pipfile.lock', 'requirements.lock', 'pdm.lock']) !== undefined ||
+      (ctx.hasFile('requirements.txt') &&
+        (ctx.readText('requirements.txt') ?? '')
+          .split(/\r?\n/)
+          .filter((l) => l.trim() && !l.trim().startsWith('#') && !l.trim().startsWith('-'))
+          .every((l) => /==/.test(l)));
+    const pythonFloats = pyManifest !== undefined && !pyLocked;
+    const rootJsManifest = ctx.packageJson !== null;
+    const rootJsLock = lockfiles.some((f) => f in jsLockOwners);
+    const jsFloats = rootJsManifest && !rootJsLock && Object.keys({ ...ctx.packageJson?.dependencies, ...ctx.packageJson?.devDependencies }).length > 0;
     const evidence: string[] = [];
     if (lockfiles.length > 0) evidence.push(`Lockfile(s): ${lockfiles.join(', ')}`);
     else if (versionCatalog) evidence.push('Gradle version catalog pins direct dependencies (gradle/libs.versions.toml); transitive versions are not locked (no gradle.lockfile)');
     else if (hasManager) evidence.push('No committed dependency lockfile found');
     if (uncommittedLocks.length > 0) evidence.push(`On disk but not committed: ${uncommittedLocks.join(', ')}`);
+    if (pythonFloats) evidence.push(`Python dependencies are not locked: ${pyManifest} without uv.lock / poetry.lock / pinned requirements`);
+    if (jsFloats && lockfiles.length > 0) evidence.push('package.json at the root has dependencies but no lockfile next to it');
+    if (swiftHasDeps && swiftFloating && lockfiles.every((f) => !f.endsWith('Package.resolved'))) {
+      evidence.push('Remote Swift packages use version ranges (`from:` / branch) and no Package.resolved is committed');
+    }
     if (competingLocks) {
       evidence.push(`Lockfiles from ${rootJsManagers.length} package managers at the root (${rootJsManagers.join(', ')})${ciInstaller ? `; CI installs with \`${ciInstaller}\`` : ''} — keep one`);
     }
@@ -483,6 +521,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     const locked = lockfiles.length > 0 || versionCatalog;
     let status: CheckResult['status'];
     const nothingToLock = swiftManifests.length > 0 && !swiftHasDeps && !locked && !stack.packageManagers.some((pm) => !['swiftpm', 'xcodebuild'].includes(pm));
+    const ecosystemFloats = pythonFloats || (jsFloats && lockfiles.length > 0);
     if (nothingToLock) {
       // The answer does not depend on a lockfile; a pinned toolchain is still worth having.
       status = runtimePins.length > 0 ? 'pass' : 'warn';
@@ -492,7 +531,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       evidence.length = 0;
       evidence.push('No dependency manifest detected — nothing to lock');
     } else if (locked && runtimePins.length > 0) {
-      status = competingLocks ? 'warn' : 'pass';
+      status = competingLocks || ecosystemFloats ? 'warn' : 'pass';
     } else if (locked || runtimePins.length > 0) {
       status = 'warn';
     } else {
@@ -540,8 +579,16 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Nieprzypięte zależności i wersje runtime powodują błędy „działa u mnie, pada w piaskownicy/CI", które marnują budżet prób agenta.',
       },
       fix: {
-        en: `Make a fresh checkout reproducible: ${lockAdvice.en}, and pin the toolchain with ${pinAdvice.en}.`,
-        pl: `Zadbaj o powtarzalność świeżego checkoutu: ${lockAdvice.pl} i przypnij toolchain przez ${pinAdvice.pl}.`,
+        en: pythonFloats
+          ? 'Lock the Python dependencies: `uv lock` (or `pip-compile` to a pinned requirements file) and commit the result; pin the interpreter with `.python-version`.'
+          : competingLocks
+            ? `Keep one package manager: delete the lockfile CI does not install from${ciInstaller ? ` (CI runs \`${ciInstaller}\`)` : ''} and declare the manager in \`packageManager\`.`
+            : `Make a fresh checkout reproducible: ${lockAdvice.en}, and pin the toolchain with ${pinAdvice.en}.`,
+        pl: pythonFloats
+          ? 'Zablokuj zależności Pythona: `uv lock` (lub `pip-compile` do przypiętego pliku requirements) i zacommituj wynik; przypnij interpreter przez `.python-version`.'
+          : competingLocks
+            ? `Zostaw jeden menedżer pakietów: usuń lockfile, z którego CI nie instaluje${ciInstaller ? ` (CI uruchamia \`${ciInstaller}\`)` : ''}, i zadeklaruj menedżer w \`packageManager\`.`
+            : `Zadbaj o powtarzalność świeżego checkoutu: ${lockAdvice.pl} i przypnij toolchain przez ${pinAdvice.pl}.`,
       },
       docsPath: 'workflows/harness/ephemeral-environments/',
     });

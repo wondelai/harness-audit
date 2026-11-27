@@ -1,6 +1,14 @@
 import type { RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
 
+/** A long-running local server or local runtime state: what parallel checkouts collide on. */
+function hasDevServer(ctx: RepoContext): boolean {
+  const serverDeps = ['next', 'astro', 'express', 'fastify', 'hono', 'vite', '@nestjs/core', 'nuxt', '@sveltejs/kit', '@remix-run/dev', 'react-router', 'expo'];
+  if (serverDeps.some((d) => ctx.hasDependency(d))) return true;
+  if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'manage.py']) !== undefined) return true;
+  return ctx.stack.frameworks.some((f) => ['FastAPI', 'Django', 'Flask', 'Rails', 'Laravel', 'Phoenix', 'Spring Boot'].includes(f));
+}
+
 export function runGraphChecks(ctx: RepoContext): CheckResult[] {
   const results: CheckResult[] = [];
   const brief = `${ctx.readText('AGENTS.md') ?? ''}\n${ctx.readText('CLAUDE.md') ?? ''}`;
@@ -20,14 +28,21 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     if (pkgScripts.length > 0) evidence.push(`Package scripts: ${pkgScripts.join(', ')}`);
     if (briefMentionsWorktree) evidence.push('Worktree workflow documented in root instructions');
 
+    // Two agents in one tree collide hardest on ports and local state. A repository with neither
+    // (a CLI, a library, a mobile app) risks overlapping edits only, which a one-line convention covers.
+    const hasLocalState = hasDevServer(ctx);
     let status: CheckResult['status'] = 'warn';
     if (wtScripts.length > 0 || pkgScripts.length > 0) {
       status = 'pass';
     } else if (briefMentionsWorktree) {
       status = 'warn';
     } else {
-      status = 'fail';
-      evidence.push('No git worktree scripts, .worktreeinclude, or parallel checkout workflow documented');
+      status = hasLocalState ? 'fail' : 'warn';
+      evidence.push(
+        hasLocalState
+          ? 'No git worktree scripts, .worktreeinclude, or parallel checkout workflow documented'
+          : 'No worktree convention documented (no dev server or local state here, so the risk is overlapping edits, not colliding ports)',
+      );
     }
 
     results.push({
@@ -89,14 +104,7 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
       evidence.push('Local ephemeral / isolated runtime state detected (Miniflare, Docker, SQLite, Testcontainers, or tmpdir)');
     }
 
-    const isPureLibrary =
-      !ctx.hasDependency('next') &&
-      !ctx.hasDependency('astro') &&
-      !ctx.hasDependency('express') &&
-      !ctx.hasDependency('fastify') &&
-      !ctx.hasDependency('hono') &&
-      !ctx.hasDependency('vite') &&
-      ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json', 'docker-compose.yml']) === undefined;
+    const isPureLibrary = !hasDevServer(ctx);
 
     let status: CheckResult['status'] = 'warn';
     if (hasPortEnv && hasEphemeralLocalState) {

@@ -30,6 +30,20 @@ const SECRET_PATTERNS: Array<{ name: string; regex: RegExp }> = [
   { name: 'Resend API key', regex: /\bre_[A-Za-z0-9]{24,}\b/ },
 ];
 
+/**
+ * A variable whose name says credential and whose value looks like one, whatever the provider:
+ * `FAL_KEY = "a1b2…"` in wrangler.toml `[vars]`, `API_TOKEN=…` in a tracked env file.
+ * Names that are public by design (publishable keys, site keys, client ids) are left alone.
+ */
+const NAMED_CREDENTIAL = /^\s*(?:export\s+)?["']?([A-Za-z][A-Za-z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIALS?))["']?\s*[:=]\s*["']([^"'\s]{20,})["']?\s*,?\s*(?:#.*)?$/;
+const PUBLIC_BY_DESIGN = /PUBLIC|PUBLISHABLE|SITE_?KEY|CLIENT_?ID|ANON|PROJECT_?(API_)?KEY|WRITE_?KEY|DSN|KEY_?ID|ACCESS_KEY_ID/i;
+
+function looksLikeCredential(value: string): boolean {
+  if (/^(phc_|pk_(live|test)_|G-|UA-|GTM-|ca-pub-|https?:)/.test(value)) return false;
+  // Letters and digits mixed, no spaces: a hash, a token. Plain words and paths are not.
+  return /[A-Za-z]/.test(value) && /\d/.test(value) && !/^[a-z]+(?:[-_.][a-z]+)*$/.test(value) && !value.includes('/') ;
+}
+
 function isPlaceholderToken(match: string): boolean {
   const lower = match.toLowerCase();
   return (
@@ -121,7 +135,14 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     const committedLocal = ctx.isTracked('.claude/settings.local.json') === true;
     const denyCount = claudeSettings?.permissions?.deny?.length ?? 0;
     const deployDenies = localDeployCommands(ctx).map((c) => `\`Bash(${c}:*)\``);
-    const denyExample = deployDenies.length > 0 ? deployDenies.slice(0, 3).join(', ') : '`Bash(<your deploy command>:*)`';
+    // Nothing deploys from here (a library, a mobile app): force pushes and secret files are what is left to deny.
+    const denyExample = deployDenies.length > 0 ? deployDenies.slice(0, 3).join(', ') : '`Bash(git push --force:*)` and `Read(./.env)`';
+    // A committed policy needs a path git will take: `.claude/` in .gitignore swallows settings.json too.
+    const settingsIgnored = !claudeSettings && ctx.ignoredPaths(['.claude/settings.json']).size > 0;
+    const unignore = {
+      en: settingsIgnored ? ' Git ignores `.claude/` here, so first change that rule to `.claude/*` and add `!.claude/settings.json`.' : '',
+      pl: settingsIgnored ? ' Git ignoruje tu `.claude/`, więc najpierw zmień tę regułę na `.claude/*` i dodaj `!.claude/settings.json`.' : '',
+    };
 
     let status: CheckResult['status'] = 'warn';
     if (criticalErrors.length > 0) {
@@ -145,6 +166,8 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         );
       } else if (ctx.isLocalOnly('.claude/settings.json')) {
         evidence.push('.claude/settings.json exists on this machine but git ignores it — the policy is not shared with teammates or CI agents');
+      } else if (settingsIgnored) {
+        evidence.push('No versioned agent permission policy, and .gitignore excludes .claude/ so a settings.json could not be committed as things stand');
       } else {
         evidence.push('No versioned agent permission policy found (.claude/settings.json, .codex/config.toml, or .cursor/cli.json)');
       }
@@ -177,8 +200,8 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
                   pl: 'Przenieś wspólne reguły allow/deny z `.claude/settings.local.json` do `.claude/settings.json` i dodaj plik lokalny do .gitignore.',
                 }
               : {
-                  en: `Commit \`.claude/settings.json\` with \`permissions.allow\` for the verify commands (${allowExample}) and \`permissions.deny\` for ${denyExample}; for Codex, \`.codex/config.toml\` with \`approval_policy = "on-request"\` and \`sandbox_mode = "workspace-write"\`. \`npx harness-audit init\` writes the Claude Code file from these commands.`,
-                  pl: `Dodaj \`.claude/settings.json\` z \`permissions.allow\` dla komend weryfikacji (${allowExample}) i \`permissions.deny\` dla ${denyExample}; dla Codexa \`.codex/config.toml\` z \`approval_policy = "on-request"\` oraz \`sandbox_mode = "workspace-write"\`. \`npx harness-audit init\` utworzy plik dla Claude Code z tych komend.`,
+                  en: `Commit \`.claude/settings.json\` with \`permissions.allow\` for the verify commands (${allowExample}) and \`permissions.deny\` for ${denyExample}; for Codex, \`.codex/config.toml\` with \`approval_policy = "on-request"\` and \`sandbox_mode = "workspace-write"\`. \`npx harness-audit init\` writes the Claude Code file from these commands.${unignore.en}`,
+                  pl: `Dodaj \`.claude/settings.json\` z \`permissions.allow\` dla komend weryfikacji (${allowExample}) i \`permissions.deny\` dla ${denyExample}; dla Codexa \`.codex/config.toml\` z \`approval_policy = "on-request"\` oraz \`sandbox_mode = "workspace-write"\`. \`npx harness-audit init\` utworzy plik dla Claude Code z tych komend.${unignore.pl}`,
                 };
 
     results.push({
@@ -261,12 +284,21 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       evidence.push(`Git hooks: ${gitHookConfigs.join(', ')}`);
     }
 
+    // The owner may have decided against hooks and written it down; that is a decision, not a gap.
+    const optOut = ctx.brief.files
+      .flatMap((f) => (ctx.readText(f) ?? '').split(/\r?\n/).map((text, i) => ({ f, line: i + 1, text })))
+      .find((l) => /\b(no|without|removed|there is no)\b[^.\n]{0,40}\b(PreToolUse|PostToolUse|hooks?|guard)\b/i.test(l.text) && /on purpose|deliberate|by design|decision|intentional/i.test(l.text));
+    const formatCommand = ctx.verify.commands.filter((c) => c.kinds.includes('format') || c.kinds.includes('lint')).sort((a, b) => a.kinds.length - b.kinds.length)[0]?.command;
+
     let status: CheckResult['status'] = 'warn';
     if (hookIssues.length > 0) {
       status = 'fail';
       evidence.push(...hookIssues);
     } else if (hasAgentHooks || hasGitHooks) {
       status = 'pass';
+    } else if (optOut) {
+      status = 'info';
+      evidence.push(`No hooks, by decision recorded at ${optOut.f}:${optOut.line}`);
     } else {
       status = 'warn';
       evidence.push('No deterministic agent hooks (.claude/settings.json hooks, .cursor/hooks.json) or git hooks (.husky, lefthook, pre-commit) detected');
@@ -290,10 +322,10 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       fix: {
         en: hookIssues.length > 0
           ? 'Check `stop_hook_active` from stdin JSON at the top of your Stop hook and exit 0 when true so failed runs stop cleanly.'
-          : 'Add deterministic hooks via `.claude/settings.json` (`PostToolUse` / guarded `Stop`) and/or `lefthook.yml` / `.husky/` for fast pre-commit checks.',
+          : `Add one deterministic hook: a \`PostToolUse\` hook in \`.claude/settings.json\` that runs ${formatCommand ? `\`${formatCommand}\`` : 'your formatter or linter'} on edited files, or a pre-commit hook (lefthook, husky, pre-commit) that does the same.`,
         pl: hookIssues.length > 0
           ? 'Sprawdzaj pole `stop_hook_active` z JSON na stdin na początku hooka `Stop` i zwracaj kod 0, gdy ma wartość true, aby uniknąć pętli nieskończonej.'
-          : 'Dodaj deterministyczne hooki w `.claude/settings.json` (`PostToolUse` / zabezpieczony `Stop`) oraz/lub `lefthook.yml` / `.husky/` dla szybkich sprawdzeń przed commitem.',
+          : `Dodaj jeden deterministyczny hook: \`PostToolUse\` w \`.claude/settings.json\`, który uruchamia ${formatCommand ? `\`${formatCommand}\`` : 'formatter lub linter'} na edytowanych plikach, albo hook pre-commit (lefthook, husky, pre-commit) robiący to samo.`,
       },
       docsPath: 'workflows/harness/agent-hooks/',
     });
@@ -491,15 +523,23 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       const content = ctx.readText(file);
       if (!content) continue;
       const lines = content.split(/\r?\n/);
+      const envLike = /\.(toml|properties|tfvars|ya?ml|json|jsonc)$|(^|\/)\.?(env|dev\.vars)/.test(file) && !/\.(example|sample|template)$/.test(file);
       for (let i = 0; i < lines.length; i++) {
-        const hit = SECRET_PATTERNS.find((sp) => {
-          const m = sp.regex.exec(lines[i]!);
+        const line = lines[i]!;
+        const provider = SECRET_PATTERNS.find((sp) => {
+          const m = sp.regex.exec(line);
           return m !== null && !isPlaceholderToken(m[0]);
         });
-        if (!hit) continue;
+        // The variable's own name is the better label when the line has one: a generic `sk-` value
+        // is not always an OpenAI key.
+        const named = envLike ? NAMED_CREDENTIAL.exec(line) : null;
+        const namedHit = named && !PUBLIC_BY_DESIGN.test(named[1]!) && !isPlaceholderToken(named[2]!) && !named[2]!.includes('${') && looksLikeCredential(named[2]!);
+        if (!provider && !namedHit) continue;
+        const specific = provider && provider.name !== 'OpenAI API key' ? provider.name : undefined;
+        const label = specific ?? (named ? `credential in \`${named[1]}\`` : provider!.name);
         // Outside a git work tree nothing is known about tracking: treat the file as shared.
-        if (ctx.isTracked(file) === false) untrackedLeaks.push(`${file}:${i + 1} ${hit.name} (untracked, not gitignored)`);
-        else trackedLeaks.push(`${file}:${i + 1} ${hit.name}${ctx.isTracked(file) ? ' (committed)' : ''}`);
+        if (ctx.isTracked(file) === false) untrackedLeaks.push(`${file}:${i + 1} ${label} (untracked, not gitignored)`);
+        else trackedLeaks.push(`${file}:${i + 1} ${label}${ctx.isTracked(file) ? ' (committed)' : ''}`);
       }
     }
 
@@ -511,8 +551,16 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     }) || ctx.hasFile('.gitleaks.toml');
 
     const evidence: string[] = [];
-    evidence.push(...trackedLeaks.slice(0, 6));
-    if (trackedLeaks.length > 6) evidence.push(`… and ${trackedLeaks.length - 6} more committed credential(s)`);
+    evidence.push(...trackedLeaks.slice(0, 8));
+    if (trackedLeaks.length > 8) {
+      // Every remaining line is still named, so "rotate everything listed" leaves nothing out.
+      const rest = new Map<string, string[]>();
+      for (const leak of trackedLeaks.slice(8)) {
+        const [, file, line] = /^(.*?):(\d+) /.exec(leak) ?? [];
+        if (file && line) rest.set(file, [...(rest.get(file) ?? []), line]);
+      }
+      evidence.push(`… and ${trackedLeaks.length - 8} more: ${[...rest].map(([file, ls]) => `${file} lines ${ls.join(', ')}`).join('; ')}`);
+    }
     evidence.push(...untrackedLeaks.slice(0, 3));
     if (missingIgnores.length > 0) evidence.push(`Not gitignored: ${missingIgnores.join(', ')}`);
     else if (required.length > 0) evidence.push(`Git ignores ${required.join(', ')}`);
@@ -572,28 +620,40 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
   // 5. harness.sandbox-readiness
   {
     const brief = ctx.brief;
+    // A place built for agents to run in. A Dockerfile or a compose file is the product's image or
+    // its backing services unless it is a devcontainer.
     const sandboxes: string[] = [];
-    const notes: string[] = [];
     if (ctx.findFiles((f) => /^\.devcontainer\//.test(f)).length > 0) sandboxes.push('.devcontainer/');
-    const dockerFile = ctx.hasAnyFile(['Dockerfile', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'compose.yaml']);
-    if (dockerFile) {
-      // A Dockerfile is usually the product's image. It is an agent sandbox only when the brief says agents run in it.
-      if (/\b(docker|container|devcontainer|compose)\b/i.test(brief.text)) sandboxes.push(`${dockerFile} (the brief runs work in a container)`);
-      else notes.push(`${dockerFile} exists but the brief does not use it as a place to run agents`);
-    }
     if (ctx.hasAnyFile(['flake.nix', 'shell.nix'])) sandboxes.push('Nix shell');
     if (claudeSettings?.sandbox) sandboxes.push('.claude/settings.json sandbox');
     if (codexToml && /^\s*sandbox_mode\s*=/m.test(codexToml)) sandboxes.push('.codex/config.toml sandbox_mode');
 
-    const hasBoundary = brief.boundaryRules.length > 0;
+    // Local work that reaches production: said in the brief, or wired into a dev script.
+    const reach = brief.productionReach.map((r) => `${r.file}:${r.line} says local work reaches production: "${r.text}"`);
+    for (const [name, body] of Object.entries(ctx.packageJson?.scripts ?? {})) {
+      if (/^(dev|start|serve)$/.test(name) && /--remote\b/.test(body)) reach.push(`package script \`${name}\` runs against remote bindings (\`--remote\`)`);
+    }
+    for (const m of ctx.workspaceManifests) {
+      for (const [name, body] of Object.entries(m.manifest.scripts ?? {})) {
+        if (/^(dev|start|serve)$/.test(name) && /--remote\b/.test(body)) reach.push(`${m.path} script \`${name}\` runs against remote bindings (\`--remote\`)`);
+      }
+    }
+
+    const rules = brief.boundaryRules;
     const evidence: string[] = [];
     if (sandboxes.length > 0) evidence.push(`Sandbox: ${sandboxes.join(', ')}`);
-    else evidence.push('No container or tool sandbox configured (.devcontainer/, Claude Code `sandbox`, Codex `sandbox_mode`)');
-    if (hasBoundary) evidence.push(`${brief.primary} states a boundary: "${brief.boundaryRules[0]}"${brief.boundaryRules.length > 1 ? ` (+${brief.boundaryRules.length - 1} more)` : ''}`);
-    else evidence.push(brief.files.length > 0 ? `${brief.primary} names no production or shared resource that agents must not touch` : 'No brief, so no written boundary around production or shared resources');
-    evidence.push(...notes);
+    else evidence.push('No agent sandbox configured (.devcontainer/, Claude Code `sandbox`, Codex `sandbox_mode`)');
+    if (rules.length > 0) {
+      evidence.push(`Boundary rule at ${rules[0]!.file}:${rules[0]!.line}: "${rules[0]!.text}"${rules.length > 1 ? ` (+${rules.length - 1} more)` : ''}`);
+    } else {
+      evidence.push(brief.files.length > 0 ? `Found no sentence in ${brief.files.join(' / ')} that forbids or reserves an action on production` : 'No brief, so no written boundary around production or shared resources');
+    }
+    evidence.push(...reach.slice(0, 2));
 
-    const status: CheckResult['status'] = sandboxes.length > 0 && hasBoundary ? 'pass' : sandboxes.length > 0 || hasBoundary ? 'warn' : 'fail';
+    let status: CheckResult['status'] = sandboxes.length > 0 && rules.length > 0 ? 'pass' : sandboxes.length > 0 || rules.length > 0 ? 'warn' : 'fail';
+    // An agent's ordinary local run can write production: that outranks everything else here.
+    if (reach.length > 0 && sandboxes.length === 0) status = 'fail';
+
     const needSandbox = {
       en: 'Give agents an OS-level boundary: enable the tool sandbox (`"sandbox": { "enabled": true }` in `.claude/settings.json`, or `sandbox_mode = "workspace-write"` in `.codex/config.toml`) or commit a `.devcontainer/`.',
       pl: 'Daj agentom granicę na poziomie systemu: włącz piaskownicę narzędzia (`"sandbox": { "enabled": true }` w `.claude/settings.json` lub `sandbox_mode = "workspace-write"` w `.codex/config.toml`) albo dodaj `.devcontainer/`.',
@@ -602,13 +662,17 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       en: `Write in ${brief.primary} which production and shared resources an agent must never touch (remote databases, deploys, live webhooks, secrets).`,
       pl: `Napisz w ${brief.primary}, których zasobów produkcyjnych i współdzielonych agent nie może dotykać (zdalne bazy, deploy, żywe webhooki, sekrety).`,
     };
+    const cutReach = {
+      en: 'Local development reaches production: give it local or preview bindings (Miniflare state, a preview database) so an agent running the app or its tests cannot write real data.',
+      pl: 'Lokalny development sięga produkcji: daj mu lokalne lub podglądowe bindingi (stan Miniflare, baza preview), aby agent uruchamiający aplikację lub testy nie mógł zapisać prawdziwych danych.',
+    };
 
     results.push({
       id: 'harness.sandbox-readiness',
       station: 'harness',
       weight: 15,
       status,
-      severity: status === 'fail' ? 'medium' : 'low',
+      severity: reach.length > 0 && status === 'fail' ? 'high' : status === 'fail' ? 'medium' : 'low',
       title: {
         en: 'Sandbox & production boundary readiness',
         pl: 'Gotowość piaskownicy i granice środowiska produkcyjnego',
@@ -619,8 +683,8 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
         pl: 'Uruchomienia o wyższej autonomii wymagają izolacji kontenerowej/OS oraz jasnych granic chroniących współdzielone zasoby chmurowe (baza produkcyjna, deploy, webhooki).',
       },
       fix: {
-        en: [sandboxes.length === 0 ? needSandbox.en : '', !hasBoundary ? needBoundary.en : ''].filter(Boolean).join(' ') || 'Keep the sandbox setting and the boundary rules in step with new environments.',
-        pl: [sandboxes.length === 0 ? needSandbox.pl : '', !hasBoundary ? needBoundary.pl : ''].filter(Boolean).join(' ') || 'Aktualizuj ustawienia piaskownicy i zasady granic wraz z nowymi środowiskami.',
+        en: [reach.length > 0 ? cutReach.en : '', sandboxes.length === 0 ? needSandbox.en : '', rules.length === 0 ? needBoundary.en : ''].filter(Boolean).join(' ') || 'Keep the sandbox setting and the boundary rules in step with new environments.',
+        pl: [reach.length > 0 ? cutReach.pl : '', sandboxes.length === 0 ? needSandbox.pl : '', rules.length === 0 ? needBoundary.pl : ''].filter(Boolean).join(' ') || 'Aktualizuj ustawienia piaskownicy i zasady granic wraz z nowymi środowiskami.',
       },
       docsPath: 'workflows/harness/permissions-and-sandboxing/',
     });

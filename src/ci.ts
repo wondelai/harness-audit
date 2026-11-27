@@ -1,4 +1,4 @@
-import { CommandClassifier, sortKinds, type VerifyKind } from './capabilities.js';
+import { CommandClassifier, runsDeployTool, sortKinds, type VerifyKind } from './capabilities.js';
 import type { RepoContext } from './fs-scanner.js';
 
 export interface WorkflowFacts {
@@ -24,9 +24,6 @@ export interface CiFacts {
   /** The PR-triggered commands that provide `prKinds`, for evidence. */
   prCommands: Array<{ path: string; command: string; kinds: VerifyKind[] }>;
 }
-
-const DEPLOY_COMMAND =
-  /\b(?:wrangler\s+(?:deploy|publish|pages\s+deploy)|vercel\s+(?:deploy|--prod)|netlify\s+deploy|flyctl\s+deploy|fly\s+deploy|kubectl\s+apply|helm\s+upgrade|terraform\s+apply|npm\s+publish|pnpm\s+publish|bun\s+publish|cargo\s+publish|twine\s+upload|gh\s+release\s+create|fastlane\s+(?:\S+\s+)?(?:release|deploy|beta|upload\w*)|firebase\s+deploy|aws\s+s3\s+sync|docker\s+push|eas\s+submit)\b/;
 
 const DEPLOY_ACTION =
   /uses:\s*(?:cloudflare\/wrangler-action|cloudflare\/pages-action|amondnet\/vercel-action|superfly\/flyctl-actions|docker\/build-push-action|softprops\/action-gh-release|pypa\/gh-action-pypi-publish|JamesIves\/github-pages-deploy-action|actions\/deploy-pages)/i;
@@ -160,7 +157,7 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
     const splitLines = (body: string): string[] => body.split(/\n|&&/).map((l) => l.trim()).filter(Boolean);
     for (const step of steps) {
       for (const cmd of splitLines(step.command)) {
-        if (DEPLOY_COMMAND.test(cmd) && !/--dry-run\b|--dry\b/.test(cmd)) deployCommands.push(cmd);
+        if (runsDeployTool(cmd)) deployCommands.push(cmd);
         const cmdKinds = sortKinds(classifier.classify(cmd));
         if (cmdKinds.length === 0) continue;
         commands.push(cmd);

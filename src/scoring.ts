@@ -75,15 +75,27 @@ export function computeOverallScore(stations: StationScore[]): number {
   return totalWeight > 0 ? Math.round(sum / totalWeight) : 0;
 }
 
+/** A committed credential or a bypassed permission model: urgent whatever else is missing. */
+export function isSecurityBlocker(check: CheckResult): boolean {
+  return Boolean(check.meta?.['hasHardcodedSecrets'] || check.meta?.['hasHardcodedMcpSecrets'] || check.meta?.['hasCriticalPermissionError']);
+}
+
 /**
- * A critical finding (no brief, no verify loop, no tests, no CI, a committed credential, a bypassed
- * permission model) costs more than its share of one station: 5 points each, 15 at most. Without
- * it a repository that leaks keys or gives agents nothing to read still shows a comfortable score.
+ * A critical finding costs more than its share of one station: 5 points for a missing foundation
+ * (no brief, no verify loop, no tests, no CI), 15 for a security blocker (a committed credential,
+ * a bypassed permission model), 20 at most. Without it a repository that leaks keys still shows a
+ * comfortable score.
  */
-export function criticalPenalty(checks: CheckResult[]): { points: number; perCheck: number; checks: string[] } {
+export function criticalPenalty(checks: CheckResult[]): { points: number; perCheck: Map<string, number>; checks: string[] } {
   const critical = checks.filter((c) => c.status === 'fail' && c.severity === 'critical');
-  const perCheck = critical.length === 0 ? 0 : Math.min(5, 15 / critical.length);
-  return { points: Math.round(perCheck * critical.length), perCheck, checks: critical.map((c) => c.id) };
+  const raw = critical.map((c) => (isSecurityBlocker(c) ? 15 : 5));
+  const total = raw.reduce((a, b) => a + b, 0);
+  const scale = total > 20 ? 20 / total : 1;
+  return {
+    points: Math.round(total * scale),
+    perCheck: new Map(critical.map((c, i) => [c.id, raw[i]! * scale])),
+    checks: critical.map((c) => c.id),
+  };
 }
 
 /** Lowest overall score of each level; index = level. */
@@ -114,7 +126,7 @@ export function assignImpact(checks: CheckResult[]): void {
       const missing = c.status === 'fail' ? c.weight : c.weight * 0.5;
       const share = (missing / possible) * station.weight * 100;
       // Fixing a critical finding also lifts its share of the critical penalty.
-      c.impact = Math.round((share + (penalty.checks.includes(c.id) ? penalty.perCheck : 0)) * 10) / 10;
+      c.impact = Math.round((share + (penalty.perCheck.get(c.id) ?? 0)) * 10) / 10;
     }
   }
 }
@@ -297,11 +309,8 @@ export function unblocksNextLevel(check: CheckResult, next: NextLevel | undefine
  * by severity, and within one severity by the points each fix adds to the score.
  */
 export function selectTopPriorities(checks: CheckResult[], limit = 5, next?: NextLevel): CheckResult[] {
-  // A committed credential or a bypassed permission model is urgent whatever else is missing.
-  const securityBlocker = (c: CheckResult): boolean =>
-    Boolean(c.meta?.['hasHardcodedSecrets'] || c.meta?.['hasHardcodedMcpSecrets'] || c.meta?.['hasCriticalPermissionError']);
   const rank = (c: CheckResult): number =>
-    securityBlocker(c) ? 0 : c.severity === 'critical' ? 1 : unblocksNextLevel(c, next) ? 2 : 3;
+    isSecurityBlocker(c) ? 0 : c.severity === 'critical' ? 1 : unblocksNextLevel(c, next) ? 2 : 3;
   return checks
     .filter((c) => c.status === 'fail' || c.status === 'warn')
     .sort((a, b) => {

@@ -91,8 +91,12 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
 
     if (templatePath) {
       const content = ctx.readText(templatePath) ?? '';
-      const hasChecklist = /-\s*\[\s*\]/.test(content);
-      const hasEvidenceTerms = /\b(test|verif|evidence|screenshot|risk|rollback|migration|command|output)\b/i.test(content);
+      const hasChecklist = /-\s*\[\s*\]/.test(content) || /^\s*\|.*\|\s*$/m.test(content);
+      // Language-neutral: a heading about verification in any of the common spellings, or a
+      // command in backticks the author is asked to run.
+      const hasEvidenceTerms =
+        /(test|verif|weryfik|evidence|dow[oó]d|screenshot|zrzut|risk|ryzyk|rollback|wycofan|migration|migrac|command|komend|output|wynik|pr[uü]f|prueba|preuve)/i.test(content) ||
+        /`[^`\n]{3,}`/.test(content);
       evidence.push(`${templatePath} found`);
       if (hasChecklist) evidence.push('Includes verification checklist');
       if (hasEvidenceTerms) evidence.push('Prompts for verification evidence / risk notes');
@@ -105,7 +109,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       status = solo ? 'warn' : 'fail';
       evidence.push(
         solo
-          ? `No pull request template (${ctx.team === 'inactive' ? 'no commits in the last 90 days' : 'one active contributor'}: agent-written PRs have no fixed evidence format to fill in)`
+          ? `No pull request template (${ctx.teamLabel.toLowerCase()}: agent-written PRs have no fixed evidence format to fill in)`
           : 'No pull request / merge request template found',
       );
     }
@@ -285,10 +289,20 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       evidence.push(`${w.path}: deploys (\`${w.deployCommands[0]!.slice(0, 70)}\`) with no \`needs:\`, environment or branch condition in front of it`);
     }
 
-    // The platform deploys from git: the brief or a workflow says so.
-    const platformText = `${ctx.brief.text}\n${ci.files.map((f) => ctx.readText(f) ?? '').join('\n')}`;
-    const platform = /\b(Workers Builds|Cloudflare Pages|Vercel|Netlify|Render|Railway|Amplify)\b/.exec(platformText)?.[1];
-    if (platform && deployWorkflows.length === 0) evidence.push(`Production deploys run through ${platform} on merge (per the brief or CI config)`);
+    // The platform deploys from git only when someone wrote that down: "Workers Builds" (the
+    // product that does exactly this) or a sentence saying deploys happen on merge or push. A
+    // brand name on its own ("Vercel AI SDK") says nothing about how this repository ships.
+    const GIT_DEPLOY = /\bWorkers Builds\b|\bdeploy\w*\b[^.\n]{0,60}\b(?:on|after|upon)\s+(?:every\s+|each\s+)?(?:merge|push)\b/i;
+    const platformLine = [...ctx.brief.files, ...ci.files]
+      .flatMap((f) => (ctx.readText(f) ?? '').split(/\r?\n/).map((text, i) => ({ f, line: i + 1, text })))
+      .find((l) => GIT_DEPLOY.test(l.text));
+    const platform = platformLine !== undefined;
+    if (platformLine && deployWorkflows.length === 0) {
+      // Quote the words that say it, not the start of a long line.
+      const at = GIT_DEPLOY.exec(platformLine.text)!;
+      const quote = platformLine.text.slice(Math.max(0, at.index - 30), at.index + at[0].length + 40).trim();
+      evidence.push(`${platformLine.f}:${platformLine.line} mentions a git-triggered deploy: "…${quote}…"`);
+    }
 
     // What can ship from a laptop, and which of it a committed deny rule stops.
     const localDeploys = localDeployCommands(ctx);

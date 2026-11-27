@@ -4,9 +4,28 @@ import type { CheckResult } from '../types.js';
 export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
   const results: CheckResult[] = [];
 
+  // Tests the way the repository runs them: files the test command names (a fixture runner under
+  // scripts/, a directory of cases) count even when their names follow no test convention.
+  const testCommands = ctx.verify.commands.filter((c) => c.kinds.includes('test'));
+  const scripts = ctx.packageJson?.scripts ?? {};
+  const commandTargets = new Set<string>();
+  const follow = (body: string, depth: number): void => {
+    for (const token of body.split(/[\s"'=]+/)) {
+      const path = token.replace(/^\.\//, '').replace(/[;&|)]+$/, '');
+      if (path.includes('/') && ctx.hasFile(path) && !ctx.testFiles.includes(path)) commandTargets.add(path);
+    }
+    if (depth >= 3) return;
+    for (const m of body.matchAll(/\b(?:bun|npm|pnpm|yarn|vp)\s+(?:run\s+)?([\w:.-]+)/g)) {
+      const next = scripts[m[1]!];
+      if (next) follow(next, depth + 1);
+    }
+  };
+  for (const name of Object.keys(scripts).filter((n) => /^test([:._-]|$)/.test(n))) follow(scripts[name]!, 0);
+  const allTestFiles = [...ctx.testFiles, ...commandTargets];
+
   // 1. verification.unit-tests
   {
-    const testCount = ctx.testFiles.length;
+    const testCount = allTestFiles.length;
     const srcCount = ctx.sourceFiles.length;
     const ratio = srcCount > 0 ? testCount / srcCount : testCount > 0 ? 1 : 0;
 
@@ -14,8 +33,9 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       `Detected ${testCount} test file(s) vs ${srcCount} source file(s) (ratio: ${srcCount > 0 ? (ratio * 100).toFixed(1) + '%' : 'n/a'})`,
     ];
     if (testCount > 0) {
-      evidence.push(`Sample: ${ctx.testFiles.slice(0, 4).join(', ')}`);
+      evidence.push(`Sample: ${allTestFiles.slice(0, 4).join(', ')}`);
     }
+    if (commandTargets.size > 0) evidence.push(`${commandTargets.size} of them are run by the test command without a test-style name (${[...commandTargets].slice(0, 2).join(', ')})`);
 
     let status: CheckResult['status'] = 'fail';
     if (testCount >= 3 && (ratio >= 0.12 || testCount >= 15)) {
@@ -26,6 +46,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       // Documentation, prompts or configuration only: there is no program to test.
       status = 'info';
       evidence[0] = 'No source code detected (documentation / configuration repository) — nothing to unit-test';
+    } else if (testCommands.length > 0) {
+      // A test command exists and something runs: the audit could not see the files, which is its limit, not a missing suite.
+      status = 'warn';
+      evidence.push(`A test command exists (\`${testCommands[0]!.command}\`), but no file it runs could be identified — coverage unknown`);
     }
 
     results.push({
@@ -54,9 +78,16 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
   // 2. verification.e2e-tests
   {
     const e2eSignals: string[] = [];
-    if (ctx.hasAnyFile(['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs']) || ctx.hasDependency('@playwright/test')) {
+    if (ctx.hasAnyFile(['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs']) || ctx.hasDependency('@playwright/test') || ctx.hasDependency('playwright')) {
       e2eSignals.push('Playwright');
     }
+    const e2eNamed = ctx.findFiles((f) => /(^|\/)[\w.-]*e2e[\w.-]*\//i.test(f) || /\.e2e(-spec)?\.[jt]sx?$/.test(f)).length;
+    if (e2eNamed > 0) e2eSignals.push(`e2e suites (${e2eNamed} files in *e2e* paths)`);
+    // Rendered-UI tiers that run without a device: screenshot and Compose/SwiftUI snapshot tests.
+    const buildText = ['gradle/libs.versions.toml', 'build.gradle.kts', 'Package.swift', 'project.yml'].map((f) => ctx.readText(f) ?? '').join('\n');
+    if (/roborazzi|paparazzi/i.test(buildText)) e2eSignals.push('Screenshot tests (Roborazzi / Paparazzi)');
+    else if (/robolectric|ui-test-junit4/i.test(buildText)) e2eSignals.push('Robolectric / Compose UI tests');
+    if (/swift-snapshot-testing|SnapshotTesting/.test(buildText)) e2eSignals.push('Snapshot tests (swift-snapshot-testing)');
     if (ctx.hasAnyFile(['cypress.config.ts', 'cypress.config.js', 'cypress.json']) || ctx.hasDependency('cypress')) {
       e2eSignals.push('Cypress');
     }
@@ -184,7 +215,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     if (!protectsOracle && !codeownersPath) {
       evidence.push(
         solo
-          ? `${ctx.team === 'inactive' ? 'No commits in the last 90 days' : 'One active contributor'}: no CI or harness guard stops an agent from weakening tests or editing .github/workflows to get to green`
+          ? `${ctx.teamLabel}: no CI or harness guard stops an agent from weakening tests or editing .github/workflows to get to green`
           : 'No CODEOWNERS or CI/harness protection found for tests/, .github/workflows/, or rule files',
       );
     }
@@ -226,8 +257,8 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     let eslintDisableCount = 0;
     const tsIgnoreFiles: Array<{ file: string; count: number }> = [];
 
-    // Scan up to 150 test files for test anti-patterns
-    const sampleTests = ctx.testFiles.slice(0, 150);
+    // The whole suite up to a generous bound; the evidence says so when a bound applied.
+    const sampleTests = allTestFiles.slice(0, 1500);
     for (const tf of sampleTests) {
       const content = ctx.readText(tf);
       if (!content) continue;
@@ -269,8 +300,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       }
     }
 
-    // Scan up to 250 source files for suppression sprawl
-    const sampleSources = ctx.sourceFiles.slice(0, 250);
+    const sampleSources = ctx.sourceFiles.slice(0, 5000);
     for (const sf of sampleSources) {
       const content = ctx.readText(sf);
       if (!content) continue;
@@ -285,15 +315,26 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       if (esMatches) eslintDisableCount += esMatches.length;
     }
 
+    const suppressionRate = sampleSources.length > 0 ? (tsIgnoreCount + eslintDisableCount) / sampleSources.length : 0;
+    // Five are worth a warning anywhere; a failure needs both volume and density, so a large
+    // codebase with a few dozen is not graded like a small one riddled with them.
+    const tsIgnoreWarn = tsIgnoreCount >= 5;
+    const tsIgnoreFail = tsIgnoreCount >= 15 && tsIgnoreCount / Math.max(sampleSources.length, 1) > 0.02;
+
     const evidence: string[] = [];
     const nothingToTest =
       sampleTests.length === 0 && (ctx.sourceFiles.length === 0 || (ctx.sourceFiles.length < 3 && ctx.stack.languages.length === 0));
+    // A test command runs, but its files could not be identified: nothing to scan, and no verdict.
+    const unseenSuite = sampleTests.length === 0 && testCommands.length > 0;
     if (nothingToTest) {
       evidence.push('No source code detected — nothing to scan');
+    } else if (unseenSuite) {
+      evidence.push(`The files \`${testCommands[0]!.command}\` runs could not be identified, so they were not scanned`);
     } else if (sampleTests.length === 0) {
       evidence.push('No test files to scan');
     } else {
-      evidence.push(`Scanned ${sampleTests.length} test file(s) and ${sampleSources.length} source file(s)`);
+      const of = (read: number, total: number): string => (read < total ? `${read} of ${total}` : String(read));
+      evidence.push(`Scanned ${of(sampleTests.length, allTestFiles.length)} test file(s) and ${of(sampleSources.length, ctx.sourceFiles.length)} source file(s)`);
     }
     if (onlyHits.length > 0) evidence.push(`.only() left in tests (${onlyHits.length}): ${onlyHits.slice(0, 3).join(', ')}`);
     if (emptyTestHits.length > 0) evidence.push(`Empty test blocks (${emptyTestHits.length}): ${emptyTestHits.slice(0, 3).join(', ')}`);
@@ -302,20 +343,19 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     if (tsIgnoreCount > 0 || eslintDisableCount > 0) {
       evidence.push(`Suppressions in ${sampleSources.length} source file(s): ${tsIgnoreCount} @ts-ignore/@ts-nocheck, ${eslintDisableCount} lint/type suppressions`);
     }
-    if (tsIgnoreCount >= 5) {
+    if (tsIgnoreWarn) {
       const worst = tsIgnoreFiles.sort((a, b) => b.count - a.count).slice(0, 3);
       evidence.push(`@ts-ignore/@ts-nocheck in: ${worst.map((w) => `${w.file} (${w.count})`).join(', ')}`);
     }
 
-    const suppressionRate = sampleSources.length > 0 ? (tsIgnoreCount + eslintDisableCount) / sampleSources.length : 0;
     let status: CheckResult['status'] = 'pass';
-    if (nothingToTest) {
+    if (nothingToTest || unseenSuite) {
       status = 'info';
     } else if (sampleTests.length === 0) {
       status = 'fail';
-    } else if (onlyHits.length > 0 || tautologyHits.length > 0 || emptyTestHits.length >= 2 || tsIgnoreCount >= 15) {
+    } else if (onlyHits.length > 0 || tautologyHits.length > 0 || emptyTestHits.length >= 2 || tsIgnoreFail) {
       status = 'fail';
-    } else if (skipHits.length >= 5 || emptyTestHits.length > 0 || suppressionRate > 0.35 || tsIgnoreCount >= 5) {
+    } else if (skipHits.length >= 5 || emptyTestHits.length > 0 || suppressionRate > 0.35 || tsIgnoreWarn) {
       status = 'warn';
     } else {
       evidence.push('No .only(), empty test blocks, constant tautologies, or heavy suppression sprawl detected');
@@ -335,9 +375,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       qualityFix.en.push('Un-skip or delete the skipped tests listed above; a skipped test that stays is a hole agents learn to dig.');
       qualityFix.pl.push('Włącz lub usuń wymienione wyżej pominięte testy; pominięty test, który zostaje, to furtka, z której agenci nauczą się korzystać.');
     }
-    if (tsIgnoreCount >= 5 || suppressionRate > 0.35) {
+    if (tsIgnoreWarn) {
       qualityFix.en.push('Replace `@ts-ignore` in the files listed above with proper narrowing, or with `@ts-expect-error` plus a reason so it fails once the cause is gone.');
       qualityFix.pl.push('Zastąp `@ts-ignore` w wymienionych plikach właściwym zawężaniem typów albo `@ts-expect-error` z uzasadnieniem, aby zgłaszał błąd, gdy przyczyna zniknie.');
+    } else if (suppressionRate > 0.35) {
+      qualityFix.en.push(`${eslintDisableCount} lint/type suppression comments in ${sampleSources.length} files: remove the ones that hide a real problem and give each one that stays a reason. A suppression only means something when the linter it silences runs.`);
+      qualityFix.pl.push(`${eslintDisableCount} komentarzy wyciszających linter/typy w ${sampleSources.length} plikach: usuń te, które ukrywają realny problem, a pozostałym dodaj uzasadnienie. Wyciszenie ma sens tylko wtedy, gdy wyciszany linter faktycznie działa.`);
     }
 
     results.push({

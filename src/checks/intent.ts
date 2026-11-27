@@ -181,6 +181,29 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         },
         docsPath: 'workflows/harness/agent-ready-codebase/',
       });
+    } else if (ctx.brief.pointer) {
+      const { from, to } = ctx.brief.pointer;
+      results.push({
+        id: 'intent.single-source',
+        station: 'intent',
+        weight: 20,
+        status: 'pass',
+        severity: 'low',
+        title: {
+          en: 'Single source of truth for agent instructions',
+          pl: 'Jedno źródło prawdy dla instrukcji agentów',
+        },
+        evidence: [`${from} (${from === 'AGENTS.md' ? agentsLines : claudeLines} lines) only sends the reader to ${to} (${to === 'AGENTS.md' ? agentsLines : claudeLines} lines) — one source, two entry points`],
+        why: {
+          en: 'A pointer file gives every tool an entry point without a second copy of the rules.',
+          pl: 'Plik-wskaźnik daje każdemu narzędziu punkt wejścia bez drugiej kopii zasad.',
+        },
+        fix: {
+          en: `Keep ${from} a pointer. Codex and Cursor follow a "read ${to}" line; Claude Code needs a bare \`@AGENTS.md\` import when the brief lives in AGENTS.md.`,
+          pl: `Zostaw ${from} jako wskaźnik. Codex i Cursor pójdą za linią „przeczytaj ${to}”; Claude Code wymaga gołego importu \`@AGENTS.md\`, gdy instrukcje są w AGENTS.md.`,
+        },
+        docsPath: 'workflows/harness/agent-ready-codebase/',
+      });
     } else if (hasAgentsMd && hasClaudeMd) {
       const imp = hasBareAgentsImport(claudeText);
       if (imp.bare && claudeLines <= 45) {
@@ -316,7 +339,11 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
           en: 'Single source of truth for agent instructions',
           pl: 'Jedno źródło prawdy dla instrukcji agentów',
         },
-        evidence: [`Only ${named('CLAUDE.md', claudeLink)} (${claudeLines} lines) found — Codex and Cursor do not read CLAUDE.md natively`],
+        evidence: [
+          hasLegacyCursorRules
+            ? `Only ${named('CLAUDE.md', claudeLink)} (${claudeLines} lines) and the legacy .cursorrules — Codex reads neither`
+            : `Only ${named('CLAUDE.md', claudeLink)} (${claudeLines} lines) found — Codex and Cursor do not read CLAUDE.md natively`,
+        ],
         why: {
           en: 'Putting shared instructions only in CLAUDE.md leaves Codex and Cursor users without project context.',
           pl: 'Umieszczenie wspólnych instrukcji wyłącznie w CLAUDE.md pozbawia użytkowników Codexa i Cursora kontekstu projektu.',
@@ -332,7 +359,8 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
 
   // 3. intent.instruction-budget
   {
-    const primaryFile = hasAgentsMd ? 'AGENTS.md' : hasClaudeMd ? 'CLAUDE.md' : undefined;
+    // The file that holds the brief: behind a pointer, the file it points to.
+    const primaryFile = ctx.brief.pointer?.to ?? (hasAgentsMd ? 'AGENTS.md' : hasClaudeMd ? 'CLAUDE.md' : undefined);
     if (!primaryFile) {
       results.push({
         id: 'intent.instruction-budget',

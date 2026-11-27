@@ -154,14 +154,22 @@ describe('scoring engine & level gating caps', () => {
     expect(caps.some((c) => c.cappedTo === 2 && c.triggeredBy.includes('intent.instructions-file'))).toBe(true);
   });
 
-  it('takes 5 points per critical finding, 15 at most, and gives them back in the impact', () => {
-    const critical = (id: string, station: StationId): CheckResult => ({ ...makeCheck(id, station, 'fail', 50), severity: 'critical' });
+  it('takes 5 points per missing foundation and 15 for a security blocker, 20 at most, and returns them in the impact', () => {
+    const critical = (id: string, station: StationId, meta?: Record<string, unknown>): CheckResult => ({
+      ...makeCheck(id, station, 'fail', 50, meta),
+      severity: 'critical',
+    });
     const two = [critical('a', 'intent'), critical('b', 'loop'), makeCheck('c', 'harness', 'fail', 50)];
-    expect(criticalPenalty(two)).toEqual({ points: 10, perCheck: 5, checks: ['a', 'b'] });
+    expect(criticalPenalty(two).points).toBe(10);
+    expect(criticalPenalty(two).checks).toEqual(['a', 'b']);
 
-    const five = ['a', 'b', 'c', 'd', 'e'].map((id) => critical(id, 'intent'));
-    expect(criticalPenalty(five).points).toBe(15);
-    expect(criticalPenalty(five).perCheck).toBe(3);
+    const leak = [critical('harness.secret-hygiene', 'harness', { hasHardcodedSecrets: true })];
+    expect(criticalPenalty(leak).points).toBe(15);
+
+    // 15 + 5 + 5 + 5 = 30, scaled to the 20-point ceiling.
+    const many = [critical('s', 'harness', { hasHardcodedSecrets: true }), critical('a', 'intent'), critical('b', 'loop'), critical('c', 'release')];
+    expect(criticalPenalty(many).points).toBe(20);
+    expect(criticalPenalty(many).perCheck.get('s')).toBe(10);
 
     // One station with one critical failing check: its whole weight plus the penalty comes back.
     const lone = [critical('intent.instructions-file', 'intent')];

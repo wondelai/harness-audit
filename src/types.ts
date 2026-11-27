@@ -98,7 +98,10 @@ export interface StackInfo {
 export interface GitStats {
   isGitRepo: boolean;
   branch?: string;
+  /** People (not bots or coding agents) who authored a commit in the last 90 days. */
   gitAuthors90d: number;
+  /** People in the last 3,000 commits: who a quiet repository belongs to. */
+  authorsAllTime: number;
   commits30d: number;
   remoteName?: string;
 }

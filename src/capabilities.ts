@@ -290,6 +290,19 @@ function parseRecipes(text: string, tool: RecipeBook['tool']): RecipeBook {
 /** A checked-in script a command line runs: `./scripts/ci.sh`, `bash scripts/test-kit.sh`, `node scripts/check.mjs`. */
 const SCRIPT_FILE = /(?:^|[\s"'=])(?:\.\/)?((?:scripts?|bin|ci|tools|\.github\/scripts)\/[\w./-]+)/;
 
+/** Tools that ship: a command that runs one is a deploy, not a check. */
+export const DEPLOY_TOOL =
+  /\b(?:wrangler\s+(?:deploy|publish|pages\s+deploy|versions\s+deploy|d1\s+(?:migrations\s+apply|execute)\s+[^\n]*--remote)|opennextjs-cloudflare\s+deploy|vercel\s+(?:deploy|--prod)|netlify\s+deploy|flyctl\s+deploy|fly\s+deploy|gcloud\s+(?:run|app|functions)\s+deploy|kubectl\s+apply|helm\s+upgrade|terraform\s+apply|cdk\s+deploy|sst\s+deploy|serverless\s+deploy|firebase\s+deploy|npm\s+publish|pnpm\s+publish|bun\s+publish|cargo\s+publish|twine\s+upload|gh\s+release\s+create|aws\s+s3\s+sync|docker\s+push|eas\s+submit|fastlane\s+(?:\S+\s+)?(?:release|deploy|beta|upload\w*))\b/;
+
+/** The command line runs a deploy tool for real: not a dry run, not a tool name inside a quoted message. */
+export function runsDeployTool(cmd: string): boolean {
+  const hit = DEPLOY_TOOL.exec(cmd);
+  if (!hit || /--dry-run\b|--dry\b/.test(cmd)) return false;
+  const before = cmd.slice(0, hit.index);
+  const quotes = (ch: string): number => before.split(ch).length - 1;
+  return quotes("'") % 2 === 0 && quotes('"') % 2 === 0;
+}
+
 export class CommandClassifier {
   private readonly scripts: Scripts;
   private readonly books: RecipeBook[] = [];
@@ -346,7 +359,9 @@ export class CommandClassifier {
   classifyFile(file: string, seen: Set<string> = new Set()): Set<VerifyKind> {
     const key = `file:${file}`;
     const base = file.split('/').pop()!.replace(/\.[a-z]+$/, '');
-    const kinds = new Set<VerifyKind>(kindsFromName(base.split(/[-_.]/)[0]!));
+    // Only a name that says test, lint or typecheck speaks for the file; `build_dataset.py` is a program, not a build.
+    const stem = base.split(/[-_.]/)[0]!;
+    const kinds = new Set<VerifyKind>(/^(tests?|lint|typecheck)$/.test(stem) ? kindsFromName(stem) : []);
     if (seen.has(key) || seen.size > 24) return kinds;
     seen.add(key);
     // Only shell scripts are read line by line; a .mjs/.py program is judged by its name.
@@ -356,6 +371,31 @@ export class CommandClassifier {
       }
     }
     return kinds;
+  }
+
+  /**
+   * Whether running the command ships something for real, following package scripts and shell
+   * scripts. A `--dry-run` invocation and a script that only refuses (`exit 1`) do not.
+   */
+  deploys(commandLine: string, seen: Set<string> = new Set()): boolean {
+    for (const part of commandLine.split(/&&|\|\||;|\n/)) {
+      const cmd = part.trim().replace(/^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+/, '');
+      if (!cmd || /^(#|echo\b|printf\b)/.test(cmd)) continue;
+      if (runsDeployTool(cmd)) return true;
+      for (const name of scriptsCalledBy(cmd, this.scripts)) {
+        const key = `deploy:script:${name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        const body = this.scripts[name]!;
+        if (!/\bexit\s+1\b/.test(body) && this.deploys(body, seen)) return true;
+      }
+      const scriptFile = SCRIPT_FILE.exec(cmd)?.[1];
+      if (scriptFile && /\.(sh|bash|zsh)$/.test(scriptFile) && !seen.has(scriptFile) && this.ctx.hasFile(scriptFile)) {
+        seen.add(scriptFile);
+        if ((this.ctx.readText(scriptFile) ?? '').split(/\r?\n/).some((line) => this.deploys(line, seen))) return true;
+      }
+    }
+    return false;
   }
 
   classifyScript(name: string, seen: Set<string> = new Set()): Set<VerifyKind> {
@@ -455,6 +495,8 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   const add = (command: string, kinds: Iterable<VerifyKind>, source: string): void => {
     const sorted = sortKinds(kinds);
     if (sorted.length === 0 || commands.some((c) => c.command === command)) return;
+    // A command that builds on its way to a deploy is a deploy.
+    if (classifier.deploys(command)) return;
     commands.push({ command, kinds: sorted, source });
   };
 
@@ -544,7 +586,10 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
     if (!text) continue;
     for (const cmd of quotedCommands(text, (p) => ctx.hasFile(p))) {
       const kinds = sortKinds(classifier.classify(cmd));
-      if (kinds.length === 0 || documented.some((d) => d.command === cmd)) continue;
+      if (kinds.length === 0 || documented.some((d) => d.command === cmd) || classifier.deploys(cmd)) continue;
+      // A quoted command counts as a verify command when it tests or checks; a bare build or a
+      // data-processing program the brief mentions is not something to hand to CI.
+      if (!kinds.some((k) => k === 'test' || k === 'lint' || k === 'typecheck')) continue;
       documented.push({ command: cmd, kinds, source: briefFile });
     }
   }
@@ -578,18 +623,38 @@ export function minimalVerifySet(caps: VerifyCapabilities): string[] {
 }
 
 /**
- * Commands that ship from a local checkout: deploy and publish package scripts (unless the script
- * only refuses, e.g. `echo … && exit 1`) and the platform CLI the repository is configured for.
+ * Commands that ship from a local checkout: package scripts whose body runs a deploy tool (whatever
+ * the script is called), checked-in deploy shell scripts, and the platform CLI the repository is
+ * configured for. A script that only refuses (`echo … && exit 1`) or tails logs is not one.
  */
 export function localDeployCommands(ctx: RepoContext): string[] {
+  const classifier = new CommandClassifier(ctx);
   const scripts = ctx.packageJson?.scripts ?? {};
   const run = scriptRunner(ctx);
   const commands = Object.entries(scripts)
-    .filter(([name, body]) => /^(deploy|publish)([:._-].*)?$/.test(name) && !/\bexit\s+1\b/.test(body))
+    .filter(([, body]) => !/\bexit\s+1\b/.test(body) && classifier.deploys(body))
+    // Production first: when the list is cut for display, the dangerous one stays.
+    .sort(([a], [b]) => Number(/prod/.test(b)) - Number(/prod/.test(a)))
+    .slice(0, 5)
     .map(([name]) => run(name));
-  if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json'])) commands.push('npx wrangler deploy');
-  if (ctx.hasAnyFile(['vercel.json'])) commands.push('npx vercel --prod');
-  if (ctx.hasAnyFile(['fly.toml'])) commands.push('fly deploy');
-  if (ctx.hasAnyFile(['netlify.toml'])) commands.push('npx netlify deploy --prod');
-  return commands;
+
+  for (const file of ctx.findFiles((f) => /(^|\/)deploy[\w.-]*\.(sh|bash)$/.test(f) && f.split('/').length <= 3).slice(0, 3)) {
+    if ((ctx.readText(file) ?? '').split(/\r?\n/).some((line) => classifier.deploys(line))) commands.push(`./${file}`);
+  }
+  // A Worker anywhere in the workspace can be deployed with the platform CLI.
+  const workerConfigs = ctx.findFiles(
+    (f) => /(^|\/)wrangler\.(toml|jsonc|json)$/.test(f) && f.split('/').length <= 3 && !/(^|\/)(examples?|templates?|fixtures?|tests?|docs?)\//.test(f),
+  );
+  if (workerConfigs.length > 0) commands.push('npx wrangler deploy');
+  if (ctx.hasFile('vercel.json')) commands.push('npx vercel --prod');
+  if (ctx.hasFile('fly.toml')) commands.push('fly deploy');
+  if (ctx.hasFile('netlify.toml')) commands.push('npx netlify deploy --prod');
+  // Deploy commands the brief itself spells out (a manual `wrangler pages deploy`, a remote migration).
+  for (const briefFile of ['AGENTS.md', 'CLAUDE.md']) {
+    for (const quoted of quotedCommands(ctx.readText(briefFile) ?? '', (p) => ctx.hasFile(p))) {
+      const tool = DEPLOY_TOOL.exec(quoted)?.[0].replace(/\s+/g, ' ');
+      if (tool && !/--dry-run\b/.test(quoted)) commands.push(/^(wrangler|vercel|netlify)\b/.test(tool) ? `npx ${tool}` : tool);
+    }
+  }
+  return [...new Set(commands)];
 }

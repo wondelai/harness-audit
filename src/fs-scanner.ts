@@ -299,6 +299,7 @@ export class RepoContext {
   private verifyCache: VerifyCapabilities | undefined = undefined;
   private ciCache: CiFacts | undefined = undefined;
   private briefCache: BriefFacts | undefined = undefined;
+  private workspaceCache: Array<{ path: string; manifest: PackageJsonShape }> | undefined = undefined;
 
   constructor(repoPath: string) {
     this.root = resolve(repoPath);
@@ -413,10 +414,28 @@ export class RepoContext {
     return this.pkgCache;
   }
 
+  /**
+   * package.json files of workspace members (apps/*, packages/*, …), where a monorepo keeps its
+   * frameworks, test runners and dev servers. Example, template and fixture packages are not members.
+   */
+  get workspaceManifests(): Array<{ path: string; manifest: PackageJsonShape }> {
+    if (this.workspaceCache) return this.workspaceCache;
+    this.workspaceCache = this.files
+      .filter(
+        (f) =>
+          /^(?:[^/]+\/){1,3}package\.json$/.test(f) &&
+          !/(^|\/)(examples?|templates?|fixtures?|tests?|__tests__|e2e|docs?|scripts?|vendor)\//.test(f),
+      )
+      .slice(0, 40)
+      .map((path) => ({ path, manifest: this.readJson<PackageJsonShape>(path) }))
+      .filter((m): m is { path: string; manifest: PackageJsonShape } => m.manifest !== null);
+    return this.workspaceCache;
+  }
+
+  /** A dependency of the root package or of any workspace member. */
   hasDependency(name: string): boolean {
-    const pkg = this.packageJson;
-    if (!pkg) return false;
-    return Boolean(pkg.dependencies?.[name] || pkg.devDependencies?.[name]);
+    const declares = (pkg: PackageJsonShape | null): boolean => Boolean(pkg?.dependencies?.[name] || pkg?.devDependencies?.[name]);
+    return declares(this.packageJson) || this.workspaceManifests.some((m) => declares(m.manifest));
   }
 
   hasAnyDependency(names: string[]): string | undefined {
@@ -496,9 +515,22 @@ export class RepoContext {
     return this.git.gitAuthors90d === 1 ? 'solo' : 'team';
   }
 
-  /** No second human to review: advice that needs a reviewer does not apply. */
+  /**
+   * No second human to review, so advice that needs a reviewer does not apply. A repository with
+   * no recent commits is judged by who ever worked on it: a quiet fork of a 30-author project is
+   * not a solo project.
+   */
   get isSolo(): boolean {
-    return this.team === 'solo' || this.team === 'inactive';
+    if (this.team === 'inactive') return this.git.authorsAllTime <= 1;
+    return this.team === 'solo';
+  }
+
+  /** "One active contributor" / "No commits in the last 90 days (12 authors in the history)". */
+  get teamLabel(): string {
+    if (this.team === 'inactive') {
+      return `No commits in the last 90 days (${this.git.authorsAllTime} author${this.git.authorsAllTime === 1 ? '' : 's'} in the history)`;
+    }
+    return this.team === 'solo' ? 'One active contributor' : `${this.git.gitAuthors90d} active contributors`;
   }
 
   /**
@@ -652,6 +684,7 @@ function detectStack(ctx: RepoContext): StackInfo {
       ['prisma', 'Prisma'],
     ];
     for (const [dep, label] of fwMap) {
+      // hasDependency reads the workspace members too: a monorepo's frameworks live in apps/*.
       if (ctx.hasDependency(dep)) frameworks.add(label);
     }
 
@@ -842,8 +875,8 @@ function detectStack(ctx: RepoContext): StackInfo {
   };
 }
 
-const AUTOMATION_EMAIL = /\[bot\]|noreply@anthropic\.com|@cursor\.com$|^cursoragent@|copilot|devin-ai|github-actions|dependabot|renovate|^bot@|[-.]bot@|^action@github\.com$|^codex@|noreply@openai\.com/;
-const AUTOMATION_NAME = /^(claude|codex|cursor agent|copilot|devin|github-actions|dependabot|renovate|semantic-release)\b/;
+const AUTOMATION_EMAIL = /\[bot\]|noreply@anthropic\.com|@cursor\.com$|^cursoragent@|copilot|devin-ai|github-actions|dependabot|renovate|(^|[-.+_])bot([-.+_]|@)|^action@github\.com$|^codex@|noreply@openai\.com/;
+const AUTOMATION_NAME = /^(claude|codex|cursor agent|copilot|devin|github-actions|dependabot|renovate|semantic-release)\b|\[bot\]|(^|[-_ ])bot$/;
 
 function detectGitStats(root: string): GitStats {
   try {
@@ -853,7 +886,7 @@ function detectGitStats(root: string): GitStats {
       timeout: 3000,
     });
   } catch {
-    return { isGitRepo: false, gitAuthors90d: 0, commits30d: 0 };
+    return { isGitRepo: false, gitAuthors90d: 0, authorsAllTime: 0, commits30d: 0 };
   }
 
   let branch: string | undefined;
@@ -868,30 +901,30 @@ function detectGitStats(root: string): GitStats {
     branch = undefined;
   }
 
-  let gitAuthors90d = 0;
-  try {
-    const out = execFileSync(
-      'git',
-      ['log', '--since=90 days ago', '--format=%ae%x09%an', '--no-merges'],
-      {
+  // People only, one per person: a coding agent or a bot that authors a commit is not a second
+  // reviewer, and one person committing under two addresses is still one person.
+  const countPeople = (args: string[]): number => {
+    try {
+      const out = execFileSync('git', ['log', ...args, '--format=%ae%x09%an', '--no-merges'], {
         cwd: root,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
-        timeout: 4000,
-      },
-    );
-    // People only: a coding agent or a bot that authors a commit is not a second reviewer.
-    const authors = new Set(
-      out
-        .split('\n')
-        .map((line) => line.trim().toLowerCase().split('\t'))
-        .filter(([email, name]) => Boolean(email) && !AUTOMATION_EMAIL.test(email!) && !AUTOMATION_NAME.test(name ?? ''))
-        .map(([email]) => email!),
-    );
-    gitAuthors90d = authors.size;
-  } catch {
-    gitAuthors90d = 0;
-  }
+        timeout: 5000,
+        maxBuffer: 32 * 1024 * 1024,
+      });
+      const byEmail = new Map<string, string>();
+      for (const line of out.split('\n')) {
+        const [email, name = ''] = line.trim().toLowerCase().split('\t');
+        if (!email || AUTOMATION_EMAIL.test(email) || AUTOMATION_NAME.test(name)) continue;
+        byEmail.set(email, name || email);
+      }
+      return new Set(byEmail.values()).size;
+    } catch {
+      return 0;
+    }
+  };
+  const gitAuthors90d = countPeople(['--since=90 days ago']);
+  const authorsAllTime = Math.max(gitAuthors90d, countPeople(['-n', '3000']));
 
   let commits30d = 0;
   try {
@@ -910,6 +943,7 @@ function detectGitStats(root: string): GitStats {
     isGitRepo: true,
     branch,
     gitAuthors90d,
+    authorsAllTime,
     commits30d,
   };
 }

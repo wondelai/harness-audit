@@ -181,10 +181,25 @@ export function planInit(ctx: RepoContext, options: InitOptions = {}): InitActio
   const force = Boolean(options.force);
   const tools = toolsFor(ctx, options);
 
-  const candidates: Array<{ path: string; content: string }> = [{ path: 'AGENTS.md', content: buildAgentsMd(ctx) }];
+  const candidates: Array<{ path: string; content: string }> = [];
+  const advice: InitAction[] = [];
+
+  // CLAUDE.md already holds the brief: a generated AGENTS.md beside it would be a second, emptier
+  // source. The move is the owner's (it rewrites their file), so init says how and writes nothing.
+  const claudeOnly = existsSync(join(ctx.root, 'CLAUDE.md')) && !existsSync(join(ctx.root, 'AGENTS.md'));
+  if (claudeOnly) {
+    advice.push({
+      path: 'AGENTS.md',
+      action: 'skip',
+      reason: 'CLAUDE.md already holds the brief. To serve Codex and Cursor too: `git mv CLAUDE.md AGENTS.md`, then create a one-line CLAUDE.md containing `@AGENTS.md`',
+      content: '',
+    });
+  } else {
+    candidates.push({ path: 'AGENTS.md', content: buildAgentsMd(ctx) });
+  }
 
   if (tools.includes('claude-code')) {
-    candidates.push({ path: 'CLAUDE.md', content: buildClaudeMd() });
+    if (!claudeOnly) candidates.push({ path: 'CLAUDE.md', content: buildClaudeMd() });
     candidates.push({ path: '.claude/rules/testing.md', content: buildClaudeTestingRule(ctx) });
     candidates.push({ path: '.claude/settings.json', content: buildClaudeSettings(ctx) });
   }
@@ -203,7 +218,12 @@ export function planInit(ctx: RepoContext, options: InitOptions = {}): InitActio
     candidates.push({ path: '.github/pull_request_template.md', content: buildPrTemplate(ctx) });
   }
 
-  return candidates.map((item) => {
+  const ci = buildCiWorkflow(ctx);
+  if (ci) candidates.push({ path: '.github/workflows/ci.yml', content: ci });
+
+  return [...advice, ...candidates.map(planOne)];
+
+  function planOne(item: { path: string; content: string }): InitAction {
     // On disk, not just in the scan: a gitignored local file must not be overwritten either.
     const alreadyExists = existsSync(join(ctx.root, item.path));
     if (alreadyExists && !force) {
@@ -211,7 +231,47 @@ export function planInit(ctx: RepoContext, options: InitOptions = {}): InitActio
     }
     const action: InitAction['action'] = alreadyExists ? 'overwrite' : 'create';
     return { path: item.path, action, reason: `would ${action}`, content: item.content };
-  });
+  }
+}
+
+/**
+ * A pull-request gate for a JavaScript repository that has no CI at all, built from the install
+ * and verify commands the audit detected. Other stacks need a toolchain setup this tool cannot
+ * guess safely, so they get the advice in the report instead of a file.
+ */
+function buildCiWorkflow(ctx: RepoContext): string | undefined {
+  if (ctx.ci.files.length > 0 || !ctx.packageJson) return undefined;
+  const verify = minimalVerifySet(ctx.verify);
+  const pm = ctx.stack.packageManagers.find((p) => p in INSTALL_COMMAND && ['bun', 'pnpm', 'yarn', 'npm'].includes(p));
+  if (verify.length === 0 || !pm) return undefined;
+  const nodeVersion = ctx.hasFile('.node-version') ? 'node-version-file: .node-version' : ctx.hasFile('.nvmrc') ? 'node-version-file: .nvmrc' : 'node-version: 22';
+  const setup =
+    pm === 'bun'
+      ? ['      - uses: oven-sh/setup-bun@v2']
+      : [
+          ...(pm === 'pnpm' ? ['      - uses: pnpm/action-setup@v4'] : []),
+          '      - uses: actions/setup-node@v4',
+          '        with:',
+          `          ${nodeVersion}`,
+        ];
+  return [
+    'name: CI',
+    '',
+    'on:',
+    '  pull_request:',
+    '  push:',
+    '    branches: [main, master]',
+    '',
+    'jobs:',
+    '  verify:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - uses: actions/checkout@v4',
+    ...setup,
+    `      - run: ${INSTALL_COMMAND[pm]}`,
+    ...verify.map((c) => `      - run: ${c}`),
+    '',
+  ].join('\n');
 }
 
 export function initHarness(repoPath: string, options: InitOptions = {}): InitResult {

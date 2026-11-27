@@ -453,16 +453,16 @@ describe('people, briefs and boundaries', () => {
     label.write('CLAUDE.md', '# App\n\nPrompts are fetched with the `production` label from the prompt store.\nA\nB\nC\n');
     const none = check(auditRepo(label.dir), 'harness.sandbox-readiness');
     expect(none.status).toBe('fail');
-    expect(none.evidence.join('\n')).toContain('names no production or shared resource');
+    expect(none.evidence.join('\n')).toContain('Found no sentence in CLAUDE.md that forbids or reserves an action on production');
 
     const rule = temp('ha-boundary-rule-');
     rule.write('CLAUDE.md', '# App\n\n- Never run `wrangler deploy` or a `--remote` migration from a local session.\nA\nB\nC\n');
     rule.write('Dockerfile', 'FROM node:24\n');
     const some = check(auditRepo(rule.dir), 'harness.sandbox-readiness');
     expect(some.status).toBe('warn');
-    expect(some.evidence.join('\n')).toContain('states a boundary: "Never run `wrangler deploy`');
-    // The product image is not a place agents run in, and the fix asks only for what is missing.
-    expect(some.evidence.join('\n')).toContain('Dockerfile exists but the brief does not use it');
+    expect(some.evidence.join('\n')).toContain('Boundary rule at CLAUDE.md:3: "Never run `wrangler deploy`');
+    // The product's Dockerfile is not a place agents run in, and the fix asks only for what is missing.
+    expect(some.evidence.join('\n')).toContain('No agent sandbox configured');
     expect(some.fix.en).toContain('OS-level boundary');
     expect(some.fix.en).not.toContain('must never touch');
   });
@@ -560,5 +560,220 @@ describe('init follows the repository', () => {
     expect(rule).not.toContain('*.spec.*');
     const template = plan.actions.find((a) => a.path === '.github/pull_request_template.md')!.content;
     expect(template).toContain('| `swift test` | |');
+  });
+});
+
+describe('weak evidence is no claim', () => {
+  it('fails the boundary check when local development reaches production', () => {
+    const repo = temp('ha-reach-');
+    repo.write('package.json', JSON.stringify({ name: 'api', scripts: { dev: 'wrangler dev --remote' } }));
+    repo.write('CLAUDE.md', '# API\n\nLocal API talks to production D1, R2, and secrets.\nNever force-push to main.\nA\nB\n');
+    const sandbox = check(auditRepo(repo.dir), 'harness.sandbox-readiness');
+    expect(sandbox.status).toBe('fail');
+    expect(sandbox.severity).toBe('high');
+    expect(sandbox.evidence.join('\n')).toContain('CLAUDE.md:3 says local work reaches production');
+    expect(sandbox.fix.en).toContain('local or preview bindings');
+  });
+
+  it('needs the prohibition and the production word in one sentence, close together', () => {
+    const repo = temp('ha-farapart-');
+    repo.write(
+      'CLAUDE.md',
+      [
+        '# Farm',
+        '',
+        '5. The cron pokes stale claims that never settled, bumps their timestamp so a backlog is not re-poked, launches pending jobs, and later a separate worker may publish the finished articles.',
+        'Develop on local Miniflare (`bun run dev`); reach for `--remote` deliberately, to diagnose.',
+        "Don't commit secrets. Use env files.",
+        '',
+      ].join('\n'),
+    );
+    repo.write('package.json', JSON.stringify({ name: 'farm', scripts: { dev: 'wrangler dev', 'dev:remote': 'wrangler dev --remote' } }));
+    const sandbox = check(auditRepo(repo.dir), 'harness.sandbox-readiness');
+    const text = sandbox.evidence.join('\n');
+    expect(text).toContain('Found no sentence in CLAUDE.md that forbids or reserves an action on production');
+    // An explicit dev:remote script is an opt-in, not "local dev reaches production".
+    expect(text).not.toContain('reaches production');
+    expect(text).not.toContain('remote bindings');
+
+    repo.write('CLAUDE.md', '# Farm\n\nDeploys: `.github/workflows/deploy.yml` is the only path. Every `--remote` command writes production D1.\nA\nB\n');
+    expect(check(auditRepo(repo.dir), 'harness.sandbox-readiness').evidence.join('\n')).toContain('Boundary rule at CLAUDE.md:3');
+  });
+
+  it('claims a git-triggered deploy only when someone wrote that down', () => {
+    const brand = temp('ha-brand-');
+    brand.write('package.json', JSON.stringify({ name: 'app', dependencies: { ai: '^5.0.0' } }));
+    brand.write('AGENTS.md', '# App\n\nBuilt with the Vercel AI SDK and Netlify-style functions.\nA\nB\nC\n');
+    expect(evidence(auditRepo(brand.dir), 'release.deploy-safety')).toBe('No deploy workflow or local deploy command detected');
+
+    const written = temp('ha-written-');
+    written.write('package.json', JSON.stringify({ name: 'app' }));
+    written.write('AGENTS.md', '# App\n\nWorkers Builds deploys master after merge; nothing deploys from a laptop.\nA\nB\nC\n');
+    const said = check(auditRepo(written.dir), 'release.deploy-safety');
+    expect(said.status).toBe('pass');
+    expect(said.evidence[0]).toContain('AGENTS.md:3 mentions a git-triggered deploy');
+  });
+
+  it('finds deploy commands by what they run, whatever they are called', () => {
+    const repo = temp('ha-deploynames-');
+    repo.write(
+      'package.json',
+      JSON.stringify({
+        name: 'app',
+        scripts: {
+          'update:production': 'bun run build && wrangler deploy --env production',
+          'deploy:tail': 'wrangler tail',
+          build: 'vite build',
+          test: 'vitest run',
+        },
+      }),
+    );
+    repo.write('cloudrun/deploy.sh', '#!/bin/bash\ngcloud run deploy api --source .\n');
+    repo.write('AGENTS.md', '# App\n\nShip with `npm run update:production`. Test with `npm test`.\nA\nB\n');
+    const report = auditRepo(repo.dir);
+    const deploy = evidence(report, 'release.deploy-safety');
+    expect(deploy).toContain('npm run update:production');
+    expect(deploy).toContain('./cloudrun/deploy.sh');
+    expect(deploy).not.toContain('deploy:tail');
+    // A command that ships is never offered as a verify command.
+    expect(report.stack.verifyCommands.join(' ')).not.toContain('update:production');
+  });
+
+  it('counts the files a test command runs even when nothing is named like a test', () => {
+    const repo = temp('ha-fixtures-');
+    repo.write('package.json', JSON.stringify({ name: 'site', scripts: { test: 'bun scripts/url-fixtures/run.ts && bun scripts/tracking-fixtures/run.ts' } }));
+    repo.write('scripts/url-fixtures/run.ts', 'if (slug("A b") !== "a-b") process.exit(1);\n');
+    repo.write('scripts/tracking-fixtures/run.ts', 'if (!event) process.exit(1);\n');
+    for (let i = 0; i < 12; i++) repo.write(`src/page${i}.ts`, 'export {};\n');
+    const report = auditRepo(repo.dir);
+    const tests = check(report, 'verification.unit-tests');
+    expect(tests.status).not.toBe('fail');
+    expect(tests.evidence.join('\n')).toContain('2 of them are run by the test command without a test-style name');
+    expect(check(report, 'verification.test-quality-scan').status).toBe('pass');
+  });
+
+  it('measures the brief behind a pointer file', () => {
+    const repo = temp('ha-pointer-');
+    repo.write('AGENTS.md', '# Site\n\nRead CLAUDE.md first.\n');
+    repo.write('CLAUDE.md', `# Site\n\n${Array.from({ length: 22 }, (_, i) => `- Rule ${i}: run \`bun run verify\` before finishing.`).join('\n')}\n`);
+    const report = auditRepo(repo.dir);
+    expect(check(report, 'intent.instruction-budget').status).toBe('pass');
+    expect(evidence(report, 'intent.instruction-budget')).toContain('CLAUDE.md: 24 lines');
+    const single = check(report, 'intent.single-source');
+    expect(single.status).toBe('pass');
+    expect(single.evidence[0]).toContain('AGENTS.md (3 lines) only sends the reader to CLAUDE.md');
+  });
+
+  it('lists every committed credential by variable name and leaves public keys alone', () => {
+    const repo = temp('ha-vars-');
+    repo.write('package.json', JSON.stringify({ name: 'w' }));
+    repo.write('.gitignore', '.env\n.env.local\n.dev.vars\n');
+    const value = (seed: string): string => `${seed}9f8e7d6c5b4a39281706f5e4d3c2b1a0`;
+    const names = ['FAL_KEY', 'AZURE_API_KEY', 'BYPASS_TOKEN', 'IMAGE_SECRET', 'UPSTREAM_API_KEY', 'SIGNING_SECRET', 'BACKUP_TOKEN', 'SEARCH_API_KEY', 'RENDER_KEY', 'QUEUE_TOKEN'];
+    repo.write(
+      'wrangler.toml',
+      ['name = "w"', '[vars]', ...names.map((n, i) => `${n} = "${value(String(i))}"`), 'POSTHOG_PROJECT_KEY = "phc_abcdef1234567890abcdef1234567890"', 'NEXT_PUBLIC_MAPS_KEY = "a1b2c3d4e5f6a7b8c9d0e1f2"', ''].join('\n'),
+    );
+    repo.commit();
+    const secret = check(auditRepo(repo.dir), 'harness.secret-hygiene');
+    const text = secret.evidence.join('\n');
+    expect(secret.status).toBe('fail');
+    expect(text).toContain('wrangler.toml:3 credential in `FAL_KEY` (committed)');
+    // Ten credentials: eight spelled out, the last two still named by line.
+    expect(text).toContain('… and 2 more: wrangler.toml lines 11, 12');
+    expect(text).not.toContain('POSTHOG_PROJECT_KEY');
+    expect(text).not.toContain('NEXT_PUBLIC_MAPS_KEY');
+    expect(text).not.toContain(value('0'));
+  });
+
+  it('does not take a formatter for a linter', () => {
+    const repo = temp('ha-biome-');
+    repo.write('package.json', JSON.stringify({ name: 'app', devDependencies: { '@biomejs/biome': '^2.0.0', typescript: '^6.0.0' } }));
+    repo.write('biome.json', '{ "linter": { "enabled": false }, "formatter": { "enabled": true } }');
+    const lint = check(auditRepo(repo.dir), 'loop.formatter-linter');
+    expect(lint.status).toBe('warn');
+    expect(lint.evidence[0]).toContain('Biome (linter disabled in biome.json)');
+  });
+
+  it('asks each ecosystem for its own lockfile', () => {
+    const repo = temp('ha-pylock-');
+    repo.write('pyproject.toml', '[project]\nname = "core"\nrequires-python = ">=3.12"\ndependencies = ["httpx>=0.27"]\n');
+    repo.write('requirements.txt', 'httpx>=0.27\npandas>=2.0\n');
+    repo.write('demo-site/package.json', JSON.stringify({ name: 'demo' }));
+    repo.write('demo-site/package-lock.json', '{}\n');
+    repo.write('core/main.py', 'print("hi")\n');
+    const lock = check(auditRepo(repo.dir), 'loop.lockfile-reproducibility');
+    expect(lock.status).toBe('warn');
+    expect(lock.evidence.join('\n')).toContain('Python dependencies are not locked');
+  });
+
+  it('reads frameworks and dev servers from workspace members', () => {
+    const repo = temp('ha-workspace-');
+    repo.write('package.json', JSON.stringify({ name: 'mono', private: true, scripts: { dev: 'turbo dev' } }));
+    repo.write('pnpm-workspace.yaml', 'packages:\n  - apps/*\n');
+    repo.write('apps/web/package.json', JSON.stringify({ name: 'web', dependencies: { react: '^19.0.0', vite: '^8.0.0' } }));
+    repo.write('apps/api/package.json', JSON.stringify({ name: 'api', dependencies: { hono: '^5.0.0' } }));
+    repo.write('apps/web/src/main.tsx', 'export {};\n');
+    const report = auditRepo(repo.dir);
+    expect(report.stack.frameworks).toEqual(expect.arrayContaining(['React', 'Hono']));
+    // An app with a dev server and no end-to-end tier is a gap, not "library — nothing to test end to end".
+    expect(check(report, 'verification.e2e-tests').status).toBe('warn');
+    expect(check(report, 'graph.port-and-state-isolation').status).not.toBe('info');
+  });
+
+  it('does not pass Swift reproducibility while remote packages float', () => {
+    const repo = temp('ha-xcodegen-');
+    repo.write('project.yml', 'name: App\npackages:\n  Analytics:\n    url: https://github.com/example/analytics-ios\n    from: 3.9.0\ntargets:\n  App:\n    type: application\n');
+    repo.write('.gitignore', 'Package.resolved\n*.xcodeproj/\n');
+    repo.write('App/Main.swift', 'import SwiftUI\n');
+    repo.write('App/View.swift', 'import SwiftUI\n');
+    const lock = check(auditRepo(repo.dir), 'loop.lockfile-reproducibility');
+    expect(lock.status).not.toBe('pass');
+    expect(lock.evidence.join('\n')).toContain('Remote Swift packages use version ranges');
+  });
+
+  it('treats a missing worktree convention as a smaller gap when nothing local can collide', () => {
+    const cli = temp('ha-cli-');
+    cli.write('package.json', JSON.stringify({ name: 'cli', bin: { cli: 'dist/cli.js' } }));
+    expect(check(auditRepo(cli.dir), 'graph.worktree-isolation').status).toBe('warn');
+
+    const app = temp('ha-app-');
+    app.write('package.json', JSON.stringify({ name: 'app', dependencies: { next: '^16.0.0' } }));
+    expect(check(auditRepo(app.dir), 'graph.worktree-isolation').status).toBe('fail');
+  });
+
+  it('judges a quiet repository by who ever worked on it', () => {
+    const repo = temp('ha-quiet-');
+    repo.write('package.json', JSON.stringify({ name: 'lib' }));
+    repo.commit('ana@example.com', '2025-01-10T10:00:00Z');
+    repo.write('a.txt', 'a\n');
+    repo.commit('ben@example.com', '2025-02-10T10:00:00Z');
+    repo.write('b.txt', 'b\n');
+    repo.commit('cyd@example.com', '2025-03-10T10:00:00Z');
+    const report = auditRepo(repo.dir);
+    expect(report.git.gitAuthors90d).toBe(0);
+    expect(report.git.authorsAllTime).toBe(3);
+    const oracle = check(report, 'verification.oracle-protection');
+    expect(oracle.fix.en).toContain('CODEOWNERS');
+    expect(oracle.fix.en).not.toContain('Solo repo');
+  });
+});
+
+describe('init does not create a second brief', () => {
+  it('leaves a CLAUDE.md-only repository with advice instead of a generic AGENTS.md', () => {
+    const repo = temp('ha-init-claude-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'vitest run', lint: 'oxlint' } }));
+    repo.write('package-lock.json', '{}\n');
+    repo.write('CLAUDE.md', '# App\nRun `npm test`.\nA\nB\nC\n');
+    const plan = initHarness(repo.dir, { dryRun: true });
+    const agents = plan.actions.find((a) => a.path === 'AGENTS.md')!;
+    expect(agents.action).toBe('skip');
+    expect(agents.reason).toContain('git mv CLAUDE.md AGENTS.md');
+    // No CI at all: a pull-request gate built from the detected commands is offered.
+    const ci = plan.actions.find((a) => a.path === '.github/workflows/ci.yml')!;
+    expect(ci.action).toBe('create');
+    expect(ci.content).toContain('- run: npm ci');
+    expect(ci.content).toContain('- run: npm run lint');
+    expect(ci.content).toContain('- run: npm test');
   });
 });

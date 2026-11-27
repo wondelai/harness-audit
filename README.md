@@ -97,7 +97,7 @@ Raw weighted scores map to Levels 0–5 (Dan Shapiro's Autonomy Ladder), **cappe
 
 Every triggered cap is printed explicitly in terminal, Markdown, HTML, and JSON outputs, and the `Next level` block names the gates that apply one level up before you reach them.
 
-A critical finding (no brief, no verify loop, no tests, no CI, a committed credential, a bypassed permission model) also takes 5 points off the overall score, 15 at most, and the report shows the subtraction.
+A critical finding also takes points off the overall score, and the report shows the subtraction: 5 for a missing foundation (no brief, no verify loop, no tests, no CI), 15 for a security blocker (a committed credential, a bypassed permission model), 20 at most.
 
 Each open finding carries the points the overall score gains when it is fixed (`impact` in JSON). The top fixes are ordered: committed credentials and other critical findings first, then the gates of the next level, then by severity and points.
 
