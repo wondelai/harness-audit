@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { auditRepo, initHarness } from '../src/index.js';
 import type { AuditReport, CheckResult } from '../src/types.js';
+import { branchNotes } from '../src/renderers/gates.js';
 import { createTempRepo, type TempRepo } from './fixtures.js';
 
 const repos: TempRepo[] = [];
@@ -539,7 +540,7 @@ describe('lockfiles and deploys', () => {
     repo.write('.claude/settings.json', JSON.stringify({ permissions: { deny: ['Bash(npm run deploy)', 'Bash(npm run deploy:*)'] } }));
     const partial = check(auditRepo(repo.dir), 'release.deploy-safety');
     expect(partial.status).toBe('warn');
-    expect(partial.evidence.join('\n')).toContain('covers some deploy commands but not `npx wrangler deploy`');
+    expect(partial.evidence.join('\n')).toContain('Neither a guard nor a deny rule covers `npx wrangler deploy`');
     expect(partial.evidence.join('\n')).not.toContain('deploy:production');
 
     repo.write('.claude/settings.json', JSON.stringify({ permissions: { deny: ['Bash(npm run deploy:*)', 'Bash(npx wrangler deploy:*)', 'Bash(wrangler deploy:*)'] } }));
@@ -762,6 +763,9 @@ describe('weak evidence is no claim', () => {
 
     const app = temp('ha-app-');
     app.write('package.json', JSON.stringify({ name: 'app', dependencies: { next: '^16.0.0' } }));
+    // A handful of files: a second checkout is a rare need, so the gap is advice.
+    expect(check(auditRepo(app.dir), 'graph.worktree-isolation').status).toBe('warn');
+    for (let i = 0; i < 20; i++) app.write(`src/page${i}.ts`, 'export const page = 1;\n');
     expect(check(auditRepo(app.dir), 'graph.worktree-isolation').status).toBe('fail');
   });
 
@@ -962,7 +966,7 @@ describe('levels rest on what is certain', () => {
     const agents = plan.actions.find((a) => a.path === 'AGENTS.md')!.content;
     expect(agents).toContain('pytest');
     expect(agents).toContain('npm --prefix retriever run test');
-    expect(evidence(report, 'harness.sandbox-readiness')).toContain('retriever/wrangler.jsonc marks 1 binding(s) `remote: true`');
+    expect(evidence(report, 'harness.sandbox-readiness')).toContain('retriever/wrangler.jsonc marks 1 data binding(s) `remote: true` (r2_buckets)');
   });
 });
 
@@ -1063,5 +1067,238 @@ describe('substance, not existence', () => {
     const e2e = check(report, 'verification.e2e-tests');
     expect(e2e.status).toBe('warn');
     expect(e2e.evidence.join('\n')).toContain('targets a deployed URL');
+  });
+});
+
+describe('the repository\'s own words and guards', () => {
+  it('reads a boundary rule written in Polish, and does not take a report of the past for a rule', () => {
+    const pl = temp('ha-polish-');
+    pl.write('package.json', JSON.stringify({ name: 'kolejka' }));
+    pl.write('AGENTS.md', '# Kolejka\n\n- Zmiany przez feature branch i PR. Wdrożenie wyłącznie z czystego main, po walidacji.\nA\nB\nC\n');
+    expect(evidence(auditRepo(pl.dir), 'harness.sandbox-readiness')).toContain('Boundary rule at AGENTS.md:3: "Zmiany przez feature branch i PR. Wdrożenie wyłącznie z czystego main, po walidacji."');
+
+    const past = temp('ha-past-');
+    past.write('package.json', JSON.stringify({ name: 'app' }));
+    past.write('AGENTS.md', '# App\n\nThe first example was never deployed; it stays for history.\nA\nB\nC\n');
+    expect(evidence(auditRepo(past.dir), 'harness.sandbox-readiness')).toContain('Found no sentence in AGENTS.md that forbids or reserves an action on production');
+
+    // The clearest rule is the one quoted, wherever it stands in the file.
+    past.write('AGENTS.md', '# App\n\nDeploys go only through CI.\nNever run `wrangler deploy` against production from a worktree.\nA\nB\n');
+    expect(evidence(auditRepo(past.dir), 'harness.sandbox-readiness')).toContain('Boundary rule at AGENTS.md:4: "Never run `wrangler deploy` against production from a worktree." (+1 more)');
+  });
+
+  it('counts remote bindings that hold data, not comments and not remote-only services', () => {
+    const repo = temp('ha-remote-');
+    repo.write('package.json', JSON.stringify({ name: 'w' }));
+    repo.write(
+      'wrangler.jsonc',
+      '{\n  "name": "w",\n  // remote: true is required for both\n  "ai": { "binding": "AI", "remote": true },\n  "browser": { "binding": "BROWSER", "remote": true }\n}\n',
+    );
+    expect(evidence(auditRepo(repo.dir), 'harness.sandbox-readiness')).not.toContain('remote: true');
+
+    repo.write('wrangler.jsonc', '{ "name": "w", "ai": { "binding": "AI", "remote": true }, "d1_databases": [{ "binding": "DB", "database_id": "x", "remote": true }] }');
+    expect(evidence(auditRepo(repo.dir), 'harness.sandbox-readiness')).toContain('wrangler.jsonc marks 1 data binding(s) `remote: true` (d1_databases)');
+
+    const toml = temp('ha-remote-toml-');
+    toml.write('package.json', JSON.stringify({ name: 'w' }));
+    toml.write('wrangler.toml', 'name = "w"\n# remote = true would reach production\n[ai]\nbinding = "AI"\nremote = true\n\n[[kv_namespaces]]\nbinding = "KV"\nid = "x"\nremote = true # shared\n');
+    expect(evidence(auditRepo(toml.dir), 'harness.sandbox-readiness')).toContain('wrangler.toml marks 1 data binding(s) `remote: true` (kv_namespaces)');
+  });
+
+  it('credits a deploy script that opens with its own guard, and names the Pages command for a Pages project', () => {
+    const repo = temp('ha-guarded-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { deploy: 'bash scripts/assert-main-checkout.sh && npm run verify && wrangler deploy', verify: 'vitest run' } }));
+    repo.write('scripts/assert-main-checkout.sh', '#!/bin/sh\nexit 0\n');
+    repo.write('wrangler.toml', 'name = "app"\n');
+    const guarded = evidence(auditRepo(repo.dir), 'release.deploy-safety');
+    expect(guarded).toContain('`npm run deploy` opens with `bash scripts/assert-main-checkout.sh`, a guard that decides whether this checkout may ship');
+    expect(guarded).toContain('Neither a guard nor a deny rule covers `npx wrangler deploy`');
+    expect(guarded).not.toContain('Nothing stops');
+
+    const pages = temp('ha-pages-');
+    pages.write('package.json', JSON.stringify({ name: 'site', scripts: { deploy: 'astro build && wrangler pages deploy dist --project-name=site' } }));
+    pages.write('wrangler.toml', 'name = "site"\npages_build_output_dir = "./dist"\n');
+    const shipped = evidence(auditRepo(pages.dir), 'release.deploy-safety');
+    expect(shipped).toContain('`npx wrangler pages deploy`');
+    expect(shipped).not.toContain('`npx wrangler deploy`');
+    const settings = initHarness(pages.dir, { dryRun: true, tools: ['claude-code'] }).actions.find((a) => a.path === '.claude/settings.json')!.content;
+    expect(settings).toContain('Bash(npx wrangler pages deploy:*)');
+    expect(settings).toContain('Read(./.env.local)');
+    expect(settings).not.toContain('Read(./.env.*)"');
+  });
+
+  it('follows a brief that sends its reader to the README, and names the brief that exists', () => {
+    const repo = temp('ha-readme-hop-');
+    repo.write('package.json', JSON.stringify({ name: 'site', scripts: { verify: 'vitest run && eslint .', build: 'astro build' }, devDependencies: { eslint: '^9.0.0' } }));
+    repo.write('CLAUDE.md', '# Site\n\n**[README.md](README.md)** — read it first.\n\nBuild with `npm run build`.\nA\nB\n');
+    repo.write('README.md', '# Site\n\nRun `npm run verify` before you finish.\n');
+    repo.write('src/a.test.ts', "it('adds', () => { expect(1 + 1).toBe(2); });\n");
+    const loop = check(auditRepo(repo.dir), 'loop.single-command-verify');
+    expect(loop.evidence.join('\n')).toContain('CLAUDE.md sends agents to README.md, which quotes 1 verify command(s), e.g. `npm run verify`');
+    expect(loop.status).toBe('pass');
+
+    repo.write('CLAUDE.md', '# Site\n\nBuild with `npm run build`.\nA\nB\nC\n');
+    const bare = check(auditRepo(repo.dir), 'loop.single-command-verify');
+    expect(bare.evidence.join('\n')).toContain('quote no test, lint or type-check command');
+    expect(bare.fix.en).toContain('`CLAUDE.md`');
+    expect(bare.fix.en).not.toContain('AGENTS.md');
+  });
+
+  it('sees runtime tests by what the test files boot, and a health route by the path the code serves', () => {
+    const repo = temp('ha-workerd-');
+    repo.write('package.json', JSON.stringify({ name: 'triage', scripts: { test: 'node --test tests/' }, devDependencies: { miniflare: '^4.0.0' } }));
+    repo.write('wrangler.toml', 'name = "triage"\n\n[[migrations]]\ntag = "v1"\nnew_sqlite_classes = ["Queue"]\n');
+    repo.write('src/index.js', "export default { fetch(request) { if (new URL(request.url).pathname === '/health') return new Response('ok'); return new Response('no', { status: 404 }); } };\n");
+    repo.write('tests/workerd.test.mjs', "import { Miniflare } from 'miniflare';\nimport test from 'node:test';\ntest('boots', async () => { const mf = new Miniflare({ scriptPath: 'src/index.js' }); await mf.dispose(); });\n");
+    const report = auditRepo(repo.dir);
+    const e2e = check(report, 'verification.e2e-tests');
+    expect(e2e.status).toBe('pass');
+    expect(e2e.evidence.join('\n')).toContain('1 file(s) boot the Worker in Miniflare/workerd, e.g. tests/workerd.test.mjs');
+    const observed = evidence(report, 'release.observability-and-safety');
+    expect(observed).toContain('Healthcheck endpoint');
+    expect(observed).toContain('Durable Object migrations versioned in the Worker config');
+    // Plain JavaScript gets advice for JavaScript.
+    expect(check(report, 'loop.static-types').fix.en).toContain('checkJs');
+  });
+
+  it('counts the skills a coding agent loads, not the product\'s own SKILL.md tree, and finds a named spec at the root', () => {
+    const repo = temp('ha-product-skills-');
+    repo.write('package.json', JSON.stringify({ name: 'assistant' }));
+    repo.write('skills/platform/search/SKILL.md', '---\nname: search\n---\nModel-facing.\n');
+    repo.write('src/a.ts', 'export const a = 1;\n');
+    repo.write('src/b.ts', 'export const b = 1;\n');
+    repo.write('assistant-spec.md', '# Spec\n');
+    const product = evidence(auditRepo(repo.dir), 'intent.skills-and-specs');
+    expect(product).not.toContain('Reusable skills');
+    expect(product).toContain('1 SKILL.md file(s) outside the agent tool folders (e.g. skills/platform/search/SKILL.md) read as product content');
+    expect(product).toContain('Design/spec/standard docs: assistant-spec.md');
+
+    repo.write('.claude/skills/release/SKILL.md', '---\nname: release\n---\nSteps.\n');
+    expect(evidence(auditRepo(repo.dir), 'intent.skills-and-specs')).toContain('Reusable skills: 1 (.claude/skills/release/SKILL.md)');
+  });
+
+  it('takes a port from the worktree helper or the environment as isolation, and flags a dev script that kills the port', () => {
+    const repo = temp('ha-wt-port-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { dev: 'vite' }, devDependencies: { vite: '^8.0.0' } }));
+    repo.write('wrangler.toml', 'name = "app"\n\n[dev]\nport = 8787\n');
+    repo.write('bin/wt', '#!/bin/sh\necho "PORT=$((4000 + slot))" > .wt-env\n');
+    const isolated = check(auditRepo(repo.dir), 'graph.port-and-state-isolation');
+    expect(isolated.status).toBe('pass');
+    expect(isolated.evidence.join('\n')).toContain('bin/wt allocates a port per worktree');
+    expect(isolated.evidence.join('\n')).not.toContain('is fixed in the config');
+
+    const killer = temp('ha-kill-port-');
+    killer.write('package.json', JSON.stringify({ name: 'app', scripts: { dev: 'lsof -ti:8788 | xargs kill -9; wrangler dev --port 8788' } }));
+    killer.write('wrangler.toml', 'name = "app"\n');
+    const killed = check(auditRepo(killer.dir), 'graph.port-and-state-isolation');
+    expect(killed.status).toBe('warn');
+    expect(killed.evidence.join('\n')).toContain('The dev script kills whatever holds port 8788');
+  });
+
+  it('says when the checkout is behind the default branch and what that branch has', () => {
+    const repo = temp('ha-behind-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'vitest run' } }));
+    repo.commit();
+    const git = (...args: string[]): void => void execFileSync('git', args, { cwd: repo.dir, stdio: 'ignore' });
+    git('branch', '-m', 'main');
+    git('branch', 'fix/geo');
+    repo.write('.github/workflows/ci.yml', 'on: [pull_request]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n');
+    repo.commit();
+    git('update-ref', 'refs/remotes/origin/main', 'HEAD');
+    git('symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main');
+    git('checkout', '-q', 'fix/geo');
+    const report = auditRepo(repo.dir);
+    expect(report.git.behindDefault).toBe(1);
+    expect(report.git.defaultBranchOnly).toEqual(['.github/workflows/ci.yml']);
+    expect(evidence(report, 'release.ci-pipeline')).toContain('main has .github/workflows/ci.yml: this branch is 1 commit(s) behind it');
+    expect(branchNotes(report, 'en')[0]).toBe('Branch fix/geo is 1 commit(s) behind main: this audit describes the checkout, not what ships.');
+  });
+
+  it('judges the tsconfig that covers the application, and builds an iOS scheme for the simulator', () => {
+    const repo = temp('ha-solution-');
+    repo.write('package.json', JSON.stringify({ name: 'app', devDependencies: { typescript: '^6.0.0' } }));
+    repo.write('tsconfig.json', JSON.stringify({ files: [], references: [{ path: './tsconfig.app.json' }, { path: './tsconfig.node.json' }] }));
+    repo.write('tsconfig.app.json', JSON.stringify({ compilerOptions: { strict: true }, include: ['src'] }));
+    repo.write('tsconfig.node.json', JSON.stringify({ compilerOptions: { composite: true }, include: ['vite.config.ts'] }));
+    repo.write('src/a.ts', 'export const a = 1;\n');
+    expect(check(auditRepo(repo.dir), 'loop.static-types').status).toBe('pass');
+
+    const ios = temp('ha-ios-scheme-');
+    ios.write('App.xcodeproj/project.pbxproj', '// !$*UTF8*$!\nSDKROOT = iphoneos;\n');
+    ios.write('App.xcodeproj/xcshareddata/xcschemes/App.xcscheme', '<Scheme><BuildAction/></Scheme>\n');
+    ios.write('App/Main.swift', 'import SwiftUI\n');
+    expect(auditRepo(ios.dir).stack.verifyCommands).toContain("`xcodebuild -scheme App -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO build` → typecheck + build");
+
+    // Tests on iOS need a named simulator: the audit says so instead of inventing a device.
+    ios.write('App.xcodeproj/xcshareddata/xcschemes/App.xcscheme', '<Scheme><BuildAction/><TestAction><Testables><TestableReference/></Testables></TestAction></Scheme>\n');
+    ios.write('AppTests/AppTests.swift', 'import XCTest\nfinal class AppTests: XCTestCase { func testAdds() { XCTAssertEqual(1 + 1, 2) } }\n');
+    const withTests = auditRepo(ios.dir);
+    expect(withTests.stack.verifyCommands.join('\n')).not.toContain('test`');
+    expect(evidence(withTests, 'loop.single-command-verify')).toContain("Scheme App has a test action; its command needs a simulator this audit cannot choose");
+  });
+
+  it('gives a lone .worktreeinclude half the credit of a documented worktree convention', () => {
+    const repo = temp('ha-include-only-');
+    repo.write('package.json', JSON.stringify({ name: 'app', dependencies: { next: '^16.0.0' } }));
+    repo.write('.worktreeinclude', '.env.local\n');
+    const alone = check(auditRepo(repo.dir), 'graph.worktree-isolation');
+    expect(alone.status).toBe('warn');
+    expect(alone.evidence.join('\n')).toContain('no brief says that a second agent should work in one');
+
+    repo.write('AGENTS.md', '# App\n\nWork in your own git worktree (`claude --worktree`).\nA\nB\nC\n');
+    expect(check(auditRepo(repo.dir), 'graph.worktree-isolation').status).toBe('pass');
+  });
+});
+
+describe('robustness: no input makes the audit hang', () => {
+  it('reads a long XcodeGen list of local packages line by line', () => {
+    const repo = temp('ha-xcodegen-local-');
+    repo.write('project.yml', `name: App\npackages:\n${'  Kit:\n    path: Packages/Kit\n'.repeat(60)}targets:\n  App:\n    type: application\n`);
+    repo.write('App/Main.swift', 'import SwiftUI\n');
+    const started = Date.now();
+    const report = auditRepo(repo.dir);
+    expect(Date.now() - started).toBeLessThan(5000);
+    expect(evidence(report, 'loop.lockfile-reproducibility')).not.toContain('floating');
+  });
+
+  it('finishes on files full of repetitive, adversarial text', () => {
+    const repo = temp('ha-hostile-');
+    const blob = [
+      `packages:\n${'  Kit:\n    path: Packages/Kit\n'.repeat(400)}`,
+      '  - name: value   \n'.repeat(3000),
+      `${' '.repeat(20000)}\n`,
+      `${'\`a\` '.repeat(4000)}\n`,
+      '---\n'.repeat(1500),
+      `${'never deploy production only '.repeat(2500)}\n`,
+      `${'A=B '.repeat(4000)}\n`,
+      `[dev]\n${'port  \n'.repeat(2000)}`,
+      `${'"remote" : tru '.repeat(3000)}\n`,
+      `sk-ant-${'a'.repeat(30000)}\n`,
+      `(${'docs/'.repeat(3000)}x\n`,
+      `${'\t'.repeat(15000)}x\n`,
+    ].join('');
+    const files = ['AGENTS.md', 'CLAUDE.md', 'README.md', 'project.yml', 'wrangler.toml', 'wrangler.jsonc', '.github/workflows/ci.yml', 'Makefile', 'pyproject.toml', 'Package.swift', 'build.gradle.kts', '.cursor/rules/x.mdc', '.claude/settings.json', 'playwright.config.ts', 'vite.config.ts', 'tsconfig.json', 'src/index.ts', 'tests/a.test.ts', '.env.example', 'Dockerfile', '.mcp.json', '.github/pull_request_template.md', 'App.xcodeproj/project.pbxproj', 'justfile', 'docs/architecture.md', '.claude/rules/a.md'];
+    for (const f of files) repo.write(f, blob);
+    repo.write('package.json', JSON.stringify({ name: 'x', scripts: { dev: `${'A=B '.repeat(3000)}vite`, test: `vitest run ${' && echo x'.repeat(2000)}`, deploy: `${' '.repeat(10000)}wrangler deploy` } }));
+    const started = Date.now();
+    const report = auditRepo(repo.dir);
+    expect(Date.now() - started).toBeLessThan(10000);
+    expect(report.checks.length).toBe(30);
+  }, 60000);
+});
+
+describe('claims about the running app', () => {
+  it('looks for a health route only where something serves requests', () => {
+    const cli = temp('ha-cli-health-');
+    cli.write('package.json', JSON.stringify({ name: 'cli', bin: { cli: 'dist/cli.js' } }));
+    cli.write('src/prompt.ts', "export const advice = 'Expose `/health` and poll it';\nexport const route = '/health';\n");
+    expect(check(auditRepo(cli.dir), 'release.observability-and-safety').status).toBe('info');
+  });
+
+  it('quotes an instruction before a sentence that only describes behaviour', () => {
+    const repo = temp('ha-instruction-');
+    repo.write('package.json', JSON.stringify({ name: 'app' }));
+    repo.write('AGENTS.md', '# App\n\nAfter a deploy a missing table degrades to an empty list, never to a 500.\n\n- Do not run `wrangler deploy` from a worktree.\nA\nB\n');
+    expect(evidence(auditRepo(repo.dir), 'harness.sandbox-readiness')).toContain('Boundary rule at AGENTS.md:5: "Do not run `wrangler deploy` from a worktree."');
   });
 });

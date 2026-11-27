@@ -82,11 +82,19 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     if (ctx.hasAnyFile(['cypress.config.ts', 'cypress.config.js', 'cypress.json']) || ctx.hasDependency('cypress')) {
       e2eSignals.push('Cypress');
     }
+    // Tests that boot the real runtime or call the app through its request handler, by what they import.
+    const jsTests = allTestFiles.filter((f) => /\.[cm]?[jt]sx?$/.test(f)).slice(0, 300);
+    const bootsWorker = jsTests.filter((f) => /from ['"]miniflare['"]|require\(['"]miniflare['"]\)|new Miniflare\(|cloudflare:test|unstable_dev|unstable_startWorker|getPlatformProxy/.test(ctx.readText(f) ?? ''));
     if (ctx.hasDependency('@cloudflare/vitest-pool-workers') || ctx.findFiles((f) => /^tests\/workers\//.test(f)).length > 0) {
       e2eSignals.push('Cloudflare Workers runtime tests');
+    } else if (bootsWorker.length > 0) {
+      e2eSignals.push(`Cloudflare Workers runtime tests (${bootsWorker.length} file(s) boot the Worker in Miniflare/workerd, e.g. ${bootsWorker[0]})`);
     }
+    const callsHandler = jsTests.filter((f) => /\bapp\.request\(|\.fetch\(\s*new Request\(|\bSELF\.fetch\(/.test(ctx.readText(f) ?? '')).length;
     if (ctx.hasDependency('supertest') || ctx.hasDependency('httpx')) {
       e2eSignals.push('HTTP/API contract tests');
+    } else if (callsHandler > 0 && bootsWorker.length === 0) {
+      e2eSignals.push(`HTTP contract tests (${callsHandler} test file(s) call the app through its request handler)`);
     }
     const e2eDirs = ctx.findFiles((f) => /(^|\/)(e2e|integration)\//.test(f));
     if (e2eDirs.length > 0) {
@@ -483,6 +491,11 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       }
     }
     if (ctx.hasAnyFile(['knip.json', 'knip.jsonc', 'knip.ts', '.knip.json'])) fitnessSignals.push('Knip (unused code and dependencies)');
+    // A lint rule that fences one layer off from another is an architecture test that runs on every lint.
+    const lintConfig = ['eslint.config.js', 'eslint.config.mjs', 'eslint.config.cjs', 'eslint.config.ts', '.eslintrc.json', '.eslintrc.js', '.eslintrc.cjs', '.oxlintrc.json', 'oxlint.json', 'biome.json', 'biome.jsonc', 'vite.config.ts'].find((f) =>
+      /no-restricted-imports|no-restricted-paths|noRestrictedImports|boundaries\/element-types|import\/no-cycle/.test(ctx.readText(f) ?? ''),
+    );
+    if (lintConfig) fitnessSignals.push(`Import-boundary lint rule in ${lintConfig}`);
     if (ctx.hasFile('.periphery.yml')) fitnessSignals.push('Periphery (unused Swift code)');
     const gradleCatalog = `${ctx.readText('gradle/libs.versions.toml') ?? ''}\n${ctx.readText('build.gradle.kts') ?? ''}`;
     if (/kover|jacoco/i.test(gradleCatalog)) fitnessSignals.push('JVM coverage tooling (Kover/JaCoCo)');

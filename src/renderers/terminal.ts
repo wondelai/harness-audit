@@ -1,6 +1,6 @@
 import { docsUrl, LEVELS, STATION_MAP, t, UI } from '../i18n.js';
 import { unblocksNextLevel } from '../scoring.js';
-import { describeGate, uncappedGates } from './gates.js';
+import { branchNotes, describeGate, uncappedGates } from './gates.js';
 import type { AuditReport, CheckStatus, RenderOptions } from '../types.js';
 
 interface Colors {
@@ -118,6 +118,7 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
     lines.push(
       `${c.bold}Git:${c.reset} ${report.git.branch ?? 'HEAD'} · ${report.git.gitAuthors90d} ${t(UI.contributors90d, lang)} · ${report.git.commits30d} ${t(UI.commits30d, lang)}`,
     );
+    for (const note of branchNotes(report, lang)) lines.push(`${c.yellow}${c.bold}! ${note}${c.reset}`);
   }
   lines.push(
     `${c.bold}Scan:${c.reset} ${report.scan.fileCount} ${t(report.scan.mode === 'git' ? UI.scanGit : UI.scanWalk, lang)}`,

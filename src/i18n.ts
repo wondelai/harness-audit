@@ -264,6 +264,11 @@ export const UI = {
   seeTopFix: { en: 'top fix', pl: 'poprawka' },
   verboseHint: { en: '(--verbose lists passing checks with evidence)', pl: '(--verbose pokazuje też zaliczone checki z dowodami)' },
   stackUnknown: { en: 'no recognised language', pl: 'nie rozpoznano języka' },
+  branchBehind: {
+    en: 'Branch {branch} is {n} commit(s) behind {default}: this audit describes the checkout, not what ships.',
+    pl: 'Gałąź {branch} jest {n} commit(ów) za {default}: audyt opisuje ten checkout, a nie to, co jest wdrażane.',
+  },
+  branchLacks: { en: '{default} also has: {files}', pl: '{default} ma ponadto: {files}' },
   scanGit: {
     en: 'files (tracked + untracked; .gitignore respected, so local env files and build output are not audited)',
     pl: 'plików (śledzone + nieśledzone; z uwzględnieniem .gitignore, więc lokalne pliki env i wyniki builda nie są audytowane)',

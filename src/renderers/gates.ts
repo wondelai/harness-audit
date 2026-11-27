@@ -1,4 +1,4 @@
-import { STATION_MAP, t } from '../i18n.js';
+import { STATION_MAP, t, UI } from '../i18n.js';
 import type { AuditReport, Lang, StationId } from '../types.js';
 
 /**
@@ -20,4 +20,13 @@ export function describeGate(id: string, report: AuditReport, lang: Lang): strin
 export function uncappedGates(report: AuditReport): string[] {
   const capped = new Set(report.levelCaps.flatMap((cap) => cap.triggeredBy));
   return [...new Set((report.nextLevel?.blockers ?? []).map((b) => b.id))].filter((id) => !capped.has(id));
+}
+
+/** Notes for a checkout that is behind the default branch: the audit is of the checkout, and says so. */
+export function branchNotes(report: AuditReport, lang: Lang): string[] {
+  const { branch, defaultBranch, behindDefault, defaultBranchOnly } = report.git;
+  if (!branch || !defaultBranch || !behindDefault) return [];
+  const fill = (text: string): string =>
+    text.replace('{branch}', branch).replace('{n}', String(behindDefault)).replace('{default}', defaultBranch).replace('{files}', (defaultBranchOnly ?? []).slice(0, 4).join(', '));
+  return [fill(t(UI.branchBehind, lang)), ...(defaultBranchOnly?.length ? [fill(t(UI.branchLacks, lang))] : [])];
 }

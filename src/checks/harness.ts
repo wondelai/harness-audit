@@ -1,5 +1,6 @@
 import { localDeployCommands, minimalVerifySet } from '../capabilities.js';
-import type { RepoContext } from '../fs-scanner.js';
+import { scanBoundaries } from '../brief.js';
+import { stripJsonComments, type RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
 
 const ARCHIVED_OR_BROKEN_MCP_PACKAGES: Array<{ pkg: string; note: string }> = [
@@ -83,6 +84,30 @@ export function guardHooks(ctx: RepoContext): string[] {
   }
   if (guards.length === 0 && /deploy|wrangler|--remote/i.test(serialized)) guards.push('.claude/settings.json PreToolUse command');
   return guards;
+}
+
+/** Bindings that are a remote service with no local emulator and no stored data: running them remotely is the only way. */
+const SERVICE_BINDINGS = new Set(['ai', 'browser', 'images', 'send_email', 'version_metadata']);
+
+/**
+ * The bindings a Worker config marks `remote: true`, split into those that hold data (D1, KV, R2,
+ * queues, Vectorize: a local run writes the real thing) and remote-only services (Workers AI,
+ * Browser Rendering: quota, not data). Comments are not configuration.
+ */
+export function remoteBindings(path: string, config: string): { stores: string[]; services: string[] } {
+  const text = path.endsWith('.toml')
+    ? config.split(/\r?\n/).map((l) => (/^\s*#/.test(l) ? '' : l.replace(/\s+#[^"']*$/, ''))).join('\n')
+    : stripJsonComments(config);
+  const stores: string[] = [];
+  const services: string[] = [];
+  const HEADER = /^\s*\[\[?([\w.-]+)\]\]?\s*$|"([\w-]+)"\s*:\s*[\[{]|^\s*([\w-]+)\s*=\s*\{/gm;
+  for (const hit of text.matchAll(/"?\bremote"?\s*[:=]\s*true\b/g)) {
+    // The nearest table or key above the flag names the binding kind (`[[d1_databases]]`, `"ai": {`).
+    const headers = [...text.slice(0, hit.index).matchAll(HEADER)].map((m) => (m[1] ?? m[2] ?? m[3] ?? '').split('.').pop()!.toLowerCase());
+    const kind = headers.pop() ?? 'binding';
+    (SERVICE_BINDINGS.has(kind) ? services : stores).push(kind);
+  }
+  return { stores, services };
 }
 
 export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
@@ -682,8 +707,10 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     const devReachesProduction = reach.length > 0;
     // Individual bindings marked remote in the Worker config: local runs read and write them for real.
     for (const cfg of ctx.findFiles((f) => /(^|\/)wrangler\.(toml|jsonc|json)$/.test(f) && f.split('/').length <= 3).slice(0, 4)) {
-      const remote = ((ctx.readText(cfg) ?? '').match(/"?remote"?\s*[:=]\s*true/g) ?? []).length;
-      if (remote > 0) reach.push(`${cfg} marks ${remote} binding(s) \`remote: true\`: a local run reads and writes them for real`);
+      const { stores } = remoteBindings(cfg, ctx.readText(cfg) ?? '');
+      if (stores.length > 0) {
+        reach.push(`${cfg} marks ${stores.length} data binding(s) \`remote: true\` (${[...new Set(stores)].join(', ')}): a local run reads and writes them for real`);
+      }
     }
 
     const rules = brief.boundaryRules;
@@ -693,7 +720,15 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     if (rules.length > 0) {
       evidence.push(`Boundary rule at ${rules[0]!.file}:${rules[0]!.line}: "${rules[0]!.text}"${rules.length > 1 ? ` (+${rules.length - 1} more)` : ''}`);
     } else {
-      evidence.push(brief.files.length > 0 ? `Found no sentence in ${brief.files.join(' / ')} that forbids or reserves an action on production` : 'No brief, so no written boundary around production or shared resources');
+      // A rule the README states is written down, but no agent loads the README on its own.
+      const readmeRule = brief.files.length === 0 ? scanBoundaries('README.md', ctx.readText('README.md') ?? '').rules[0] : undefined;
+      evidence.push(
+        brief.files.length > 0
+          ? `Found no sentence in ${brief.files.join(' / ')} that forbids or reserves an action on production`
+          : readmeRule
+            ? `README.md:${readmeRule.line} states a production rule ("${readmeRule.text}"), but there is no agent brief to carry it`
+            : 'No brief, so no written boundary around production or shared resources',
+      );
     }
     evidence.push(...reach.slice(0, 2));
 

@@ -79,7 +79,8 @@ function buildClaudeSettings(ctx: RepoContext): string {
   }
   deny.push('Bash(git push --force:*)', 'Bash(git push -f:*)');
   // The local secret files of this stack, so an agent cannot read them into its context.
-  const secretFiles = ['.env', '.env.*'];
+  // Named files, not `.env.*`: an agent has to be able to read `.env.example`.
+  const secretFiles = ['.env', '.env.local', '.env.*.local', '.env.production', '.env.development'];
   if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json'])) secretFiles.push('.dev.vars');
   if (ctx.stack.frameworks.includes('Android')) secretFiles.push('local.properties', 'secrets.properties');
   for (const f of secretFiles) deny.push(`Read(./${f})`);

@@ -1,6 +1,6 @@
 import { docsUrl, LEVELS, STATION_MAP, t, UI } from '../i18n.js';
 import type { AuditReport, RenderOptions } from '../types.js';
-import { describeGate, uncappedGates } from './gates.js';
+import { branchNotes, describeGate, uncappedGates } from './gates.js';
 
 export function renderMarkdown(report: AuditReport, options: RenderOptions = {}): string {
   const lang = options.lang ?? report.lang;
@@ -35,6 +35,8 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
     lines.push(
       `| **Git Activity** | ${report.git.gitAuthors90d} ${t(UI.contributors90d, lang)} · ${report.git.commits30d} ${t(UI.commits30d, lang)} |`,
     );
+    const notes = branchNotes(report, lang);
+    if (notes.length > 0) lines.push(`| **Branch** | ⚠ ${notes.join(' ')} |`);
   }
   lines.push(`| **Scan** | ${report.scan.fileCount} ${t(report.scan.mode === 'git' ? UI.scanGit : UI.scanWalk, lang)}${report.scan.truncated ? ` — ${t(UI.scanTruncated, lang)}` : ''} |`);
   lines.push(`| **Audited At** | ${report.auditedAt} |`);

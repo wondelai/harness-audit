@@ -19,6 +19,8 @@ export interface VerifyCapabilities {
   kinds: Set<VerifyKind>;
   /** One command that runs the tests and at least one static check. */
   unified: VerifyCommand | undefined;
+  /** An iOS scheme with a test action and no other test command: its run needs a simulator the audit cannot name. */
+  simulatorTestScheme: string | undefined;
 }
 
 type Scripts = Record<string, string>;
@@ -494,6 +496,7 @@ function quotedCommands(markdown: string, isRepoFile: (path: string) => boolean)
 }
 
 export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
+  let simulatorTestScheme: string | undefined;
   const classifier = new CommandClassifier(ctx);
   const commands: VerifyCommand[] = [];
   const add = (command: string, kinds: Iterable<VerifyKind>, source: string): void => {
@@ -573,8 +576,14 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   if (scheme) {
     const name = scheme.split('/').pop()!.replace(/\.xcscheme$/, '');
     const hasTests = /<TestableReference/.test(ctx.readText(scheme) ?? '') && ctx.testFiles.some((f) => f.endsWith('.swift'));
-    add(`xcodebuild -scheme ${name} build`, ['build', 'typecheck'], scheme);
-    if (hasTests) add(`xcodebuild -scheme ${name} test`, ['test', 'typecheck'], scheme);
+    // An iOS scheme builds for a device by default, which needs signing; the simulator build does not.
+    const project = ctx.readText(scheme.replace(/xcshareddata\/.*$/, 'project.pbxproj')) ?? '';
+    const ios = /SDKROOT = iphoneos|IPHONEOS_DEPLOYMENT_TARGET/.test(project);
+    add(`xcodebuild -scheme ${name}${ios ? " -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO" : ''} build`, ['build', 'typecheck'], scheme);
+    // Tests on iOS run on a named simulator, and which ones are installed is not in the repository:
+    // a guessed device would put a failing command into the brief and the allow-list.
+    if (hasTests && ios) simulatorTestScheme = name;
+    else if (hasTests) add(`xcodebuild -scheme ${name} test`, ['test', 'typecheck'], scheme);
   }
   if (ctx.hasFile('Cargo.toml')) {
     add('cargo test', ['test', 'typecheck'], 'Cargo.toml');
@@ -618,7 +627,9 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
 
   // 5. Commands the root brief tells agents to run
   const documented: VerifyCommand[] = [];
-  for (const briefFile of ['AGENTS.md', 'CLAUDE.md']) {
+  // A brief that sends its reader to the README ("read README.md first") hands over the README's commands too.
+  const sendsToReadme = ctx.hasFile('README.md') && ['AGENTS.md', 'CLAUDE.md'].some((f) => /\bREADME\.md\b/.test(ctx.readText(f) ?? ''));
+  for (const briefFile of ['AGENTS.md', 'CLAUDE.md', ...(sendsToReadme ? ['README.md'] : [])]) {
     const text = ctx.readText(briefFile);
     if (!text) continue;
     for (const cmd of quotedCommands(text, (p) => ctx.hasFile(p))) {
@@ -645,7 +656,7 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   const unified =
     commands.find((c) => isUnified(c.kinds) && c.kinds.length >= 3) ?? commands.find((c) => isUnified(c.kinds));
 
-  return { commands, documented, kinds, unified };
+  return { commands, documented, kinds, unified, simulatorTestScheme: kinds.has('test') ? undefined : simulatorTestScheme };
 }
 
 export function describeCommand(cmd: VerifyCommand): string {
@@ -673,6 +684,29 @@ export function minimalVerifySet(caps: VerifyCapabilities): string[] {
     if (!chosen.includes(member)) chosen.push(member);
   }
   return chosen.map((c) => c.command);
+}
+
+/** A step that refuses to continue: `assert-main-checkout.sh`, `bin/wt assert-primary`, `ensure-clean`, `preflight`. */
+const DEPLOY_GUARD = /\b(?:assert|ensure|preflight|guard)[\w.:-]*|\bcheck-(?:main|primary|clean|branch)[\w.-]*/i;
+
+/**
+ * Deploy scripts that open with a guard of their own, keyed by the command that runs them, with
+ * the guard step as written (`bin/wt assert-primary`). The script decides where a deploy may run
+ * from, so "nothing stops it" would be false.
+ */
+export function deployScriptGuards(ctx: RepoContext): Map<string, string> {
+  const classifier = new CommandClassifier(ctx);
+  const scripts = ctx.packageJson?.scripts ?? {};
+  const run = scriptRunner(ctx);
+  const guards = new Map<string, string>();
+  for (const [name, body] of Object.entries(scripts)) {
+    if (!classifier.deploys(body)) continue;
+    const steps = [scripts[`pre${name}`] ?? '', body].join(' && ').split(/&&|;/).map((s) => s.trim()).filter(Boolean);
+    const shipsAt = steps.findIndex((s) => classifier.deploys(s));
+    const guard = steps.slice(0, shipsAt === -1 ? steps.length : shipsAt).find((s) => DEPLOY_GUARD.test(s));
+    if (guard) guards.set(run(name), guard);
+  }
+  return guards;
 }
 
 /**
@@ -715,6 +749,10 @@ export function localDeployCommands(ctx: RepoContext): string[] {
     }
   }
   // The platform CLI itself, unless the brief already named it with its own runner (`bunx wrangler deploy`).
-  if (workerConfigs.length > 0 && !commands.some((c) => /wrangler deploy/.test(c))) commands.push('npx wrangler deploy');
+  // A Pages project ships with `wrangler pages deploy`; `wrangler deploy` is the Workers command.
+  const pages =
+    workerConfigs.some((f) => /pages_build_output_dir/.test(ctx.readText(f) ?? '')) || Object.values(scripts).some((body) => /wrangler\s+pages\s+deploy/.test(body));
+  const cli = pages ? 'wrangler pages deploy' : 'wrangler deploy';
+  if (workerConfigs.length > 0 && !commands.some((c) => c.includes(cli))) commands.push(`npx ${cli}`);
   return [...new Set(commands)];
 }

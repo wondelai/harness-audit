@@ -106,6 +106,10 @@ export interface GitStats {
   commits90d: number;
   /** The branch pull requests target (origin's HEAD, else the checked-out branch). */
   defaultBranch?: string;
+  /** Commits the default branch has that this checkout lacks, when another branch is checked out. */
+  behindDefault?: number;
+  /** Harness files (CI workflows, briefs, settings) on the default branch that this checkout lacks. */
+  defaultBranchOnly?: string[];
   remoteName?: string;
 }
 

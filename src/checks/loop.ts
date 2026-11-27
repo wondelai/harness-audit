@@ -71,6 +71,23 @@ function resolveStrict(ctx: RepoContext, file: string, depth = 0): StrictVerdict
   return open ? { unresolved: open } : { strict: false, via: file };
 }
 
+/**
+ * Whether an XcodeGen `packages:` section declares a remote package (`url:` or `github:`). Read
+ * line by line: a single pattern over the whole section backtracks exponentially on a long list of
+ * local packages.
+ */
+function xcodegenRemotePackages(projectYml: string): boolean {
+  const lines = projectYml.split(/\r?\n/);
+  const start = lines.findIndex((l) => /^packages:\s*$/.test(l));
+  if (start === -1) return false;
+  for (const line of lines.slice(start + 1)) {
+    if (line.trim() === '') continue;
+    if (!/^\s/.test(line)) break;
+    if (/^\s+(url|github):/.test(line)) return true;
+  }
+  return false;
+}
+
 export function runLoopChecks(ctx: RepoContext): CheckResult[] {
   const results: CheckResult[] = [];
   const stack = ctx.stack;
@@ -125,12 +142,19 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     if (hasBrief) {
       evidence.push(
         documented.length > 0
-          ? `Root instructions quote ${documented.length} verify command(s), e.g. \`${documented[0]!.command}\``
-          : 'Root instructions quote no runnable verify command (looked for commands in backticks and code fences)',
+          ? documented.every((d) => d.source === 'README.md')
+            ? `${ctx.brief.primary} sends agents to README.md, which quotes ${documented.length} verify command(s), e.g. \`${documented[0]!.command}\``
+            : `Root instructions quote ${documented.length} verify command(s), e.g. \`${documented[0]!.command}\``
+          : 'Root instructions quote no test, lint or type-check command (looked in backticks and code fences; a build command alone does not count)',
       );
     }
     const missing = [!hasTest ? 'tests' : '', !hasStatic ? 'lint or typecheck' : ''].filter(Boolean);
     if (missing.length > 0 && verify.commands.length > 0) evidence.push(`Missing from the loop: ${missing.join(', ')}`);
+    if (verify.simulatorTestScheme) {
+      evidence.push(
+        `Scheme ${verify.simulatorTestScheme} has a test action; its command needs a simulator this audit cannot choose, so quote yours in the brief: \`xcodebuild test -scheme ${verify.simulatorTestScheme} -destination 'platform=iOS Simulator,name=<installed simulator>'\``,
+      );
+    }
 
     // Documentation, prompts or configuration only: nothing to verify by running it.
     const noProgram = ctx.sourceFiles.length === 0 && verify.commands.length === 0;
@@ -174,7 +198,8 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
         en: 'Level 3–4 autonomy depends on a machine-checkable stop condition (static checks + tests exiting 0) documented right where agents read it.',
         pl: 'Autonomia Poziomu 3–4 wymaga maszynowo sprawdzalnego warunku stopu (sprawdzenia statyczne + testy kończące się kodem 0), opisanego w instrukcjach agenta.',
       },
-      fix: { en: fixEn, pl: fixPl },
+      // The brief that exists is the one to edit.
+      fix: { en: fixEn.replaceAll('`AGENTS.md`', `\`${ctx.brief.primary}\``), pl: fixPl.replaceAll('`AGENTS.md`', `\`${ctx.brief.primary}\``) },
       docsPath: 'ladder/level-4-write-specs/',
     });
   }
@@ -200,7 +225,12 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
           : tsconfigs;
       const verdicts = targets.map((t) => ({ file: t, verdict: resolveStrict(ctx, t) }));
       const strictOnes = verdicts.filter((v) => 'strict' in v.verdict && v.verdict.strict);
-      const looseOnes = verdicts.filter((v) => 'strict' in v.verdict && !v.verdict.strict);
+      // A referenced config that covers only build-tool config files (`vite.config.ts`) is not the application's type check.
+      const toolingOnly = (file: string): boolean => {
+        const include = ctx.readJson<{ include?: string[] }>(file)?.include;
+        return Array.isArray(include) && include.length > 0 && include.every((p) => /(^|\/)[\w.*-]*\.config\.[\w*{},]+$|^scripts?\//.test(p));
+      };
+      const looseOnes = verdicts.filter((v) => 'strict' in v.verdict && !v.verdict.strict && !(strictOnes.length > 0 && toolingOnly(v.file)));
       const openOnes = verdicts.filter((v) => 'unresolved' in v.verdict);
 
       if (looseOnes.length === 0 && strictOnes.length > 0) {
@@ -280,10 +310,27 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
         en: 'Strict static types catch hallucinated properties, broken refactors, and mismatched contracts in milliseconds — before any human or test sees the diff.',
         pl: 'Ścisłe typy statyczne wyłapują halucynowane pola, zepsute refaktoryzacje i niezgodne kontrakty w milisekundach — zanim diff trafi do człowieka lub testów.',
       },
-      fix: {
-        en: 'Enable strict typechecking (`strict: true` in `tsconfig.json`, `pyright`/`mypy` for Python, `phpstan` for PHP) and wire it into your verify command and CI.',
-        pl: 'Włącz ścisłe typowanie (`strict: true` w `tsconfig.json`, `pyright`/`mypy` w Pythonie, `phpstan` w PHP) i podepnij je do komendy weryfikacji oraz CI.',
-      },
+      // The advice for the language this repository is written in.
+      fix:
+        tsconfigs.length > 0
+          ? {
+              en: 'Set `"strict": true` in the tsconfig named above (fix what it surfaces one area at a time) and run the type check in your verify command and CI.',
+              pl: 'Ustaw `"strict": true` we wskazanym wyżej tsconfig (poprawiaj zgłoszone błędy obszar po obszarze) i uruchamiaj sprawdzanie typów w komendzie weryfikacji oraz w CI.',
+            }
+          : stack.languages.includes('Python')
+            ? {
+                en: 'Configure `pyright` or `mypy` in `pyproject.toml` (strict for new code) and run it in your verify command and CI.',
+                pl: 'Skonfiguruj `pyright` lub `mypy` w `pyproject.toml` (tryb strict dla nowego kodu) i uruchamiaj go w komendzie weryfikacji oraz w CI.',
+              }
+            : stack.languages.includes('JavaScript')
+              ? {
+                  en: 'Type-check the JavaScript as it is: add a `jsconfig.json` with `"checkJs": true` and `"strict": true` (JSDoc carries the types) and run `tsc --noEmit -p jsconfig.json` in your verify command and CI.',
+                  pl: 'Sprawdzaj typy w istniejącym JavaScripcie: dodaj `jsconfig.json` z `"checkJs": true` i `"strict": true` (typy niesie JSDoc) i uruchamiaj `tsc --noEmit -p jsconfig.json` w komendzie weryfikacji oraz w CI.',
+                }
+              : {
+                  en: 'Enable strict typechecking (`strict: true` in `tsconfig.json`, `pyright`/`mypy` for Python, `phpstan` for PHP) and wire it into your verify command and CI.',
+                  pl: 'Włącz ścisłe typowanie (`strict: true` w `tsconfig.json`, `pyright`/`mypy` w Pythonie, `phpstan` w PHP) i podepnij je do komendy weryfikacji oraz CI.',
+                },
       docsPath: 'workflows/test/',
     });
   }
@@ -487,7 +534,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     const xcodeProjectFile = ctx.findFiles((f) => /\.xcodeproj\/project\.pbxproj$/.test(f))[0];
     const swiftHasDeps =
       swiftManifests.some((f) => /\.package\(\s*(url|id)\s*:/.test(ctx.readText(f) ?? '')) ||
-      /^packages:\s*\n(?:\s+.*\n)*?\s+(url|github):/m.test(projectYml) ||
+      xcodegenRemotePackages(projectYml) ||
       (xcodeProjectFile !== undefined && /XCRemoteSwiftPackageReference/.test(ctx.readText(xcodeProjectFile) ?? ''));
     // An Xcode project that pulls remote packages resolves dependencies too.
     const hasManager = resolvesPackages || swiftHasDeps;

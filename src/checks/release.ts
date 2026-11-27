@@ -1,4 +1,4 @@
-import { localDeployCommands, minimalVerifySet } from '../capabilities.js';
+import { deployScriptGuards, localDeployCommands, minimalVerifySet } from '../capabilities.js';
 import { guardHooks } from './harness.js';
 import type { RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
@@ -21,6 +21,10 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     const evidence: string[] = [];
     if (allCiFiles.length === 0) {
       evidence.push('No CI pipeline found (.github/workflows/*.yml, .gitlab-ci.yml, .circleci/config.yml, etc.)');
+      const onDefault = (ctx.git.defaultBranchOnly ?? []).filter((f) => f.startsWith('.github/workflows/'));
+      if (onDefault.length > 0) {
+        evidence.push(`${ctx.git.defaultBranch} has ${onDefault.slice(0, 3).join(', ')}: this branch is ${ctx.git.behindDefault} commit(s) behind it, so re-run the audit there for what ships`);
+      }
     } else {
       evidence.push(`CI workflows (${allCiFiles.length}): ${allCiFiles.slice(0, 5).join(', ')}${allCiFiles.length > 5 ? ', …' : ''}`);
       evidence.push(`Pull requests are gated on — tests: ${mark('test')} · lint: ${mark('lint')} · typecheck: ${mark('typecheck')}`);
@@ -251,11 +255,24 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     if (workerConfigs.some((f) => /\[observability[\w.]*\][\s\S]{0,200}?enabled\s*=\s*true|"observability"\s*:\s*\{[\s\S]{0,200}?"enabled"\s*:\s*true/.test(ctx.readText(f) ?? ''))) {
       signals.push('Workers observability (logs/traces enabled in wrangler config)');
     }
+    // The repository's own telemetry module (`src/posthog.ts`, `lib/logger.ts`) when no SDK is a dependency.
+    const telemetryModule = ctx.sourceFiles.find((f) => /(^|\/)(posthog|sentry|telemetry|otel|tracing|logger|logging)\.[a-z]+$/i.test(f));
+    if (telemetryModule && !signals.some((s) => /Sentry|PostHog|OpenTelemetry|logging/i.test(s))) signals.push(`Telemetry module (${telemetryModule})`);
     const telemetrySignals = signals.length;
     if (ctx.findFiles((f) => /(^|\/)migrations\//.test(f)).length > 0) {
       signals.push('Versioned migrations directory');
     }
-    if (ctx.findFiles((f) => /(^|\/)health(\.[a-z]+)?$/.test(f)).length > 0) {
+    if (workerConfigs.some((f) => /^\s*\[\[migrations\]\]|"migrations"\s*:\s*\[/m.test(ctx.readText(f) ?? ''))) {
+      signals.push('Durable Object migrations versioned in the Worker config');
+    }
+    // A health route: a file named for it, or the path in the code that serves requests.
+    const HEALTH_ROUTE = /['"`]\/(?:api\/)?(?:health|healthz|healthcheck|readyz|livez)['"`/]/;
+    const servesRequests = ctx.stack.frameworks.length > 0 || workerConfigs.length > 0 || ctx.hasFile('Dockerfile');
+    const servesHealth =
+      ctx.findFiles((f) => /(^|\/)health(\.[a-z]+)?$/.test(f)).length > 0 ||
+      (servesRequests &&
+        [...ctx.sourceFiles].sort((a, b) => a.split('/').length - b.split('/').length).slice(0, 300).some((f) => HEALTH_ROUTE.test(ctx.readText(f) ?? '')));
+    if (servesHealth) {
       signals.push('Healthcheck endpoint');
     }
     if (ctx.hasAnyFile(['CHANGELOG.md', 'CHANGES.md'])) {
@@ -297,10 +314,16 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
         en: 'Faster agent shipping without telemetry and reversible migrations increases blast radius when a subtle bug passes CI.',
         pl: 'Szybsze wydawanie kodu przez agentów bez telemetrii i odwracalnych migracji zwiększa pole rażenia błędów, które prześlizgną się przez CI.',
       },
-      fix: {
-        en: 'Wire error tracking/telemetry (Sentry, OpenTelemetry, or structured logs), a healthcheck endpoint, and versioned database migrations with rollback notes.',
-        pl: 'Podepnij śledzenie błędów/telemetrię (Sentry, OpenTelemetry lub logi strukturalne), endpoint healthcheck oraz wersjonowane migracje bazy z opisem wycofania.',
-      },
+      fix: ctx.stack.frameworks.some((fw) => ['Android', 'SwiftUI', 'Flutter', 'Expo', 'Jetpack Compose'].includes(fw)) || ctx.stack.packageManagers.includes('xcodebuild')
+        ? {
+            // An app on a phone has no healthcheck to poll: it reports its own crashes.
+            en: 'Wire crash and error reporting (Firebase Crashlytics, Sentry or MetricKit) and keep the on-device schema versioned (Room schema export, Core Data model versions).',
+            pl: 'Podepnij raportowanie awarii i błędów (Firebase Crashlytics, Sentry lub MetricKit) i wersjonuj schemat danych na urządzeniu (eksport schematu Room, wersje modelu Core Data).',
+          }
+        : {
+            en: 'Wire error tracking/telemetry (Sentry, OpenTelemetry, or structured logs), a healthcheck endpoint, and versioned database migrations with rollback notes.',
+            pl: 'Podepnij śledzenie błędów/telemetrię (Sentry, OpenTelemetry lub logi strukturalne), endpoint healthcheck oraz wersjonowane migracje bazy z opisem wycofania.',
+          },
       docsPath: 'workflows/operate/codebase-health/',
     });
   }
@@ -345,17 +368,27 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       return claudeDeny.some((rule) => rule.includes(needle));
     };
     const guards = guardHooks(ctx);
-    const unguarded = guards.length > 0 ? [] : localDeploys.filter((c) => !denied(c));
+    // A deploy script that opens with its own guard decides for itself where it may run from.
+    const scriptGuards = deployScriptGuards(ctx);
+    const selfGuarded = localDeploys.filter((c) => scriptGuards.has(c));
+    const unguarded = guards.length > 0 ? [] : localDeploys.filter((c) => !denied(c) && !scriptGuards.has(c));
+    const code = (commands: string[]): string => commands.map((c) => `\`${c}\``).join(', ');
     if (localDeploys.length > 0 && guards.length > 0) {
       evidence.push(`A PreToolUse guard hook decides on deploy commands before they run: ${guards.join(', ')} (read it for what it allows from the main checkout)`);
     } else if (localDeploys.length > 0) {
-      evidence.push(
-        unguarded.length === 0
-          ? `.claude/settings.json denies every local deploy command (${localDeploys.map((c) => `\`${c}\``).join(', ')})`
-          : claudeDeny.length > 0 && unguarded.length < localDeploys.length
-            ? `The deny list covers some deploy commands but not ${unguarded.map((c) => `\`${c}\``).join(', ')}`
-            : `Nothing stops an agent running ${unguarded.map((c) => `\`${c}\``).join(', ')} from a local checkout`,
-      );
+      if (selfGuarded.length > 0) {
+        evidence.push(`${code(selfGuarded)} ${selfGuarded.length === 1 ? 'opens' : 'open'} with \`${scriptGuards.get(selfGuarded[0]!)}\`, a guard that decides whether this checkout may ship`);
+      }
+      const denyCovered = localDeploys.filter((c) => denied(c) && !scriptGuards.has(c));
+      if (unguarded.length > 0) {
+        evidence.push(
+          selfGuarded.length > 0 || denyCovered.length > 0
+            ? `Neither a guard nor a deny rule covers ${code(unguarded)}`
+            : `Nothing stops an agent running ${code(unguarded)} from a local checkout`,
+        );
+      } else if (denyCovered.length > 0) {
+        evidence.push(`.claude/settings.json denies ${selfGuarded.length > 0 ? 'the rest' : 'every local deploy command'} (${code(denyCovered)})`);
+      }
     }
 
     // Merging is the deploy, and nothing checks a pull request first: every merge ships untested.

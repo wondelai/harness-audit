@@ -557,8 +557,13 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
 
   // 5. intent.skills-and-specs
   {
-    // Skills in a tool's folder, or anywhere in a repository that is itself a skill collection.
-    const skillFiles = ctx.findFiles((f) => /(^|\/)SKILL\.md$/.test(f) && !/(^|\/)(node_modules|vendor)\//.test(f));
+    // Skills a coding agent loads live in a tool's folder. A SKILL.md tree elsewhere in an
+    // application is the product's own model-facing content; a repository that is itself a skill
+    // collection (more skills than source files) is the exception.
+    const allSkillFiles = ctx.findFiles((f) => /(^|\/)SKILL\.md$/.test(f) && !/(^|\/)(node_modules|vendor)\//.test(f));
+    const isCollection = allSkillFiles.length > ctx.sourceFiles.length;
+    const skillFiles = allSkillFiles.filter((f) => isCollection || /(^|\/)\.(?:claude|agents|codex|cursor|github|opencode|gemini)\/skills?\//.test(f));
+    const productSkills = allSkillFiles.filter((f) => !skillFiles.includes(f));
     const prTemplate = ctx.hasAnyFile([
       '.github/pull_request_template.md',
       '.github/PULL_REQUEST_TEMPLATE.md',
@@ -571,18 +576,24 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
         ...ctx.findFiles(
           (f) =>
             /^(DESIGN|PRODUCT|CODING_STANDARDS|TESTING|ARCHITECTURE|CONTRIBUTING|SECURITY|CONVENTIONS|SPEC|CONTEXT|ROADMAP)\.md$/i.test(f) ||
+            // A named spec at the root: `forme-spec.md`, `MIGRATION.md`, `design-system.md`.
+            (!f.includes('/') && /^(?:[\w.-]*[-_.])?(?:specs?|prd|requirements|migration|adr|design|plan|architecture|roadmap)(?:[-_.][\w.-]*)?\.mdx?$/i.test(f)) ||
             /^(plans|specs?|adr|adrs|rfcs?)\/.+\.mdx?$/i.test(f) ||
             /^docs\/(?:[^/]+\/)*(adr|adrs|specs?|rfcs?|architecture|decisions|plans)\//i.test(f) ||
             (/^docs\/[^/]+\.mdx?$/i.test(f) && SPEC_NAME.test(f)),
         ),
         // Docs the brief or the README sends readers to are the repository's standing specs.
-        ...ctx.brief.routedDocs.filter((p) => SPEC_NAME.test(p)),
+        // Whatever the brief routes an agent to is a standing reference, whatever its name.
+        ...ctx.brief.routedDocs.filter((p) => !/(^|\/)SKILL\.md$/.test(p)),
         ...repoDocLinks(ctx.readText('README.md') ?? '', (p) => ctx.hasFile(p)).filter((p) => SPEC_NAME.test(p)),
       ]),
     ];
 
     const evidence: string[] = [];
     if (skillFiles.length > 0) evidence.push(`Reusable skills: ${skillFiles.length} (${skillFiles.slice(0, 3).join(', ')})`);
+    if (productSkills.length > 0) {
+      evidence.push(`${productSkills.length} SKILL.md file(s) outside the agent tool folders (e.g. ${productSkills[0]}) read as product content and are not counted`);
+    }
     if (prTemplate) evidence.push(`PR template: ${prTemplate}`);
     if (issueTemplates.length > 0) evidence.push(`Issue templates: ${issueTemplates.length}`);
     if (specDocs.length > 0) evidence.push(`Design/spec/standard docs: ${specDocs.slice(0, 5).join(', ')}`);
@@ -607,7 +618,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
       missingKinds.en.push('a standards, testing or architecture doc agents can be pointed at');
       missingKinds.pl.push('dokumentu standardów, testów lub architektury, do którego można odesłać agenta');
     }
-    if (evidence.length === 0) {
+    if (categoriesHit === 0) {
       evidence.push('No project skills, spec/ADR/standards docs, or PR/issue templates found');
     }
 

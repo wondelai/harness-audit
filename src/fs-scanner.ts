@@ -985,6 +985,26 @@ function detectGitStats(root: string): GitStats {
     defaultBranch = branch && branch !== 'HEAD' ? branch : undefined;
   }
 
+  // A checkout on another branch that is behind the default one: what ships may hold files this
+  // branch lacks (a CI workflow, a brief), and an audit of the checkout would report them missing.
+  let behindDefault: number | undefined;
+  let defaultBranchOnly: string[] | undefined;
+  if (defaultBranch && branch && branch !== 'HEAD' && branch !== defaultBranch) {
+    const git = (args: string[]): string => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 });
+    for (const ref of [`refs/remotes/origin/${defaultBranch}`, `refs/heads/${defaultBranch}`]) {
+      try {
+        behindDefault = Number.parseInt(git(['rev-list', '--count', `HEAD..${ref}`]).trim(), 10) || 0;
+        if (behindDefault > 0) {
+          const there = git(['ls-tree', '-r', '--name-only', ref, '--', '.github/workflows', 'AGENTS.md', 'CLAUDE.md', '.claude/settings.json']).split('\n').filter(Boolean);
+          defaultBranchOnly = there.filter((f) => !existsSync(join(root, f)));
+        }
+        break;
+      } catch {
+        // No such ref (no remote, or the default branch was never fetched): try the local branch.
+      }
+    }
+  }
+
   let commits30d = 0;
   try {
     const out = execFileSync('git', ['rev-list', '--count', '--since=30 days ago', 'HEAD'], {
@@ -1006,5 +1026,7 @@ function detectGitStats(root: string): GitStats {
     commits30d,
     commits90d,
     defaultBranch,
+    behindDefault,
+    defaultBranchOnly,
   };
 }
