@@ -81,8 +81,9 @@ function kindsOfInvocation(program: string, args: string[]): VerifyKind[] {
 
   switch (program) {
     case 'tsc':
+      // Emitting is a tsconfig matter (`noEmit`); the name of the script says whether it is the build.
       add('typecheck');
-      if (!has('--noEmit')) add('build');
+      if (has('--build', '-b')) add('build');
       break;
     case 'biome':
       if (has('lint', 'check', 'ci')) add('lint');
@@ -566,6 +567,14 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
     const dir = manifest.replace(/\/Package\.swift$/, '');
     add(`swift build --package-path ${dir}`, ['build', 'typecheck'], manifest);
     if (ctx.testFiles.some((f) => f.startsWith(`${dir}/`) && f.endsWith('.swift'))) add(`swift test --package-path ${dir}`, ['test', 'typecheck'], manifest);
+  }
+  // An Xcode project with a committed shared scheme builds from the command line as it stands.
+  const scheme = ctx.findFiles((f) => /\.xcodeproj\/xcshareddata\/xcschemes\/[^/]+\.xcscheme$/.test(f))[0];
+  if (scheme) {
+    const name = scheme.split('/').pop()!.replace(/\.xcscheme$/, '');
+    const hasTests = /<TestableReference/.test(ctx.readText(scheme) ?? '') && ctx.testFiles.some((f) => f.endsWith('.swift'));
+    add(`xcodebuild -scheme ${name} build`, ['build', 'typecheck'], scheme);
+    if (hasTests) add(`xcodebuild -scheme ${name} test`, ['test', 'typecheck'], scheme);
   }
   if (ctx.hasFile('Cargo.toml')) {
     add('cargo test', ['test', 'typecheck'], 'Cargo.toml');

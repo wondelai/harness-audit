@@ -14,6 +14,8 @@ export interface WorkflowFacts {
   deployGated: boolean;
   /** Toolchain versions the workflow pins, e.g. `java-version: 17`. */
   toolchainPins: string[];
+  /** Branches the workflow is filtered to when none of them is the default branch: it never runs. */
+  deadBranches: string[] | undefined;
 }
 
 export interface CiFacts {
@@ -98,6 +100,28 @@ function extractLooseCommands(text: string): Step[] {
     .map((command) => ({ command, prCommand: command }));
 }
 
+/**
+ * The branches a GitHub workflow's push / pull_request triggers are filtered to. Empty when the
+ * workflow has no branch filter (it runs for every branch).
+ */
+function branchFilters(yaml: string): string[] {
+  const branches: string[] = [];
+  const lines = yaml.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const inline = /^\s*branches\s*:\s*\[([^\]]*)\]/.exec(lines[i]!);
+    if (inline) branches.push(...inline[1]!.split(',').map((b) => b.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean));
+    else if (/^\s*branches\s*:\s*$/.test(lines[i]!)) {
+      for (let j = i + 1; j < lines.length && /^\s*-\s+/.test(lines[j]!); j++) branches.push(lines[j]!.trim().replace(/^-\s+/, '').replace(/^['"]|['"]$/g, ''));
+    }
+  }
+  return [...new Set(branches)];
+}
+
+function branchMatches(pattern: string, branch: string): boolean {
+  const rx = new RegExp(`^${pattern.split('*').map((p) => p.replace(/[.+^$()|[\]{}?\\]/g, '\\$&')).join('.*')}$`);
+  return rx.test(branch);
+}
+
 export function analyzeCi(ctx: RepoContext): CiFacts {
   const classifier = new CommandClassifier(ctx);
   const ghWorkflows = ctx.findFiles((f) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f));
@@ -107,6 +131,7 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
   const files = [...ghWorkflows, ...otherCi];
 
   const raw = new Map<string, { text: string; steps: Step[]; calls: string[]; prTriggered: boolean }>();
+  const deadBranches = new Map<string, string[]>();
   for (const path of files) {
     const text = stripComments(ctx.readText(path) ?? '');
     const isGh = path.startsWith('.github/workflows/');
@@ -116,8 +141,13 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
       const target = m[1]!;
       calls.push(/\.ya?ml$/.test(target) ? target : `${target.replace(/\/$/, '')}/action.yml`);
     }
+    // A workflow filtered to branches that do not include the default one never runs here.
+    const filters = isGh ? branchFilters(text) : [];
+    const defaultBranch = ctx.git.defaultBranch;
+    const dead = filters.length > 0 && defaultBranch !== undefined && !filters.some((f) => branchMatches(f, defaultBranch));
+    if (dead) deadBranches.set(path, filters);
     // GitLab, CircleCI and friends run their pipeline for merge requests unless told otherwise.
-    raw.set(path, { text, steps, calls, prTriggered: isGh ? PR_TRIGGER.test(text) : true });
+    raw.set(path, { text, steps, calls, prTriggered: !dead && (isGh ? PR_TRIGGER.test(text) : true) });
   }
 
   // Composite actions a workflow calls contribute their steps to the caller.
@@ -155,7 +185,8 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
     const deployCommands: string[] = [];
 
     const splitLines = (body: string): string[] => body.split(/\n|&&/).map((l) => l.trim()).filter(Boolean);
-    for (const step of steps) {
+    // A workflow that never runs proves nothing, on a pull request or anywhere else.
+    for (const step of deadBranches.has(path) ? [] : steps) {
       for (const cmd of splitLines(step.command)) {
         if (runsDeployTool(cmd)) deployCommands.push(cmd);
         const cmdKinds = sortKinds(classifier.classify(cmd));
@@ -196,6 +227,7 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
       deployCommands,
       deployGated: /\bneeds\s*:|\benvironment\s*:|workflow_dispatch|workflow_run|if:\s*[^\n]*github\.ref\b|\bon:\s*\n\s+push:\s*\n\s+(?:branches|tags)\s*:|\brelease\s*:\s*\n\s+types/.test(wf.text),
       toolchainPins,
+      deadBranches: deadBranches.get(path),
     });
   }
 

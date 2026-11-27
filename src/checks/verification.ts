@@ -107,8 +107,17 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         ['Next.js', 'Astro', 'React', 'Vue', 'Nuxt', 'Svelte', 'SvelteKit', 'Express', 'Fastify', 'Hono', 'NestJS', 'FastAPI', 'Django', 'Flask', 'Rails', 'Laravel', 'Phoenix', 'Spring Boot', 'Cloudflare Workers'].includes(fw),
       );
 
+    // A suite pointed at a deployed site and left out of CI cannot be run by an agent as a check.
+    const pwConfig = ['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs'].map((f) => ctx.readText(f) ?? '').join('\n');
+    const liveBase = /baseURL\s*:\s*(?:process\.env\.\w+\s*(?:\?\?|\|\|)\s*)?['"`]https:\/\/(?!localhost|127\.)[^'"`]+['"`]/.exec(pwConfig)?.[0];
+    const e2eInCi = ctx.ci.workflows.some((w) => w.commands.some((c) => /playwright|e2e|cypress/i.test(c)));
+    const liveOnly = e2eSignals.length > 0 && liveBase !== undefined && !e2eInCi && !/webServer\s*:/.test(pwConfig);
+
     let status: CheckResult['status'] = 'pass';
-    if (e2eSignals.length > 0) {
+    if (liveOnly) {
+      status = 'warn';
+      e2eSignals.push('The Playwright suite targets a deployed URL, starts no local server and is not run in CI: an agent cannot use it as a check');
+    } else if (e2eSignals.length > 0) {
       status = 'pass';
     } else if (isWebOrService) {
       status = 'warn';

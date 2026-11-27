@@ -1,3 +1,4 @@
+import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -614,8 +615,14 @@ describe('weak evidence is no claim', () => {
     written.write('package.json', JSON.stringify({ name: 'app' }));
     written.write('AGENTS.md', '# App\n\nWorkers Builds deploys master after merge; nothing deploys from a laptop.\nA\nB\nC\n');
     const said = check(auditRepo(written.dir), 'release.deploy-safety');
-    expect(said.status).toBe('pass');
     expect(said.evidence[0]).toContain('AGENTS.md:3 mentions a git-triggered deploy');
+    // A merge is the deploy and nothing checks a pull request first.
+    expect(said.status).toBe('fail');
+    expect(said.evidence.join('\n')).toContain('Merges deploy to production and no pull-request check runs first');
+
+    written.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'vitest run' } }));
+    written.write('.github/workflows/ci.yml', 'on: [pull_request]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n');
+    expect(check(auditRepo(written.dir), 'release.deploy-safety').status).toBe('pass');
   });
 
   it('finds deploy commands by what they run, whatever they are called', () => {
@@ -956,5 +963,105 @@ describe('levels rest on what is certain', () => {
     expect(agents).toContain('pytest');
     expect(agents).toContain('npm --prefix retriever run test');
     expect(evidence(report, 'harness.sandbox-readiness')).toContain('retriever/wrangler.jsonc marks 1 binding(s) `remote: true`');
+  });
+});
+
+describe('substance, not existence', () => {
+  it('does not take a vendor\'s generic Cursor rule for a project brief', () => {
+    const repo = temp('ha-starter-');
+    repo.write('package.json', JSON.stringify({ name: 'starter', scripts: { check: 'tsc', test: 'vitest run' }, devDependencies: { typescript: '^6.0.0' } }));
+    repo.write('.cursor/rules/cloudflare.mdc', '---\ndescription: Cloudflare Workers\nglobs:\nalwaysApply: false\n---\n<system_context>You are an advanced assistant specialized in generating Cloudflare Workers code.</system_context>\n');
+    repo.write('src/index.ts', 'export default {};\n');
+    const report = auditRepo(repo.dir);
+    const brief = check(report, 'intent.instructions-file');
+    expect(brief.status).toBe('fail');
+    expect(brief.evidence.join('\n')).toContain('generic rule');
+    expect(check(report, 'intent.scoped-rules').status).not.toBe('pass');
+
+    // The same folder with a rule Cursor applies and that names the project's own paths and scripts.
+    repo.write('.cursor/rules/api.mdc', '---\ndescription: API handlers\nglobs: "src/**"\nalwaysApply: false\n---\nKeep handlers in `src/index.ts` thin; run `npm run check` before finishing.\n');
+    expect(check(auditRepo(repo.dir), 'intent.instructions-file').status).toBe('pass');
+  });
+
+  it('does not credit a workflow that never runs on the default branch', () => {
+    const repo = temp('ha-deadci-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'vitest run', lint: 'eslint .' }, devDependencies: { eslint: '^9.0.0' } }));
+    repo.write('.github/workflows/sanity-check.yml', 'on:\n  push:\n    branches: [main]\n  pull_request:\n    branches: [main]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n      - run: npm run lint\n');
+    repo.commit();
+    execFileSync('git', ['branch', '-m', 'master'], { cwd: repo.dir });
+    const dead = check(auditRepo(repo.dir), 'release.ci-pipeline');
+    expect(dead.status).toBe('fail');
+    expect(dead.evidence.join('\n')).toContain('is filtered to `main`, but the default branch is `master`: it never runs');
+    expect(dead.fix.en).toContain('branches:');
+
+    execFileSync('git', ['branch', '-m', 'main'], { cwd: repo.dir });
+    expect(check(auditRepo(repo.dir), 'release.ci-pipeline').status).toBe('pass');
+  });
+
+  it('credits only committed harness files', () => {
+    const repo = temp('ha-untracked-harness-');
+    repo.write('package.json', JSON.stringify({ name: 'app', dependencies: { next: '^16.0.0' } }));
+    repo.commit();
+    repo.write('.worktreeinclude', '.env.local\n');
+    repo.write('AGENTS.md', '# App\nRun `npm test`.\nA\nB\nC\n');
+    const report = auditRepo(repo.dir);
+    const worktree = check(report, 'graph.worktree-isolation');
+    expect(worktree.status).toBe('warn');
+    expect(worktree.evidence.join('\n')).toContain('Not committed yet, so no other checkout has it: .worktreeinclude');
+    const brief = check(report, 'intent.instructions-file');
+    expect(brief.status).toBe('warn');
+    expect(brief.evidence.join('\n')).toContain('AGENTS.md not committed yet');
+  });
+
+  it('says agents-only history for what it is and counts test support files out', () => {
+    const repo = temp('ha-agents-only-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'bun test' } }));
+    repo.write('test/preload/jsdom.mjs', 'export {};\n');
+    repo.write('test/helpers/render.ts', 'export {};\n');
+    repo.write('test/app.test.ts', "it('adds', () => { expect(1 + 1).toBe(2); });\n");
+    repo.commit('noreply@anthropic.com');
+    const report = auditRepo(repo.dir);
+    expect(report.stack.testFileCount).toBe(1);
+    expect(evidence(report, 'verification.oracle-protection')).toContain('1 commit(s) in the last 90 days, none by a human author');
+  });
+
+  it('builds an Xcode project from its shared scheme and has nothing to update without packages', () => {
+    const repo = temp('ha-scheme-');
+    repo.write('App.xcodeproj/project.pbxproj', '// !$*UTF8*$!\n');
+    repo.write('App.xcodeproj/xcshareddata/xcschemes/App.xcscheme', '<Scheme><BuildAction/></Scheme>\n');
+    repo.write('App/Main.swift', 'import SwiftUI\n');
+    repo.write('App/View.swift', 'import SwiftUI\n');
+    const report = auditRepo(repo.dir);
+    expect(report.stack.verifyCommands).toContain('`xcodebuild -scheme App build` → typecheck + build');
+    expect(check(report, 'release.dependency-automation').status).toBe('info');
+    const plan = initHarness(repo.dir, { dryRun: true, tools: ['claude-code'] });
+    const agents = plan.actions.find((a) => a.path === 'AGENTS.md')!.content;
+    expect(agents).toContain('xcodebuild -scheme App build');
+    expect(agents).toContain('XCTSkip');
+    expect(agents).not.toContain('@ts-ignore');
+  });
+
+  it('labels tsc as a type check and flags a fixed dev port', () => {
+    const repo = temp('ha-port-');
+    repo.write('package.json', JSON.stringify({ name: 'w', scripts: { check: 'tsc', dev: 'wrangler dev --port 8790' }, devDependencies: { typescript: '^6.0.0' } }));
+    repo.write('wrangler.toml', 'name = "w"\n');
+    const report = auditRepo(repo.dir);
+    expect(report.stack.verifyCommands).toContain('`npm run check` → typecheck');
+    const ports = check(report, 'graph.port-and-state-isolation');
+    expect(ports.status).toBe('warn');
+    expect(ports.evidence.join('\n')).toContain('Dev server port 8790 is fixed');
+  });
+
+  it('quotes the brief verbatim and warns about an e2e suite that only drives a deployed site', () => {
+    const repo = temp('ha-verbatim-');
+    repo.write('package.json', JSON.stringify({ name: 'admin', devDependencies: { '@playwright/test': '^1.50.0' }, dependencies: { react: '^19.0.0' } }));
+    repo.write('AGENTS.md', '# Admin\n\nNever point `PUBLIC_ADMIN_API` at production from a local session.\nA\nB\nC\n');
+    repo.write('playwright.config.ts', "export default { use: { baseURL: 'https://admin.example.com' } };\n");
+    repo.write('e2e/login.spec.ts', "test('logs in', async () => {});\n");
+    const report = auditRepo(repo.dir);
+    expect(evidence(report, 'harness.sandbox-readiness')).toContain('"Never point `PUBLIC_ADMIN_API` at production from a local session."');
+    const e2e = check(report, 'verification.e2e-tests');
+    expect(e2e.status).toBe('warn');
+    expect(e2e.evidence.join('\n')).toContain('targets a deployed URL');
   });
 });

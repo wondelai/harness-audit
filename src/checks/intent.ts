@@ -1,4 +1,4 @@
-import { repoDocLinks } from '../brief.js';
+import { repoDocLinks, repoPathsIn } from '../brief.js';
 import type { RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
 
@@ -88,12 +88,35 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
       found.push(`.cursor/rules/*.md (${cursorPlainMdFiles.length} ignored — must be .mdc)`);
     }
 
-    const hasPrimary = hasAgentsMd || hasClaudeMd || cursorMdcFiles.length > 0 || hasCopilot;
+    // A Cursor rule counts as the project brief only when Cursor can apply it (alwaysApply or
+    // globs) and it is about this repository: it names a path that exists or a script the project
+    // defines. A vendor's generic rule dropped in by a starter template is neither.
+    const scriptNames = Object.keys(ctx.packageJson?.scripts ?? {}).filter((n) => n.length >= 4);
+    const grounded = (text: string): boolean =>
+      repoPathsIn(text, (p) => ctx.hasFile(p) || ctx.findFiles((f) => f.startsWith(`${p.replace(/\/$/, '')}/`)).length > 0) ||
+      scriptNames.some((n) => new RegExp(`\\b(?:run\\s+)?${n.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&')}\\b`).test(text) && /\b(npm|pnpm|yarn|bun|vp)\b/.test(text));
+    const applicableMdc = cursorMdcFiles.filter((f) => {
+      const body = ctx.readText(f) ?? '';
+      const front = /^---\n([\s\S]*?)\n---/.exec(body)?.[1] ?? '';
+      const applies = /alwaysApply:\s*true/.test(front) || /globs:[ \t]*\S/.test(front);
+      return applies && grounded(body);
+    });
+    const genericMdcOnly = cursorMdcFiles.length > 0 && applicableMdc.length === 0 && !hasAgentsMd && !hasClaudeMd && !hasCopilot;
+    if (genericMdcOnly) {
+      found.push(`${cursorMdcFiles.join(', ')}: generic rule (no \`alwaysApply\`/\`globs\`, or it names no path or script of this repository) — not a project brief`);
+    }
+    const hasPrimary = hasAgentsMd || hasClaudeMd || applicableMdc.length > 0 || hasCopilot;
     let status: CheckResult['status'] = 'fail';
     if (hasPrimary && cursorPlainMdFiles.length === 0 && !hasLegacyCursorRules) {
       status = 'pass';
     } else if (hasPrimary || hasLegacyCursorRules || claudeRuleFiles.length > 0 || localOnlyBriefs.length > 0) {
       status = 'warn';
+    }
+    // The brief exists but is not committed: no other checkout, and no CI agent, has it yet.
+    const uncommittedBriefs = ['AGENTS.md', 'CLAUDE.md'].filter((f) => ctx.hasFile(f) && ctx.isTracked(f) === false);
+    if (uncommittedBriefs.length > 0) {
+      found.push(`${uncommittedBriefs.join(', ')} not committed yet`);
+      if (status === 'pass') status = 'warn';
     }
     const onlyLocalBrief = !hasPrimary && localOnlyBriefs.length > 0;
 
@@ -475,10 +498,13 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
     }
 
     const routesToDocs = routedDocs.length >= 3;
-    const totalScoped = cursorMdcFiles.length + claudeRuleFiles.length + nestedBriefs.length + (routesToDocs ? routedDocs.length : 0);
+    // A Cursor rule is scoped when it has globs (or always applies); without either Cursor never loads it.
+    const scopedMdc = cursorMdcFiles.filter((f) => /^---\n[\s\S]*?(?:globs:[ \t]*\S|alwaysApply:[ \t]*true)[\s\S]*?\n---/.test(ctx.readText(f) ?? ''));
+    const totalScoped = scopedMdc.length + claudeRuleFiles.length + nestedBriefs.length + (routesToDocs ? routedDocs.length : 0);
     const evidence: string[] = [];
     if (claudeRuleFiles.length > 0) evidence.push(`.claude/rules/*.md: ${claudeRuleFiles.length}`);
-    if (cursorMdcFiles.length > 0) evidence.push(`.cursor/rules/*.mdc: ${cursorMdcFiles.length}`);
+    if (scopedMdc.length > 0) evidence.push(`.cursor/rules/*.mdc with globs: ${scopedMdc.length}`);
+    if (cursorMdcFiles.length > scopedMdc.length) evidence.push(`${cursorMdcFiles.length - scopedMdc.length} .cursor rule(s) have no \`globs\` and \`alwaysApply: false\`, so Cursor never applies them`);
     if (nestedBriefs.length > 0) {
       evidence.push(`Nested briefs (${nestedBriefs.length}): ${nestedBriefs.slice(0, 5).join(', ')}${nestedBriefs.length > 5 ? ', …' : ''}`);
     }

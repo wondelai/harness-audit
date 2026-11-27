@@ -313,7 +313,8 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     const optOut = ctx.brief.files
       .flatMap((f) => (ctx.readText(f) ?? '').split(/\r?\n/).map((text, i) => ({ f, line: i + 1, text })))
       .find((l) => /\b(no|without|removed|there is no)\b[^.\n]{0,40}\b(PreToolUse|PostToolUse|hooks?|guard)\b/i.test(l.text) && /on purpose|deliberate|by design|decision|intentional/i.test(l.text));
-    const formatCommand = ctx.verify.commands.filter((c) => c.kinds.includes('format') || c.kinds.includes('lint')).sort((a, b) => a.kinds.length - b.kinds.length)[0]?.command;
+    // A hook runs on every edit, so only a command that just lints or formats is fast enough to suggest.
+    const formatCommand = ctx.verify.commands.filter((c) => c.kinds.every((k) => k === 'format' || k === 'lint')).sort((a, b) => a.kinds.length - b.kinds.length)[0]?.command;
 
     let status: CheckResult['status'] = 'warn';
     if (hookIssues.length > 0) {
@@ -614,6 +615,10 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
     }
 
     const ignoreLines = [...missingIgnores, ...missingAdvisory].join(', ');
+    // A committed file that .gitignore names: the rule came after the commit, and git still tracks it.
+    const leakFiles = [...new Set(trackedLeaks.map((l) => /^(.*?):\d+ /.exec(l)?.[1] ?? '').filter(Boolean))];
+    const trackedButIgnored = leakFiles.filter((f) => ctx.isTracked(f) === true && ctx.ignoredPaths([f]).size > 0);
+    const untrack = trackedButIgnored.length > 0 ? ` ${trackedButIgnored.map((f) => `\`git rm --cached ${f}\``).join(', ')} first: .gitignore already names it, but git still tracks the committed copy.` : '';
     results.push({
       id: 'harness.secret-hygiene',
       station: 'harness',
@@ -631,7 +636,7 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       },
       fix: {
         en: trackedLeaks.length > 0
-          ? 'Rotate every credential listed above now (it is in git history even after you delete the line), move the values to your secret store (e.g. `wrangler secret put`, CI secrets, a gitignored env file), and add `gitleaks` to CI.'
+          ? `Rotate every credential listed above now (it is in git history even after you delete the line), move the values to your secret store (e.g. \`wrangler secret put\`, CI secrets, a gitignored env file), and add \`gitleaks\` to CI.${untrack}`
           : untrackedLeaks.length > 0
             ? 'Add the listed files to `.gitignore` before the next `git add`, or move the credentials out of the working tree.'
             : missingIgnores.length > 0

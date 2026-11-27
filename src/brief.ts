@@ -39,22 +39,29 @@ export interface BriefFacts {
 // "publish" as domain vocabulary, or a rule about where tests live are not.
 const TARGET = String.raw`(?:\bproduction\b|\bprod\b|--remote\b|\bdeploy(?:s|ed|ing|ment|ments)?\b|\bnpm publish\b|\bforce[- ]push(?:es|ing)?\b|\bcustomer data\b|\breal (?:users|customers|data|e-?mail)\b|\blive (?:data|database|db|site|webhooks?|customers|users|api)\b)`;
 const LIMIT = String.raw`(?:\bnever\b|\bdo not\b|\bdon't\b|\bmust not\b|\bmustn't\b|\bnot allowed\b|\bforbidden\b|\boff-limits\b|\bbelongs? to\b|\breserved for\b|\b(?:is|are) the only (?:path|way)\b|\bone way only\b|\bonly (?:from|via|through|when)\b|\b(?:debug|emergency|manual(?:ly)?) only\b|\bbypass(?:es)? the pipeline\b|\bsay so first\b)`;
-const BOUNDARY = new RegExp(`${TARGET}[\\s\\S]{0,110}?${LIMIT}|${LIMIT}[\\s\\S]{0,110}?${TARGET}`, 'i');
+const BOUNDARY = new RegExp(`${TARGET}[\\s\\S]{0,170}?${LIMIT}|${LIMIT}[\\s\\S]{0,170}?${TARGET}`, 'i');
 const REMOTE_IS_PRODUCTION = /--remote\b[\s\S]{0,110}\bproduction\b|\bproduction\b[\s\S]{0,110}--remote\b/i;
 // Local work that reaches production by default: a local or dev subject, a verb, then production.
 const REACHES_PRODUCTION = /\b(?:local\w*|dev(?:elopment)?|wrangler dev)\b[\s\S]{0,70}?\b(?:talks? to|reach(?:es)?|hits?|connects? to|writes? to|binds?|runs? against|points? at)\b[\s\S]{0,40}?(?:production|prod)\b/i;
 /** Markdown and emoji carry no meaning for a rule: "🚨 **PRODUCTION DEPLOYS — ONE WAY ONLY**" reads as its words. */
-const plain = (text: string): string => text.replace(/[*_~]|[^\x00-\x7F\u00A0-\u024F\u2010-\u2015]/g, '').replace(/\s+/g, ' ').trim();
+const plain = (text: string): string => text.replace(/\*+|~~|(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])|[^\x00-\x7F\u00A0-\u024F\u2010-\u2015]/g, '').replace(/\s+/g, ' ').trim();
 const MAP_HEADING = /^#{2,4}\s+(architecture|directory|structure|project structure|layout|modules?|key paths|where things live|read before (you )?touch(ing)?|ownership)\b/im;
+
+/** Whether the text names at least one path (a file or a directory with a slash) that exists in the repository. */
+export function repoPathsIn(text: string, exists: (path: string) => boolean): boolean {
+  const candidates = [...text.matchAll(/(?:^|[\s`("'])((?:\.?[\w@-]+\/)+[\w.@-]*)/g)].map((m) => m[1]!.replace(/^\.\//, ''));
+  return [...new Set(candidates)].slice(0, 200).some((p) => p.length > 3 && exists(p));
+}
 
 export function repoDocLinks(markdown: string, exists: (path: string) => boolean): string[] {
   const paths = [...markdown.matchAll(/[`(]((?:[\w.@-]+\/)+[\w.@-]+\.mdx?)[`)#]/g)].map((m) => m[1]!.replace(/^(?:\.\/)+/, ''));
   return [...new Set(paths)].filter(exists);
 }
 
-function clip(text: string): string {
-  const clean = text.trim().replace(/^[-*>\d.\s]+/, '').replace(/\*\*/g, '');
-  return clean.length > 110 ? `${clean.slice(0, 110)}…` : clean;
+/** The line verbatim, without its list marker, cut at a word boundary. */
+function quote(text: string): string {
+  const clean = text.trim().replace(/^(?:[-*>]|\d+\.)\s+/, '');
+  return clean.length > 120 ? `${clean.slice(0, clean.lastIndexOf(' ', 120))}…` : clean;
 }
 
 export function readBrief(ctx: RepoContext): BriefFacts {
@@ -89,14 +96,15 @@ export function readBrief(ctx: RepoContext): BriefFacts {
       if (/^\s*(```|~~~)/.test(raw)) inFence = !inFence;
       if (inFence || !raw.trim() || /^\s*#/.test(raw)) return;
       // Sentence by sentence: two unrelated words at opposite ends of a long line are not a rule.
+      // Matching ignores markdown and emoji; the quote is the line as its author wrote it.
       for (const sentence of plain(raw).split(/(?<=[.!?;])\s+(?=[A-Z`("'-])/)) {
         const limits = BOUNDARY.test(sentence);
         if (REACHES_PRODUCTION.test(sentence) && !limits) {
-          productionReach.push({ file, line: index + 1, text: clip(sentence) });
+          productionReach.push({ file, line: index + 1, text: quote(raw) });
           return;
         }
         if (limits || REMOTE_IS_PRODUCTION.test(sentence)) {
-          boundaryRules.push({ file, line: index + 1, text: clip(sentence) });
+          boundaryRules.push({ file, line: index + 1, text: quote(raw) });
           return;
         }
       }

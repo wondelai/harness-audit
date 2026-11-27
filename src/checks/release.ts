@@ -24,6 +24,9 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     } else {
       evidence.push(`CI workflows (${allCiFiles.length}): ${allCiFiles.slice(0, 5).join(', ')}${allCiFiles.length > 5 ? ', …' : ''}`);
       evidence.push(`Pull requests are gated on — tests: ${mark('test')} · lint: ${mark('lint')} · typecheck: ${mark('typecheck')}`);
+      for (const dead of ci.workflows.filter((w) => w.deadBranches)) {
+        evidence.push(`${dead.path} is filtered to ${dead.deadBranches!.map((b) => `\`${b}\``).join(', ')}, but the default branch is \`${ctx.git.defaultBranch}\`: it never runs`);
+      }
       // The commands that provide the gate, so the reading can be checked at a glance.
       const shown = new Set<string>();
       for (const kind of ['test', 'lint', 'typecheck'] as const) {
@@ -50,6 +53,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     // The same minimal set a brief should quote: never a watcher, always the build when there is one.
     const gateCommand = minimalVerifySet(ctx.verify).join('`, `');
     const missingOnPr = (['test', 'lint', 'typecheck'] as const).filter((k) => !gates(k));
+    const deadWorkflow = ci.workflows.find((w) => w.deadBranches);
 
     results.push({
       id: 'release.ci-pipeline',
@@ -68,13 +72,17 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       },
       fix: {
         en:
-          allCiFiles.length === 0
+          deadWorkflow
+            ? `Point ${deadWorkflow.path} at the default branch: change its \`branches:\` filter to \`[${ctx.git.defaultBranch}]\` (or drop the filter), so the checks it defines actually run.`
+            : allCiFiles.length === 0
             ? `Add a CI workflow triggered on \`pull_request\` that installs from the lockfile and runs ${gateCommand ? `\`${gateCommand}\`` : 'your lint, typecheck and test commands'} before merge.`
             : !ctx.verify.kinds.has('test') && missingOnPr.includes('test')
               ? `There is no test command to run yet: write the first tests (see verification.unit-tests), then add them to the pull-request workflow next to ${gateCommand ? `\`${gateCommand}\`` : 'the static checks'}.`
               : `Run ${missingOnPr.join(' and ')} on \`pull_request\`${gateCommand ? ` (e.g. \`${gateCommand}\`)` : ''} so a red result blocks the merge, not just the main branch.`,
         pl:
-          allCiFiles.length === 0
+          deadWorkflow
+            ? `Skieruj ${deadWorkflow.path} na gałąź domyślną: zmień filtr \`branches:\` na \`[${ctx.git.defaultBranch}]\` (lub go usuń), aby zdefiniowane w nim sprawdzenia faktycznie działały.`
+            : allCiFiles.length === 0
             ? `Dodaj workflow CI wyzwalany na \`pull_request\`, który instaluje zależności z lockfile’a i uruchamia ${gateCommand ? `\`${gateCommand}\`` : 'lint, typecheck oraz testy'} przed scaleniem.`
             : !ctx.verify.kinds.has('test') && missingOnPr.includes('test')
               ? `Nie ma jeszcze komendy testów: napisz pierwsze testy (patrz verification.unit-tests), a potem dodaj je do workflow na pull requestach obok ${gateCommand ? `\`${gateCommand}\`` : 'sprawdzeń statycznych'}.`
@@ -162,7 +170,9 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       '.github/dependabot.yaml',
     ].filter((f) => ctx.hasFile(f));
 
-    const status: CheckResult['status'] = depConfigs.length > 0 ? 'pass' : 'warn';
+    // A repository that resolves no packages (an Xcode app without SPM, a docs repo) has nothing to update.
+    const resolves = ctx.stack.packageManagers.some((pm) => !['make', 'cmake', 'xcodebuild'].includes(pm)) || ctx.findFiles((f) => /(^|\/)Package\.resolved$/.test(f)).length > 0;
+    const status: CheckResult['status'] = depConfigs.length > 0 ? 'pass' : resolves ? 'warn' : 'info';
 
     results.push({
       id: 'release.dependency-automation',
@@ -177,7 +187,9 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       evidence:
         depConfigs.length > 0
           ? [`Configured: ${depConfigs.join(', ')}`]
-          : ['No Renovate or Dependabot configuration found'],
+          : resolves
+            ? ['No Renovate or Dependabot configuration found']
+            : ['No package dependencies to keep up to date'],
       why: {
         en: 'Patch and minor dependency updates are the safest first candidate for a Level 4–5 automated loop because your CI suite already serves as their oracle.',
         pl: 'Aktualizacje patch i minor zależności to najbezpieczniejszy pierwszy kandydat na pętlę Poziomu 4–5, bo zestaw CI jest już dla nich gotową wyrocznią.',
@@ -226,7 +238,8 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       [/posthog/i, 'PostHog'],
       [/crashlytics/i, 'Firebase Crashlytics'],
       [/datadog|bugsnag|honeybadger|rollbar/i, 'Error tracking SDK'],
-      [/structlog|zerolog|\bzap\b|slog/i, 'Structured logging'],
+      [/structlog|zerolog|\bzap\b|slog|timber/i, 'Structured logging'],
+      [/schemaDirectory|room\.schemaLocation/i, 'Room schema export (versioned migrations)'],
       [/alembic/i, 'Alembic migrations'],
     ];
     for (const [pattern, label] of manifestSignals) {
@@ -312,7 +325,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     // "Workers Builds" next to a word about shipping, or "deploys … on merge/push". The product's
     // name beside something else ("Workers Builds reads packageManager") is not a statement about deploys.
     const GIT_DEPLOY = /\bWorkers Builds\b[^.\n]{0,40}\b(?:deploy\w*|ships?|builds? (?:every|each|on)|releases?)\b|\b(?:deploy\w*|ships?|merg\w+)\b[^.\n]{0,60}\bWorkers Builds\b|\bdeploy\w*\b[^.\n]{0,60}\b(?:on|after|upon)\s+(?:every\s+|each\s+)?(?:merge|push)\b/i;
-    const platformLine = [...ctx.brief.files, ...ci.files]
+    const platformLine = [...ctx.brief.files, ...ci.files, ...['README.md', 'wrangler.toml', 'wrangler.jsonc'].filter((f) => ctx.hasFile(f))]
       .flatMap((f) => (ctx.readText(f) ?? '').split(/\r?\n/).map((text, i) => ({ f, line: i + 1, text })))
       .find((l) => GIT_DEPLOY.test(l.text));
     const platform = platformLine !== undefined;
@@ -345,8 +358,14 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       );
     }
 
+    // Merging is the deploy, and nothing checks a pull request first: every merge ships untested.
+    const mergeShipsUnchecked = platform && deployWorkflows.length === 0 && ci.prKinds.size === 0;
+    if (mergeShipsUnchecked) evidence.push('Merges deploy to production and no pull-request check runs first');
+
     let status: CheckResult['status'];
-    if (ungated.length > 0) {
+    if (mergeShipsUnchecked) {
+      status = 'fail';
+    } else if (ungated.length > 0) {
       status = 'warn';
     } else if (localDeploys.length > 0) {
       status = unguarded.length === 0 ? 'pass' : 'warn';
@@ -363,7 +382,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       station: 'release',
       weight: 15,
       status,
-      severity: status === 'warn' ? 'medium' : 'low',
+      severity: status === 'fail' ? 'high' : status === 'warn' ? 'medium' : 'low',
       title: {
         en: 'Gated deploys & local-deploy guardrails',
         pl: 'Bramkowane wdrożenia i blokada lokalnego deployu',
@@ -375,13 +394,17 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       },
       fix: {
         en:
-          ungated.length > 0
+          mergeShipsUnchecked
+            ? `A merge ships to production here, so add a pull-request workflow that runs ${minimalVerifySet(ctx.verify).length > 0 ? `\`${minimalVerifySet(ctx.verify).join('`, `')}\`` : 'your checks'} and require it before merging.`
+            : ungated.length > 0
             ? `Put the deploy job in ${ungated[0]!.path} behind the verify job (\`needs: [verify]\`) or a protected \`environment:\`${unguarded.length > 0 ? `, and deny local deploys in \`.claude/settings.json\` (${denyExample})` : ''}.`
             : unguarded.length > 0
               ? `Add to \`permissions.deny\` in \`.claude/settings.json\`: ${denyExample}.`
               : 'Keep the deny list in step with new deploy scripts.',
         pl:
-          ungated.length > 0
+          mergeShipsUnchecked
+            ? `Scalenie wdraża tu na produkcję, więc dodaj workflow na pull requestach uruchamiający ${minimalVerifySet(ctx.verify).length > 0 ? `\`${minimalVerifySet(ctx.verify).join('`, `')}\`` : 'sprawdzenia'} i wymagaj go przed scaleniem.`
+            : ungated.length > 0
             ? `Uzależnij zadanie deploy w ${ungated[0]!.path} od zadania weryfikacji (\`needs: [verify]\`) lub chronionego \`environment:\`${unguarded.length > 0 ? ` i zablokuj lokalny deploy w \`.claude/settings.json\` (${denyExample})` : ''}.`
             : unguarded.length > 0
               ? `Dodaj do \`permissions.deny\` w \`.claude/settings.json\`: ${denyExample}.`

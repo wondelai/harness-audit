@@ -142,7 +142,9 @@ export function isTestFilePath(relPath: string): boolean {
     SOURCE_EXTENSIONS.has(extname(normalized)) &&
     !name.endsWith('.d.ts') &&
     !ROUTE_ENTRY_NAME.test(name) &&
-    !/^(setup|helpers?|utils?|fixtures?|mocks?|factories?|conftest|index)\./.test(name)
+    !/^(setup|helpers?|utils?|fixtures?|mocks?|factories?|conftest|index|preload)[.-]/.test(name) &&
+    // Support code that lives beside the tests: preloads, fixtures, helpers, mocks.
+    !/(^|\/)(preload|setup|fixtures?|helpers?|mocks?|__mocks__|support|testdata|utils?)\//.test(normalized)
   ) {
     return true;
   }
@@ -550,6 +552,8 @@ export class RepoContext {
   /** "One active contributor" / "No commits in the last 90 days (12 authors in the history)". */
   get teamLabel(): string {
     if (this.team === 'inactive') {
+      // Commits by agents and bots only are activity, just not a second person.
+      if (this.git.commits90d > 0) return `${this.git.commits90d} commit(s) in the last 90 days, none by a human author (agents or bots only)`;
       return `No commits in the last 90 days (${this.git.authorsAllTime} author${this.git.authorsAllTime === 1 ? '' : 's'} in the history)`;
     }
     return this.team === 'solo' ? 'One active contributor' : `${this.git.gitAuthors90d} active contributors`;
@@ -925,7 +929,7 @@ function detectGitStats(root: string): GitStats {
       timeout: 3000,
     });
   } catch {
-    return { isGitRepo: false, gitAuthors90d: 0, authorsAllTime: 0, commits30d: 0 };
+    return { isGitRepo: false, gitAuthors90d: 0, authorsAllTime: 0, commits30d: 0, commits90d: 0 };
   }
 
   let branch: string | undefined;
@@ -944,7 +948,7 @@ function detectGitStats(root: string): GitStats {
   // reviewer, and one person committing under two addresses is still one person.
   const countPeople = (args: string[]): number => {
     try {
-      const out = execFileSync('git', ['log', ...args, '--format=%ae%x09%an', '--no-merges'], {
+      const out = execFileSync('git', ['log', ...args, '--format=%ae%x09%an'], {
         cwd: root,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -965,6 +969,22 @@ function detectGitStats(root: string): GitStats {
   const gitAuthors90d = countPeople(['--since=90 days ago']);
   const authorsAllTime = Math.max(gitAuthors90d, countPeople(['-n', '3000']));
 
+  const count = (args: string[]): number => {
+    try {
+      return Number.parseInt(execFileSync('git', ['rev-list', '--count', ...args, 'HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim(), 10) || 0;
+    } catch {
+      return 0;
+    }
+  };
+  const commits90d = count(['--since=90 days ago']);
+  // The branch pull requests target: origin's HEAD when a remote is known, else the checked-out branch.
+  let defaultBranch: string | undefined;
+  try {
+    defaultBranch = execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim().replace(/^origin\//, '');
+  } catch {
+    defaultBranch = branch && branch !== 'HEAD' ? branch : undefined;
+  }
+
   let commits30d = 0;
   try {
     const out = execFileSync('git', ['rev-list', '--count', '--since=30 days ago', 'HEAD'], {
@@ -984,5 +1004,7 @@ function detectGitStats(root: string): GitStats {
     gitAuthors90d,
     authorsAllTime,
     commits30d,
+    commits90d,
+    defaultBranch,
   };
 }

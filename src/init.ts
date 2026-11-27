@@ -49,7 +49,7 @@ ${commandLines.join('\n')}
 ## Working Rules
 
 1. **Plan before multi-file edits.** State files to touch, acceptance criteria, and the exact verification commands that prove completion.
-2. **Protect the test oracle.** Never add \`.skip()\`, \`.only()\`, \`@ts-ignore\`, or tautological assertions (\`expect(true).toBe(true)\`) to make checks green.
+2. **Protect the test oracle.** ${oracleRule(ctx)}
 3. **Production is off-limits locally.** Never run production deploys, remote database migrations, or live external webhooks from a local agent session.
 4. **Verify every claim.** Report the exact command run and its observed exit code; do not claim tests pass without running them.
 
@@ -99,6 +99,16 @@ function buildClaudeMd(): string {
 `;
 }
 
+/** "Do not weaken the tests", in the constructs of the repository's own language. */
+function oracleRule(ctx: RepoContext): string {
+  const langs = ctx.stack.languages;
+  if (langs[0] === 'Swift') return 'Never add `XCTSkip`, disabled tests, `// swiftlint:disable` or assertions on constants (`XCTAssertTrue(true)`) to make checks green.';
+  if (langs[0] === 'Kotlin' || langs[0] === 'Java') return 'Never add `@Ignore` / `@Disabled`, `@Suppress` or assertions on constants (`assertTrue(true)`) to make checks green.';
+  if (langs[0] === 'Python') return 'Never add `@pytest.mark.skip`, `# type: ignore` or assertions on constants (`assert True`) to make checks green.';
+  if (langs[0] === 'Go') return 'Never add `t.Skip()` or assertions that cannot fail to make checks green.';
+  return 'Never add `.skip()`, `.only()`, `@ts-ignore`, or tautological assertions (`expect(true).toBe(true)`) to make checks green.';
+}
+
 /** Where this stack keeps its tests, as globs for a path-scoped rule. */
 function testGlobs(ctx: RepoContext): string[] {
   const langs = ctx.stack.languages;
@@ -119,8 +129,8 @@ ${testGlobs(ctx).map((g) => `  - "${g}"`).join('\n')}
 
 # Testing Rules
 
-- Pin observable behavior against hand-computed expected values — never write tautological assertions (\`expect(true).toBe(true)\` or re-deriving expected output with the same expression under test).
-- Never commit \`.only()\` or leave newly added \`.skip()\` tests without a linked tracking issue.
+- Pin observable behavior against hand-computed expected values — never assert on a constant or re-derive the expected output with the expression under test.
+- ${oracleRule(ctx)} A skipped test needs a linked tracking issue.
 - Prefer real temporary fixtures or isolated test state over mocking the module under test.
 `;
 }

@@ -103,6 +103,9 @@ export interface GitStats {
   /** People in the last 3,000 commits: who a quiet repository belongs to. */
   authorsAllTime: number;
   commits30d: number;
+  commits90d: number;
+  /** The branch pull requests target (origin's HEAD, else the checked-out branch). */
+  defaultBranch?: string;
   remoteName?: string;
 }
 

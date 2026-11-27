@@ -15,9 +15,10 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
 
   // 1. graph.worktree-isolation
   {
-    const wtScripts = ctx.findFiles(
-      (f) => /^(bin|scripts)\/(wt|worktree)([.-].*)?$/.test(f) || f === '.worktreeinclude',
-    );
+    const wtFiles = ctx.findFiles((f) => /^(bin|scripts)\/(wt|worktree)([.-].*)?$/.test(f) || f === '.worktreeinclude');
+    // On this machine only: another clone, or an agent's fresh checkout, never gets an uncommitted file.
+    const wtScripts = wtFiles.filter((f) => ctx.isTracked(f) !== false);
+    const wtLocalOnly = wtFiles.filter((f) => ctx.isTracked(f) === false);
     const pkgScripts = Object.keys(ctx.packageJson?.scripts ?? {}).filter((k) =>
       /worktree|\bwt\b/i.test(k),
     );
@@ -26,6 +27,7 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     const evidence: string[] = [];
     if (wtScripts.length > 0) evidence.push(`Worktree tooling: ${wtScripts.join(', ')}`);
     if (pkgScripts.length > 0) evidence.push(`Package scripts: ${pkgScripts.join(', ')}`);
+    if (wtLocalOnly.length > 0) evidence.push(`Not committed yet, so no other checkout has it: ${wtLocalOnly.join(', ')}`);
     if (briefMentionsWorktree) evidence.push('Worktree workflow documented in root instructions');
 
     // Two agents in one tree collide hardest on ports and local state. A repository with neither
@@ -34,7 +36,7 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     let status: CheckResult['status'] = 'warn';
     if (wtScripts.length > 0 || pkgScripts.length > 0) {
       status = 'pass';
-    } else if (briefMentionsWorktree) {
+    } else if (briefMentionsWorktree || wtLocalOnly.length > 0) {
       status = 'warn';
     } else {
       status = hasLocalState ? 'fail' : 'warn';
@@ -106,8 +108,16 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
 
     const isPureLibrary = !hasDevServer(ctx);
 
+    // A port written into the config or the dev script: two checkouts cannot both bind it.
+    const fixedPort =
+      /\[dev\][^\[]*?\bport\s*=\s*(\d+)/.exec(ctx.readText('wrangler.toml') ?? '')?.[1] ??
+      /--port[= ](\d{2,5})\b/.exec(Object.entries(ctx.packageJson?.scripts ?? {}).filter(([n]) => /^(dev|start|serve)/.test(n)).map(([, b]) => b).join('\n'))?.[1];
+    if (fixedPort && !hasPortEnv) evidence.push(`Dev server port ${fixedPort} is fixed in the config: parallel checkouts collide on it`);
+
     let status: CheckResult['status'] = 'warn';
-    if (hasPortEnv && hasEphemeralLocalState) {
+    if (fixedPort && !hasPortEnv) {
+      status = 'warn';
+    } else if (hasPortEnv && hasEphemeralLocalState) {
       status = 'pass';
     } else if (hasPortEnv || hasEphemeralLocalState || isPureLibrary) {
       status = isPureLibrary && !hasPortEnv && !hasEphemeralLocalState ? 'info' : 'pass';
