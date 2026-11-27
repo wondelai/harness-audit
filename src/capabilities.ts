@@ -748,7 +748,8 @@ export function deployScriptGuards(ctx: RepoContext): Map<string, string> {
   const guards = new Map<string, string>();
   for (const [name, body] of Object.entries(scripts)) {
     if (!classifier.deploys(body)) continue;
-    const steps = [scripts[`pre${name}`] ?? '', body].join(' && ').split(/&&|;/).map((s) => s.trim()).filter(Boolean);
+    // Only `&&` makes the deploy wait for the guard to pass: after `;` it ships whatever the guard said.
+    const steps = [scripts[`pre${name}`] ?? '', body].join(' && ').split(/&&/).map((s) => s.trim()).filter(Boolean);
     const shipsAt = steps.findIndex((s) => classifier.deploys(s));
     const guard = steps.slice(0, shipsAt === -1 ? steps.length : shipsAt).find((s) => DEPLOY_GUARD.test(s));
     if (guard) guards.set(run(name), guard);

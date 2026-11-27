@@ -29,7 +29,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       evidence.push(`CI workflows (${allCiFiles.length}): ${allCiFiles.slice(0, 5).join(', ')}${allCiFiles.length > 5 ? ', …' : ''}`);
       evidence.push(`Pull requests are gated on — tests: ${mark('test')} · lint: ${mark('lint')} · typecheck: ${mark('typecheck')}`);
       for (const dead of ci.workflows.filter((w) => w.deadBranches)) {
-        evidence.push(`${dead.path} is filtered to ${dead.deadBranches!.map((b) => `\`${b}\``).join(', ')}, but the default branch is \`${ctx.git.defaultBranch}\`: it never runs`);
+        evidence.push(`${dead.path} is filtered to ${dead.deadBranches!.map((b) => `\`${b}\``).join(', ')}, but the default branch is \`${ctx.git.defaultBranch}\`: pushes and pull requests to it never start this workflow`);
       }
       // The commands that provide the gate, so the reading can be checked at a glance.
       const shown = new Set<string>();
@@ -273,7 +273,8 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     // The repository's own telemetry module (`src/posthog.ts`, `lib/logger.ts`) when no SDK is a dependency.
     const telemetryModule = ctx.sourceFiles.find((f) => /(^|\/)(posthog|sentry|telemetry|otel|tracing|logger|logging)\.[a-z]+$/i.test(f));
     if (telemetryModule && !signals.some((s) => /Sentry|PostHog|OpenTelemetry|logging/i.test(s))) signals.push(`Telemetry module (${telemetryModule})`);
-    const telemetrySignals = signals.length;
+    // Migration tooling says how the schema changes, not what the running app reports.
+    const telemetrySignals = signals.filter((s) => !/migration|schema export/i.test(s)).length;
     if (ctx.findFiles((f) => /(^|\/)migrations\//.test(f)).length > 0) {
       signals.push('Versioned migrations directory');
     }
@@ -373,7 +374,8 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     const platform = platformLine !== undefined;
     if (platformLine && deployWorkflows.length === 0) {
       // Quote the sentence that says it, whole words only.
-      const sentence = platformLine.text.split(/(?<=[.!?;])\s+/).find((s) => GIT_DEPLOY.test(s))!.trim().replace(/^[-*#>\s]+/, '');
+      // The line matched as a whole; when no single sentence of it does, the whole line is the quote.
+      const sentence = (platformLine.text.split(/(?<=[.!?;])\s+/).find((s) => GIT_DEPLOY.test(s)) ?? platformLine.text).trim().replace(/^[-*#>\s]+/, '');
       const quote = sentence.length > 120 ? `${sentence.slice(0, sentence.lastIndexOf(' ', 120))}…` : sentence;
       evidence.push(`${platformLine.f}:${platformLine.line} mentions a git-triggered deploy: "${quote}"`);
     }

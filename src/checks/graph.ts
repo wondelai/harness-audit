@@ -140,14 +140,18 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     const fixedPort =
       /\[dev\][^\[]*?\bport\s*=\s*(\d+)/.exec(ctx.readText('wrangler.toml') ?? '')?.[1] ??
       /--port[= ](\d{2,5})\b/.exec(devScripts.join('\n'))?.[1];
-    if (fixedPort && !hasPortEnv) evidence.push(`Dev server port ${fixedPort} is fixed in the config: parallel checkouts collide on it`);
+    // A literal `--port 8790` in the dev script is fixed even when an env template offers PORT: the script never reads it.
+    const scriptPort = /--port[= ](\d{2,5})\b/.exec(devScripts.join('\n'))?.[1];
+    const literalPort = scriptPort !== undefined && !devScripts.some((b) => /\$\{?(?:[A-Z0-9]+_)*PORT\b/.test(b));
+    const portIsFixed = literalPort || Boolean(fixedPort && !hasPortEnv);
+    if (portIsFixed) evidence.push(`Dev server port ${scriptPort ?? fixedPort} is fixed in the config: parallel checkouts collide on it`);
     // A dev script that frees its port by force takes it from whoever holds it, another checkout included.
     const killed = devScripts.map((b) => /lsof\s+-ti\s*:?\s*(\d{2,5})[^|]*\|\s*xargs\s+kill|kill-port\s+(\d{2,5})/.exec(b)).find(Boolean);
     const killedPort = killed?.[1] ?? killed?.[2];
     if (killedPort) evidence.push(`The dev script kills whatever holds port ${killedPort}: starting it in one checkout stops another checkout's server`);
 
     let status: CheckResult['status'] = 'warn';
-    if ((fixedPort && !hasPortEnv) || killedPort) {
+    if (portIsFixed || killedPort) {
       status = 'warn';
     } else if (hasPortEnv && hasEphemeralLocalState) {
       status = 'pass';

@@ -230,13 +230,15 @@ function capsAt(rawLevel: AutonomyLevel, stations: StationScore[], checks: Check
 
   // Cap 3: No Level 3+ with hardcoded secrets or broken/bypassed permission config
   if (rawLevel >= 3) {
-    const hasSecrets =
-      Boolean(checkMeta('harness.secret-hygiene')['hasHardcodedSecrets']) ||
-      Boolean(checkMeta('harness.mcp-hygiene')['hasHardcodedMcpSecrets']);
+    const repoSecrets = Boolean(checkMeta('harness.secret-hygiene')['hasHardcodedSecrets']);
+    const mcpSecrets = Boolean(checkMeta('harness.mcp-hygiene')['hasHardcodedMcpSecrets']);
+    const hasSecrets = repoSecrets || mcpSecrets;
     const hasCritPerm = Boolean(checkMeta('harness.permissions-policy')['hasCriticalPermissionError']);
     if (hasSecrets || hasCritPerm) {
+      // Each check is named only for what it found itself.
       const triggered = [
-        hasSecrets ? 'harness.secret-hygiene' : '',
+        repoSecrets ? 'harness.secret-hygiene' : '',
+        mcpSecrets ? 'harness.mcp-hygiene' : '',
         hasCritPerm ? 'harness.permissions-policy' : '',
       ].filter(Boolean);
       caps.push({

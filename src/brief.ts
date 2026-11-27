@@ -134,7 +134,11 @@ export function readBrief(ctx: RepoContext): BriefFacts {
     for (const [from, to] of [['AGENTS.md', 'CLAUDE.md'], ['CLAUDE.md', 'AGENTS.md']] as const) {
       const body = contents.get(from)!;
       const lineCount = body.split(/\r?\n/).filter((l) => l.trim()).length;
-      if (lineCount <= 8 && body.includes(to) && contents.get(to)!.length > body.length * 2) pointer = { from, to };
+      // A real pointer: an import line of its own, or the file named in prose. `@AGENTS.md` inside
+      // backticks is an example, and Claude Code imports nothing from it.
+      const name = to.replace('.', '\\.');
+      const pointsThere = new RegExp(`^@${name}\\s*$`, 'm').test(body) || new RegExp(`(^|[^\`@])${name}`, 'm').test(body);
+      if (lineCount <= 8 && pointsThere && contents.get(to)!.length > body.length * 2) pointer = { from, to };
     }
   }
   let stub: BriefFacts['stub'];

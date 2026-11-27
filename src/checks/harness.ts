@@ -103,9 +103,12 @@ export function guardHooks(ctx: RepoContext): string[] {
   const guards: string[] = [];
   for (const path of new Set(serialized.match(/(?:\.claude\/hooks|scripts|bin|\.github\/scripts)\/[\w./-]+/g) ?? [])) {
     const body = ctx.readText(path);
-    if (body && /deploy|wrangler|--remote|publish|force/i.test(body)) guards.push(path);
+    // A guard decides: it has a branch that blocks (exit 2, a deny decision). A hook that only logs
+    // the command and exits 0 guards nothing.
+    const blocks = body !== null && /\bexit\s+[12]\b|permissionDecision|"deny"|'deny'|process\.exit\(\s*[12]\s*\)|sys\.exit\(\s*[12]\s*\)/.test(body);
+    if (body && blocks && /deploy|wrangler|--remote|publish|force/i.test(body)) guards.push(path);
   }
-  if (guards.length === 0 && /deploy|wrangler|--remote/i.test(serialized)) guards.push('.claude/settings.json PreToolUse command');
+  if (guards.length === 0 && /deploy|wrangler|--remote/i.test(serialized) && /\bexit\s+[12]\b|permissionDecision|deny/.test(serialized)) guards.push('.claude/settings.json PreToolUse command');
   return guards;
 }
 
@@ -685,7 +688,11 @@ export function runHarnessChecks(ctx: RepoContext): CheckResult[] {
       }
       evidence.push(`… and ${trackedLeaks.length - 8} more: ${[...rest].map(([file, ls]) => `${file} lines ${ls.join(', ')}`).join('; ')}`);
     }
-    evidence.push(...untrackedLeaks.slice(0, 3));
+    // Every one is named: "add the listed files to .gitignore" must leave none out.
+    evidence.push(...untrackedLeaks.slice(0, 8));
+    if (untrackedLeaks.length > 8) {
+      evidence.push(`… and ${untrackedLeaks.length - 8} more untracked: ${[...new Set(untrackedLeaks.slice(8).map((leak) => /^(.*?):\d+ /.exec(leak)?.[1] ?? ''))].filter(Boolean).join(', ')}`);
+    }
     if (missingIgnores.length > 0) evidence.push(`Not gitignored: ${missingIgnores.join(', ')}`);
     else if (required.length > 0) evidence.push(`Git ignores ${required.join(', ')}`);
     else if (ctx.findFiles((f) => /\.xcconfig(\.example)?$/.test(f)).length > 0) {

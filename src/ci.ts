@@ -1,4 +1,4 @@
-import { CommandClassifier, runsDeployTool, sortKinds, type VerifyKind } from './capabilities.js';
+import { CommandClassifier, sortKinds, type VerifyKind } from './capabilities.js';
 import type { RepoContext } from './fs-scanner.js';
 
 export interface WorkflowFacts {
@@ -14,7 +14,7 @@ export interface WorkflowFacts {
   deployGated: boolean;
   /** Toolchain versions the workflow pins, e.g. `java-version: 17`. */
   toolchainPins: string[];
-  /** Branches the workflow is filtered to when none of them is the default branch: it never runs. */
+  /** Branches the workflow is filtered to when none of them is the default branch: nothing done there starts it. */
   deadBranches: string[] | undefined;
 }
 
@@ -155,20 +155,36 @@ function extractLooseCommands(text: string): Step[] {
 }
 
 /**
- * The branches a GitHub workflow's push / pull_request triggers are filtered to. Empty when the
- * workflow has no branch filter (it runs for every branch).
+ * The `branches:` filter of each trigger that has one, by event. A workflow can filter pushes to a
+ * release branch and still run for every pull request: the two are separate questions.
  */
-function branchFilters(yaml: string): string[] {
-  const branches: string[] = [];
+function branchFiltersByEvent(yaml: string): Map<string, string[]> {
+  const filters = new Map<string, string[]>();
   const lines = yaml.split(/\r?\n/);
+  const unquote = (b: string): string => b.trim().replace(/^['"]|['"]$/g, '');
+  let event: string | undefined;
+  let eventIndent = -1;
   for (let i = 0; i < lines.length; i++) {
-    const inline = /^\s*branches\s*:\s*\[([^\]]*)\]/.exec(lines[i]!);
-    if (inline) branches.push(...inline[1]!.split(',').map((b) => b.trim().replace(/^['"]|['"]$/g, '')).filter(Boolean));
-    else if (/^\s*branches\s*:\s*$/.test(lines[i]!)) {
-      for (let j = i + 1; j < lines.length && /^\s*-\s+/.test(lines[j]!); j++) branches.push(lines[j]!.trim().replace(/^-\s+/, '').replace(/^['"]|['"]$/g, ''));
+    const line = lines[i]!;
+    if (!line.trim()) continue;
+    const indent = line.length - line.trimStart().length;
+    const header = /^\s*(push|pull_request|pull_request_target)\s*:/.exec(line);
+    if (header) {
+      event = header[1]!;
+      eventIndent = indent;
+      continue;
     }
+    if (event && indent <= eventIndent) event = undefined;
+    if (!event) continue;
+    const found: string[] = [];
+    const inline = /^\s*branches\s*:\s*\[([^\]]*)\]/.exec(line);
+    if (inline) found.push(...inline[1]!.split(',').map(unquote).filter(Boolean));
+    else if (/^\s*branches\s*:\s*$/.test(line)) {
+      for (let j = i + 1; j < lines.length && /^\s*-\s+/.test(lines[j]!); j++) found.push(unquote(lines[j]!.trim().replace(/^-\s+/, '')));
+    }
+    if (found.length > 0) filters.set(event, [...new Set([...(filters.get(event) ?? []), ...found])]);
   }
-  return [...new Set(branches)];
+  return filters;
 }
 
 function branchMatches(pattern: string, branch: string): boolean {
@@ -195,13 +211,22 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
       const target = m[1]!;
       calls.push(/\.ya?ml$/.test(target) ? target : `${target.replace(/\/$/, '')}/action.yml`);
     }
-    // A workflow filtered to branches that do not include the default one never runs here.
-    const filters = isGh ? branchFilters(text) : [];
+    // Branch filters, per trigger. Pull requests into the default branch do not start a workflow
+    // whose `pull_request` filter leaves that branch out; when its pushes are filtered away too (or
+    // it has no push trigger), nothing done on the default branch ever starts it.
+    const byEvent = isGh ? branchFiltersByEvent(text) : new Map<string, string[]>();
     const defaultBranch = ctx.git.defaultBranch;
-    const dead = filters.length > 0 && defaultBranch !== undefined && !filters.some((f) => branchMatches(f, defaultBranch));
-    if (dead) deadBranches.set(path, filters);
+    const excludes = (event: string): boolean => {
+      const filter = byEvent.get(event);
+      return filter !== undefined && defaultBranch !== undefined && !filter.some((f) => branchMatches(f, defaultBranch));
+    };
     // GitLab, CircleCI and friends run their pipeline for merge requests unless told otherwise.
-    raw.set(path, { text, steps, calls, prTriggered: !dead && (isGh ? PR_TRIGGER.test(text) : true) });
+    const prTrigger = isGh ? PR_TRIGGER.test(text) : true;
+    const deadForPr = prTrigger && (excludes('pull_request') || excludes('pull_request_target'));
+    const hasPush = /(^|\n)\s*push\s*:|\bon:\s*\[?[^\n]*\bpush\b/.test(text);
+    const dead = deadForPr && (!hasPush || excludes('push'));
+    if (dead) deadBranches.set(path, [...new Set([...(byEvent.get('pull_request') ?? byEvent.get('pull_request_target') ?? []), ...(byEvent.get('push') ?? [])])]);
+    raw.set(path, { text, steps, calls, prTriggered: !deadForPr && prTrigger });
   }
 
   // Composite actions a workflow calls contribute their steps to the caller.
@@ -242,7 +267,8 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
     // A workflow that never runs proves nothing, on a pull request or anywhere else.
     for (const step of deadBranches.has(path) ? [] : steps) {
       for (const cmd of splitLines(step.command)) {
-        if (runsDeployTool(cmd)) deployCommands.push(cmd);
+        // Through the script it calls, too: `npm run ship` deploys when `ship` does.
+        if (classifier.deploys(cmd)) deployCommands.push(cmd);
         const cmdKinds = sortKinds(classifier.classify(cmd));
         if (cmdKinds.length === 0) continue;
         commands.push(cmd);

@@ -898,8 +898,12 @@ describe('levels rest on what is certain', () => {
     const repo = temp('ha-guard-');
     repo.write('package.json', JSON.stringify({ name: 'app', scripts: { deploy: 'wrangler deploy' } }));
     repo.write('wrangler.toml', 'name = "app"\n[observability]\nenabled = true\n');
-    repo.write('.claude/hooks/guard-shell.sh', '#!/bin/bash\n# deny wrangler deploy and --remote inside worktrees\nexit 0\n');
+    // A hook that only logs and lets everything through decides nothing.
+    repo.write('.claude/hooks/guard-shell.sh', '#!/bin/bash\n# log wrangler deploy and --remote\necho "$1" >> /tmp/commands.log\nexit 0\n');
     repo.write('.claude/settings.json', JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: '.claude/hooks/guard-shell.sh' }] }] } }));
+    expect(check(auditRepo(repo.dir), 'release.deploy-safety').status).toBe('warn');
+
+    repo.write('.claude/hooks/guard-shell.sh', '#!/bin/bash\n# deny wrangler deploy and --remote inside worktrees\nif grep -q "wrangler deploy" <<< "$1"; then echo "blocked" >&2; exit 2; fi\nexit 0\n');
     const report = auditRepo(repo.dir);
     expect(check(report, 'release.deploy-safety').status).toBe('pass');
     expect(evidence(report, 'release.deploy-safety')).toContain('.claude/hooks/guard-shell.sh');
@@ -995,7 +999,7 @@ describe('substance, not existence', () => {
     execFileSync('git', ['branch', '-m', 'master'], { cwd: repo.dir });
     const dead = check(auditRepo(repo.dir), 'release.ci-pipeline');
     expect(dead.status).toBe('fail');
-    expect(dead.evidence.join('\n')).toContain('is filtered to `main`, but the default branch is `master`: it never runs');
+    expect(dead.evidence.join('\n')).toContain('is filtered to `main`, but the default branch is `master`: pushes and pull requests to it never start this workflow');
     expect(dead.fix.en).toContain('branches:');
 
     execFileSync('git', ['branch', '-m', 'main'], { cwd: repo.dir });
@@ -1557,5 +1561,69 @@ describe('what the last fresh panel still got past the audit', () => {
     expect(types.status).toBe('warn');
     expect(types.evidence.join('\n')).toContain('none of the verify commands runs the type checker');
     expect(evidence(report, 'release.deploy-safety')).toContain('`npm run dev:remote`');
+  });
+});
+
+describe('second review: edge cases that changed a verdict', () => {
+  it('quotes the whole line when no single sentence of it says how the repository ships', () => {
+    const repo = temp('ha-deploy-line-');
+    repo.write('package.json', JSON.stringify({ name: 'app' }));
+    repo.write('AGENTS.md', '# App\n\nDeploys are manual; on push we run tests.\nA\nB\nC\n');
+    expect(() => auditRepo(repo.dir)).not.toThrow();
+  });
+
+  it('takes only a deny rule for a restriction, and a literal port for a fixed one', () => {
+    const repo = temp('ha-allow-edit-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { dev: 'wrangler dev --port 8790', test: 'vitest run' } }));
+    repo.write('wrangler.toml', 'name = "app"\n');
+    repo.write('.env.example', 'PORT=9000\n');
+    repo.write('.claude/settings.json', JSON.stringify({ permissions: { allow: ['Edit(tests/**)'] } }));
+    repo.write('tests/a.test.ts', "it('adds', () => { expect(1 + 1).toBe(2); });\n");
+    const report = auditRepo(repo.dir);
+    expect(evidence(report, 'verification.oracle-protection')).not.toContain('restricts agent edits');
+    const ports = check(report, 'graph.port-and-state-isolation');
+    expect(ports.status).toBe('warn');
+    expect(ports.evidence.join('\n')).toContain('Dev server port 8790 is fixed');
+  });
+
+  it('does not count migration tooling as telemetry, or a guard that the deploy does not wait for', () => {
+    const repo = temp('ha-prisma-');
+    repo.write('package.json', JSON.stringify({ name: 'api', scripts: { deploy: 'bash scripts/assert-main.sh; wrangler deploy' }, dependencies: { hono: '^5.0.0', prisma: '^7.0.0' } }));
+    repo.write('scripts/assert-main.sh', '#!/bin/sh\nexit 1\n');
+    repo.write('wrangler.toml', 'name = "api"\n');
+    const report = auditRepo(repo.dir);
+    const observed = check(report, 'release.observability-and-safety');
+    expect(observed.status).toBe('warn');
+    expect(observed.evidence.join('\n')).toContain('No error tracking or structured logging detected');
+    expect(evidence(report, 'release.deploy-safety')).toContain('Nothing stops an agent running `npm run deploy`');
+  });
+
+  it('keeps pull-request checks of a workflow whose pushes are filtered to a release branch, and sees a deploy behind a script', () => {
+    const repo = temp('ha-release-branch-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'vitest run', ship: 'wrangler deploy' } }));
+    repo.write('wrangler.toml', 'name = "app"\n');
+    repo.write('.github/workflows/ci.yml', 'on:\n  push:\n    branches: [release]\n  pull_request:\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n');
+    repo.write('.github/workflows/ship.yml', 'on:\n  push:\n    branches: [release]\njobs:\n  d:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm run ship\n');
+    repo.commit();
+    const report = auditRepo(repo.dir);
+    expect(evidence(report, 'release.ci-pipeline')).toContain('tests: yes');
+    expect(evidence(report, 'release.ci-pipeline')).not.toContain('never start');
+    expect(evidence(report, 'release.deploy-safety')).toContain('.github/workflows/ship.yml: deploys (`npm run ship`)');
+  });
+
+  it('writes no CI workflow that could not run, and takes a backticked import for what it is', () => {
+    const repo = temp('ha-no-lock-');
+    repo.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'vitest run' } }));
+    repo.write('src/a.test.ts', "it('adds', () => { expect(1 + 1).toBe(2); });\n");
+    const plan = initHarness(repo.dir, { dryRun: true, tools: ['claude-code'] });
+    expect(plan.actions.some((a) => a.path === '.github/workflows/ci.yml')).toBe(false);
+    repo.write('package-lock.json', '{}\n');
+    expect(initHarness(repo.dir, { dryRun: true, tools: ['claude-code'] }).actions.some((a) => a.path === '.github/workflows/ci.yml')).toBe(true);
+
+    const inert = temp('ha-inert-import-');
+    inert.write('package.json', JSON.stringify({ name: 'app' }));
+    inert.write('AGENTS.md', `# App\n\n${'Run the checks before you finish.\n'.repeat(12)}`);
+    inert.write('CLAUDE.md', 'Use `@AGENTS.md`\n');
+    expect(check(auditRepo(inert.dir), 'intent.single-source').status).not.toBe('pass');
   });
 });

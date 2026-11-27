@@ -262,6 +262,12 @@ function buildCiWorkflow(ctx: RepoContext): string | undefined {
   const verify = minimalVerifySet(ctx.verify);
   const pm = ctx.stack.packageManagers.find((p) => p in INSTALL_COMMAND && ['bun', 'pnpm', 'yarn', 'npm'].includes(p));
   if (verify.length === 0 || !pm) return undefined;
+  // A workflow that cannot run is worse than none: `npm ci` needs a lockfile, pnpm/action-setup needs
+  // a version to install, and an Ubuntu runner cannot run `xcodebuild` or a Gradle wrapper it never set up.
+  const lockfile = { bun: ['bun.lock', 'bun.lockb'], pnpm: ['pnpm-lock.yaml'], yarn: ['yarn.lock'], npm: ['package-lock.json', 'npm-shrinkwrap.json'] }[pm as 'bun' | 'pnpm' | 'yarn' | 'npm'];
+  if (!lockfile.some((f) => ctx.hasFile(f))) return undefined;
+  if (pm === 'pnpm' && !ctx.packageJson?.packageManager?.startsWith('pnpm')) return undefined;
+  if (!verify.every((c) => /^(?:npm|pnpm|yarn|bun|npx|bunx|vp|node)\b/.test(c))) return undefined;
   const nodeVersion = ctx.hasFile('.node-version') ? 'node-version-file: .node-version' : ctx.hasFile('.nvmrc') ? 'node-version-file: .nvmrc' : 'node-version: 22';
   const setup =
     pm === 'bun'

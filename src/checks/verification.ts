@@ -210,8 +210,9 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     }
 
     // Also check if .claude/settings.json denies editing tests or CI workflows
-    const claudeRaw = ctx.readText('.claude/settings.json') ?? '';
-    if (/"(?:Edit|Write|MultiEdit)\([^)]*(?:tests?\b|\.github|playwright|vitest|e2e)/i.test(claudeRaw)) {
+    // Only a deny rule restricts: `Edit(tests/**)` under `allow` grants the very thing.
+    const editDenies = ctx.readJson<{ permissions?: { deny?: string[] } }>('.claude/settings.json')?.permissions?.deny ?? [];
+    if (editDenies.some((rule) => /^(?:Edit|Write|MultiEdit)\([^)]*(?:tests?\b|\.github|playwright|vitest|e2e)/i.test(rule))) {
       evidence.push('.claude/settings.json restricts agent edits to test/CI paths');
       protectsOracle = true;
     }
