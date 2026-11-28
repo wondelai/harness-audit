@@ -1,9 +1,13 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readdirSync, readFileSync, readlinkSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from 'node:path';
-import { describeCommand, detectVerifyCapabilities, type VerifyCapabilities } from './capabilities.js';
-import { readBrief, type BriefFacts } from './brief.js';
-import { analyzeCi, type CiFacts } from './ci.js';
+import { describeCommand, detectVerifyCapabilities } from './capabilities.js';
+import type { VerifyCapabilities } from './capabilities.js';
+import { readBrief } from './brief.js';
+import type { BriefFacts } from './brief.js';
+import { analyzeCi } from './ci.js';
+import type { CiFacts } from './ci.js';
+import { lookup } from './lookup.js';
 import type { GitStats, ScanInfo, StackInfo, SupportedTool } from './types.js';
 
 /**
@@ -65,8 +69,8 @@ const GENERATED_DIRS = new Set([
 ]);
 
 function isIgnoredDir(name: string, rel: string, mode: ScanInfo['mode']): boolean {
-  if (VENDORED_DIRS.has(name)) return true;
-  if (mode === 'git') return false;
+  if (VENDORED_DIRS.has(name)) {return true;}
+  if (mode === 'git') {return false;}
   return (
     GENERATED_DIRS.has(name) ||
     /^\.?deriveddata/i.test(name) ||
@@ -79,7 +83,7 @@ function isIgnoredDir(name: string, rel: string, mode: ScanInfo['mode']): boolea
 function pathIsVendored(rel: string): boolean {
   const parts = rel.split('/');
   for (let i = 0; i < parts.length - 1; i++) {
-    if (VENDORED_DIRS.has(parts[i]!)) return true;
+    if (VENDORED_DIRS.has((parts[i] ?? ''))) {return true;}
   }
   return false;
 }
@@ -90,7 +94,7 @@ function pathIsVendored(rel: string): boolean {
  */
 export function gitEnv(): NodeJS.ProcessEnv {
   const env = { ...process.env };
-  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_PREFIX']) delete env[key];
+  for (const key of ['GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES', 'GIT_COMMON_DIR', 'GIT_NAMESPACE', 'GIT_PREFIX']) {delete env[key];}
   return env;
 }
 const GIT_ENV = gitEnv();
@@ -135,7 +139,7 @@ const SOURCE_EXTENSIONS = new Set([
 const ROUTE_ENTRY_NAME = /^(route|page|layout|loading|error|not-found|template|default)\.(ts|tsx|js|jsx)$/;
 
 export function isTestFilePath(relPath: string): boolean {
-  const normalized = relPath.replace(/\\/g, '/').toLowerCase();
+  const normalized = relPath.replaceAll('\\', '/').toLowerCase();
   const name = basename(normalized);
   if (
     /\.(test|spec|e2e)\.(ts|tsx|js|jsx|mjs|cjs|py|rb|php|cs|swift|dart)$/.test(name) ||
@@ -163,11 +167,11 @@ export function isTestFilePath(relPath: string): boolean {
 }
 
 export function isSourceFilePath(relPath: string): boolean {
-  const normalized = relPath.replace(/\\/g, '/').toLowerCase();
+  const normalized = relPath.replaceAll('\\', '/').toLowerCase();
   const ext = extname(normalized);
-  if (!SOURCE_EXTENSIONS.has(ext)) return false;
-  if (normalized.endsWith('.d.ts')) return false;
-  if (isTestFilePath(normalized)) return false;
+  if (!SOURCE_EXTENSIONS.has(ext)) {return false;}
+  if (normalized.endsWith('.d.ts')) {return false;}
+  if (isTestFilePath(normalized)) {return false;}
   if (
     normalized.startsWith('.') ||
     /(^|\/)(node_modules|dist|build|public|assets|static|migrations)\//.test(normalized)
@@ -190,7 +194,7 @@ export interface PackageJsonShape {
   scripts?: Record<string, string>;
   dependencies?: Record<string, string>;
   devDependencies?: Record<string, string>;
-  workspaces?: string[] | { packages?: string[] };
+  workspaces?: Array<string> | { packages?: Array<string> };
   engines?: Record<string, string>;
   packageManager?: string;
 }
@@ -198,7 +202,7 @@ export interface PackageJsonShape {
 interface FileListing {
   /** Files under `node_modules/` that git tracks: dependencies committed as source. */
   committedNodeModules?: number;
-  files: string[];
+  files: Array<string>;
   /** Paths git tracks; undefined when the directory is not a git work tree. */
   tracked?: Set<string>;
   mode: ScanInfo['mode'];
@@ -207,13 +211,18 @@ interface FileListing {
 
 function depthOf(rel: string): number {
   let depth = 0;
-  for (let i = 0; i < rel.length; i++) if (rel.charCodeAt(i) === 47) depth++;
+  for (let i = 0; i < rel.length; i++) {if (rel.charCodeAt(i) === 47) {depth++;}}
   return depth;
 }
 
+interface CappedFiles {
+  files: Array<string>;
+  truncated: boolean;
+}
+
 /** Shallow paths first, so a cap never drops the root manifests and agent config. */
-function capFiles(files: string[]): { files: string[]; truncated: boolean } {
-  if (files.length <= MAX_SCAN_FILES) return { files, truncated: false };
+function capFiles(files: Array<string>): CappedFiles {
+  if (files.length <= MAX_SCAN_FILES) {return { files, truncated: false };}
   const sorted = [...files].sort((a, b) => depthOf(a) - depthOf(b) || (a < b ? -1 : a > b ? 1 : 0));
   return { files: sorted.slice(0, MAX_SCAN_FILES), truncated: true };
 }
@@ -224,7 +233,7 @@ function capFiles(files: string[]): { files: string[]; truncated: boolean } {
  * not part of the versioned harness, so they are not part of the audit.
  */
 function listGitFiles(root: string): FileListing | null {
-  const git = (args: string[]): string[] =>
+  const git = (args: Array<string>): Array<string> =>
     execFileSync('git', ['-c', 'core.quotepath=off', 'ls-files', '-z', ...args], {
       cwd: root, env: GIT_ENV,
       encoding: 'utf8',
@@ -242,7 +251,7 @@ function listGitFiles(root: string): FileListing | null {
       // ignore rules still say what a teammate would get. A directory that merely sits inside
       // someone else's work tree is walked as it is.
       const prefix = execFileSync('git', ['rev-parse', '--show-prefix'], { cwd: root, env: GIT_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim();
-      if (prefix !== '') return null;
+      if (prefix !== '') {return null;}
     }
     const deleted = new Set(git(['--deleted']));
     const tracked = trackedAll.filter((p) => !deleted.has(p) && !pathIsVendored(p));
@@ -259,13 +268,14 @@ function listGitFiles(root: string): FileListing | null {
 }
 
 function walkFiles(root: string): FileListing {
-  const collected: string[] = [];
+  const collected: Array<string> = [];
   let truncated = false;
   // Breadth-first: when a huge tree hits the cap, the root manifests and agent config are already in.
-  const queue: string[] = [root];
+  const queue: Array<string> = [root];
 
   while (queue.length > 0 && !truncated) {
-    const dir = queue.shift()!;
+    const dir = queue.shift();
+    if (dir === undefined) {break;}
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -280,19 +290,19 @@ function walkFiles(root: string): FileListing {
         break;
       }
       const fullPath = join(dir, entry.name);
-      const rel = relative(root, fullPath).replace(/\\/g, '/');
+      const rel = relative(root, fullPath).replaceAll('\\', '/');
 
       if (entry.isSymbolicLink()) {
         // A symlinked file counts (CLAUDE.md -> AGENTS.md); a symlinked directory is not followed.
         try {
-          if (statSync(fullPath).isFile()) collected.push(rel);
+          if (statSync(fullPath).isFile()) {collected.push(rel);}
         } catch {
           // broken symlink
         }
         continue;
       }
       if (entry.isDirectory()) {
-        if (!isIgnoredDir(entry.name, rel, 'walk')) queue.push(fullPath);
+        if (!isIgnoredDir(entry.name, rel, 'walk')) {queue.push(fullPath);}
       } else if (entry.isFile()) {
         collected.push(rel);
       }
@@ -305,10 +315,10 @@ function walkFiles(root: string): FileListing {
 export class RepoContext {
   readonly root: string;
   readonly repoName: string;
-  readonly files: string[]; // POSIX-normalized relative paths
+  readonly files: Array<string>; // POSIX-normalized relative paths
   readonly fileSet: Set<string>;
-  readonly sourceFiles: string[];
-  readonly testFiles: string[];
+  readonly sourceFiles: Array<string>;
+  readonly testFiles: Array<string>;
   readonly scan: ScanInfo;
 
   private readonly trackedSet: Set<string> | undefined;
@@ -320,7 +330,7 @@ export class RepoContext {
   private ciCache: CiFacts | undefined = undefined;
   private briefCache: BriefFacts | undefined = undefined;
   private workspaceCache: Array<{ path: string; manifest: PackageJsonShape }> | undefined = undefined;
-  private suiteCache: string[] | undefined = undefined;
+  private suiteCache: Array<string> | undefined = undefined;
 
   /** Files under `node_modules/` that git tracks. */
   readonly committedNodeModules: number;
@@ -351,10 +361,10 @@ export class RepoContext {
    * deleted from the working copy but not yet committed away is still in `head`, and still
    * published. Empty outside a git work tree. Lockfiles, minified bundles and binaries are skipped.
    */
-  grep(pattern: { pcre: string; fixed: string[] }, where: 'worktree' | 'head'): Array<{ path: string; line: number; text: string }> {
-    if (this.scan.mode !== 'git') return [];
+  grep(pattern: { pcre: string; fixed: Array<string> }, where: 'worktree' | 'head'): Array<{ path: string; line: number; text: string }> {
+    if (this.scan.mode !== 'git') {return [];}
     const scope = [...(where === 'head' ? ['HEAD'] : []), '--', '.', ':!*.lock', ':!*lock.json', ':!*-lock.yaml', ':!*.min.js', ':!*.map', ':!node_modules'];
-    const run = (matcher: string[]): string =>
+    const run = (matcher: Array<string>): string =>
       execFileSync('git', ['-c', 'core.quotepath=off', 'grep', '-I', '-n', '--no-color', ...(where === 'worktree' ? ['--untracked'] : []), ...matcher, ...scope], {
         cwd: this.root,
         env: GIT_ENV,
@@ -363,14 +373,14 @@ export class RepoContext {
         timeout: 20_000,
         maxBuffer: 64 * 1024 * 1024,
       });
-    let out = '';
+    let out: string;
     try {
       // One Perl-compatible pass: fast, and exact about word boundaries.
       out = run(['-P', '-e', pattern.pcre]);
-    } catch (err) {
+    } catch (error) {
       // Exit 1 is "no match". Anything else: a git built without PCRE, or a repository without a
       // commit to search. Fixed strings need no regex engine; the caller confirms each hit.
-      if ((err as { status?: number }).status === 1) return [];
+      if (exitStatus(error) === 1) {return [];}
       try {
         out = run(['-F', ...pattern.fixed.flatMap((f) => ['-e', f])]);
       } catch {
@@ -380,7 +390,7 @@ export class RepoContext {
     const hits: Array<{ path: string; line: number; text: string }> = [];
     for (const row of out.split('\n')) {
       const m = /^(?:HEAD:)?(.+?):(\d+):(.*)$/.exec(row);
-      if (m) hits.push({ path: m[1]!, line: Number(m[2]), text: m[3]!.slice(0, 2000) });
+      if (m) {hits.push({ path: (m[1] ?? ''), line: Number(m[2]), text: (m[3] ?? '').slice(0, 2000) });}
     }
     return hits;
   }
@@ -397,7 +407,7 @@ export class RepoContext {
    * or a CI agent does not. Always false outside a git work tree.
    */
   isLocalOnly(relPath: string): boolean {
-    if (this.scan.mode !== 'git') return false;
+    if (this.scan.mode !== 'git') {return false;}
     const clean = cleanRel(relPath);
     // A tracked file that the scan cap left out is still part of the repository.
     return !this.fileSet.has(clean) && this.trackedSet?.has(clean) !== true && existsSync(join(this.root, clean));
@@ -409,9 +419,9 @@ export class RepoContext {
   linkTarget(relPath: string): string | undefined {
     const full = join(this.root, cleanRel(relPath));
     try {
-      if (!lstatSync(full).isSymbolicLink()) return undefined;
+      if (!lstatSync(full).isSymbolicLink()) {return undefined;}
       const target = resolve(dirname(full), readlinkSync(full));
-      const rel = relative(realpathSync(this.root), realpathSync(target)).replace(/\\/g, '/');
+      const rel = relative(realpathSync(this.root), realpathSync(target)).replaceAll('\\', '/');
       return rel.startsWith('..') ? undefined : rel;
     } catch {
       return undefined;
@@ -422,14 +432,14 @@ export class RepoContext {
     return this.fileSet.has(cleanRel(relPath));
   }
 
-  hasAnyFile(relPaths: string[]): string | undefined {
+  hasAnyFile(relPaths: Array<string>): string | undefined {
     for (const p of relPaths) {
-      if (this.hasFile(p)) return p;
+      if (this.hasFile(p)) {return p;}
     }
     return undefined;
   }
 
-  findFiles(predicate: (relPath: string) => boolean): string[] {
+  findFiles(predicate: (relPath: string) => boolean): Array<string> {
     return this.files.filter(predicate);
   }
 
@@ -458,7 +468,7 @@ export class RepoContext {
   readText(relPath: string): string | null {
     const clean = cleanRel(relPath);
     const cached = this.textCache.get(clean);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) {return cached;}
 
     let content: string | null = null;
     if (this.fileSet.has(clean)) {
@@ -478,22 +488,12 @@ export class RepoContext {
 
   readJson<T = unknown>(relPath: string): T | null {
     const raw = this.readText(relPath);
-    if (!raw) return null;
-    try {
-      return JSON.parse(raw) as T;
-    } catch {
-      // Try stripping JSONC comments & trailing commas safely (e.g. tsconfig.json)
-      try {
-        const stripped = stripJsonComments(raw);
-        return JSON.parse(stripped) as T;
-      } catch {
-        return null;
-      }
-    }
+    if (!raw) {return null;}
+    return parseJsonc<T>(raw);
   }
 
   get packageJson(): PackageJsonShape | null {
-    if (this.pkgCache !== undefined) return this.pkgCache;
+    if (this.pkgCache !== undefined) {return this.pkgCache;}
     this.pkgCache = this.readJson<PackageJsonShape>('package.json');
     return this.pkgCache;
   }
@@ -503,7 +503,7 @@ export class RepoContext {
    * frameworks, test runners and dev servers. Example, template and fixture packages are not members.
    */
   get workspaceManifests(): Array<{ path: string; manifest: PackageJsonShape }> {
-    if (this.workspaceCache) return this.workspaceCache;
+    if (this.workspaceCache) {return this.workspaceCache;}
     this.workspaceCache = this.files
       .filter(
         (f) =>
@@ -522,35 +522,35 @@ export class RepoContext {
     return declares(this.packageJson) || this.workspaceManifests.some((m) => declares(m.manifest));
   }
 
-  hasAnyDependency(names: string[]): string | undefined {
+  hasAnyDependency(names: Array<string>): string | undefined {
     for (const n of names) {
-      if (this.hasDependency(n)) return n;
+      if (this.hasDependency(n)) {return n;}
     }
     return undefined;
   }
 
   get stack(): StackInfo {
-    if (this.stackCache) return this.stackCache;
+    if (this.stackCache) {return this.stackCache;}
     this.stackCache = detectStack(this);
     return this.stackCache;
   }
 
   get git(): GitStats {
-    if (this.gitCache) return this.gitCache;
+    if (this.gitCache) {return this.gitCache;}
     this.gitCache = detectGitStats(this.root);
     return this.gitCache;
   }
 
   /** The verify commands the repository offers and the ones its brief documents. */
   get verify(): VerifyCapabilities {
-    if (this.verifyCache) return this.verifyCache;
+    if (this.verifyCache) {return this.verifyCache;}
     this.verifyCache = detectVerifyCapabilities(this);
     return this.verifyCache;
   }
 
   /** What the CI configuration runs, and what of it gates a pull request. */
   get ci(): CiFacts {
-    if (this.ciCache) return this.ciCache;
+    if (this.ciCache) {return this.ciCache;}
     this.ciCache = analyzeCi(this);
     return this.ciCache;
   }
@@ -560,7 +560,7 @@ export class RepoContext {
    * (nested rules, negations and the user's global excludes included); elsewhere it reads the
    * root `.gitignore` with a plain pattern match.
    */
-  ignoredPaths(candidates: string[]): Set<string> {
+  ignoredPaths(candidates: Array<string>): Set<string> {
     if (this.scan.mode === 'git') {
       try {
         const out = execFileSync('git', ['check-ignore', '--no-index', '--', ...candidates], {
@@ -570,9 +570,9 @@ export class RepoContext {
           timeout: 5000,
         });
         return new Set(out.split('\n').filter(Boolean));
-      } catch (err) {
+      } catch (error) {
         // Exit status 1: none of the paths is ignored.
-        if ((err as { status?: number }).status === 1) return new Set();
+        if (exitStatus(error) === 1) {return new Set();}
       }
     }
     const patterns = (this.readText('.gitignore') ?? '')
@@ -587,16 +587,16 @@ export class RepoContext {
    * package script runs directly whose path says fixture, test, spec or e2e. A compile step or a
    * server bootstrap chained in front of the runner is not a test.
    */
-  get suiteFiles(): string[] {
-    if (this.suiteCache) return this.suiteCache;
+  get suiteFiles(): Array<string> {
+    if (this.suiteCache) {return this.suiteCache;}
     const scripts = this.packageJson?.scripts ?? {};
     const targets = new Set<string>();
     for (const [name, body] of Object.entries(scripts)) {
-      if (!/^test([:._-]|$)/.test(name)) continue;
+      if (!/^test([:._-]|$)/.test(name)) {continue;}
       for (const segment of body.split(/&&|;|\|\|/)) {
         const m = /^\s*(?:bun|node|tsx|deno run|python3?|npx tsx)\s+(?:run\s+)?((?:\.\/)?[\w./-]+\.(?:ts|tsx|js|mjs|cjs|py))\b/.exec(segment);
         const path = m?.[1]?.replace(/^\.\//, '');
-        if (path && /(fixture|test|spec|e2e)/i.test(path) && this.hasFile(path) && !this.testFiles.includes(path)) targets.add(path);
+        if (path && /(fixture|test|spec|e2e)/i.test(path) && this.hasFile(path) && !this.testFiles.includes(path)) {targets.add(path);}
       }
     }
     this.suiteCache = [...this.testFiles, ...targets];
@@ -605,7 +605,7 @@ export class RepoContext {
 
   /** What the root AGENTS.md / CLAUDE.md say. */
   get brief(): BriefFacts {
-    if (this.briefCache) return this.briefCache;
+    if (this.briefCache) {return this.briefCache;}
     this.briefCache = readBrief(this);
     return this.briefCache;
   }
@@ -615,8 +615,8 @@ export class RepoContext {
    * `inactive` (no commits in 90 days), `team`, or `unknown` outside a git work tree.
    */
   get team(): 'solo' | 'inactive' | 'team' | 'unknown' {
-    if (!this.git.isGitRepo) return 'unknown';
-    if (this.git.gitAuthors90d === 0) return 'inactive';
+    if (!this.git.isGitRepo) {return 'unknown';}
+    if (this.git.gitAuthors90d === 0) {return 'inactive';}
     return this.git.gitAuthors90d === 1 ? 'solo' : 'team';
   }
 
@@ -626,7 +626,7 @@ export class RepoContext {
    * not a solo project.
    */
   get isSolo(): boolean {
-    if (this.team === 'inactive') return this.git.authorsAllTime <= 1;
+    if (this.team === 'inactive') {return this.git.authorsAllTime <= 1;}
     return this.team === 'solo';
   }
 
@@ -634,7 +634,7 @@ export class RepoContext {
   get teamLabel(): string {
     if (this.team === 'inactive') {
       // Commits by agents and bots only are activity, just not a second person.
-      if (this.git.commits90d > 0) return `${this.git.commits90d} commit(s) in the last 90 days, none by a human author (agents or bots only)`;
+      if (this.git.commits90d > 0) {return `${this.git.commits90d} commit(s) in the last 90 days, none by a human author (agents or bots only)`;}
       return `No commits in the last 90 days (${this.git.authorsAllTime} author${this.git.authorsAllTime === 1 ? '' : 's'} in the history)`;
     }
     return this.team === 'solo' ? 'One active contributor' : `${this.git.gitAuthors90d} active contributors`;
@@ -646,9 +646,9 @@ export class RepoContext {
    */
   readUnscannedText(relPath: string): string | null {
     const lexical = resolve(this.root, relPath);
-    if (relative(this.root, lexical).startsWith('..')) return null;
+    if (relative(this.root, lexical).startsWith('..')) {return null;}
     const full = this.contained(lexical);
-    if (!full) return null;
+    if (!full) {return null;}
     try {
       const stat = statSync(full);
       return stat.isFile() && stat.size <= MAX_READ_BYTES ? readFileSync(full, 'utf8') : null;
@@ -663,14 +663,36 @@ function gitignorePatternMatches(pattern: string, candidate: string): boolean {
   const body = pattern.replace(/^\//, '').replace(/\/$/, '');
   const source = body
     .split('*')
-    .map((piece) => piece.replace(/[.+^$()|[\]{}?\\]/g, (ch) => `\\${ch}`))
+    .map((piece) => piece.replaceAll(/[.+^$()|[\]{}?\\]/g, (ch) => `\\${ch}`))
     .join('[^/]*');
   const rx = new RegExp(`^${source}(?:/.*)?$`);
-  return rx.test(candidate) || rx.test(candidate.split('/').pop()!);
+  return rx.test(candidate) || rx.test(candidate.split('/').at(-1) ?? '');
 }
 
 function cleanRel(relPath: string): string {
-  return relPath.replace(/\\/g, '/').replace(/^\.\//, '');
+  return relPath.replaceAll('\\', '/').replace(/^\.\//, '');
+}
+
+/** The exit status of a failed child process (`execFileSync` attaches it to the error), if any. */
+function exitStatus(error: unknown): number | undefined {
+  return typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number' ? error.status : undefined;
+}
+
+/**
+ * Parse JSON, then JSONC (comments, trailing commas) when that fails, as the shape the caller names.
+ * The text is not validated against it: every caller reads the fields it needs defensively.
+ */
+export function parseJsonc<T>(raw: string): T | null {
+  const attempt = (text: string): T | null => {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the caller declares the shape it expects and reads it defensively; nothing here can know it
+      return parsed as T;
+    } catch {
+      return null;
+    }
+  };
+  return attempt(raw) ?? attempt(stripJsonComments(raw));
 }
 
 export function stripJsonComments(input: string): string {
@@ -700,12 +722,12 @@ export function stripJsonComments(input: string): string {
       continue;
     }
     if (ch === '/' && next === '/') {
-      while (i < input.length && input[i] !== '\n') i++;
+      while (i < input.length && input[i] !== '\n') {i++;}
       continue;
     }
     if (ch === '/' && next === '*') {
       i += 2;
-      while (i < input.length && !(input[i] === '*' && input[i + 1] === '/')) i++;
+      while (i < input.length && !(input[i] === '*' && input[i + 1] === '/')) {i++;}
       i += 2;
       continue;
     }
@@ -713,10 +735,10 @@ export function stripJsonComments(input: string): string {
     i++;
   }
   // Remove trailing commas before } or ]
-  return out.replace(/,\s*([}\]])/g, '$1');
+  return out.replaceAll(/,\s*([}\]])/g, '$1');
 }
 
-const LANGUAGE_BY_EXT: Record<string, string> = {
+const LANGUAGE_BY_EXT = {
   '.py': 'Python',
   '.js': 'JavaScript',
   '.mjs': 'JavaScript',
@@ -744,7 +766,7 @@ function detectStack(ctx: RepoContext): StackInfo {
   const languages = new Set<string>();
   const frameworks = new Set<string>();
   const packageManagers = new Set<string>();
-  const verifyScripts: string[] = [];
+  const verifyScripts: Array<string> = [];
   const detectedTools = new Set<SupportedTool>();
 
   const pkg = ctx.packageJson ?? (ctx.workspaceManifests.length > 0 ? {} : null);
@@ -755,8 +777,8 @@ function detectStack(ctx: RepoContext): StackInfo {
     const jsFiles = ctx.sourceFiles.filter((f) => /\.(js|jsx|mjs|cjs)$/.test(f)).length;
     // A handful of `.ts` files and no JavaScript is TypeScript too, tsconfig or not.
     const isTs = ctx.hasFile('tsconfig.json') || ctx.hasDependency('typescript') || (tsFiles >= 5 && tsFiles >= jsFiles * 0.25) || (tsFiles > 0 && jsFiles === 0);
-    if (isTs) languages.add('TypeScript');
-    if (!isTs || (jsFiles >= 20 && jsFiles >= tsFiles * 0.3)) languages.add('JavaScript');
+    if (isTs) {languages.add('TypeScript');}
+    if (!isTs || (jsFiles >= 20 && jsFiles >= tsFiles * 0.3)) {languages.add('JavaScript');}
 
     if (ctx.hasFile('bun.lock') || ctx.hasFile('bun.lockb') || pkg.packageManager?.startsWith('bun')) {
       packageManagers.add('bun');
@@ -799,14 +821,14 @@ function detectStack(ctx: RepoContext): StackInfo {
     ];
     for (const [dep, label] of fwMap) {
       // hasDependency reads the workspace members too: a monorepo's frameworks live in apps/*.
-      if (ctx.hasDependency(dep)) frameworks.add(label);
+      if (ctx.hasDependency(dep)) {frameworks.add(label);}
     }
 
 
     const scripts = pkg.scripts ?? {};
     const verifyKeys = ['check', 'verify', 'ci', 'test', 'lint', 'typecheck', 'type-check', 'build', 'fmt:check', 'format:check'];
     for (const key of verifyKeys) {
-      if (scripts[key]) verifyScripts.push(key);
+      if (scripts[key]) {verifyScripts.push(key);}
     }
   }
 
@@ -817,14 +839,14 @@ function detectStack(ctx: RepoContext): StackInfo {
   if (hasPyManifest || pyFileCount >= 5) {
     languages.add('Python');
     const pyproject = ctx.readText('pyproject.toml') ?? '';
-    if (ctx.hasFile('uv.lock') || /\[tool\.uv\]/.test(pyproject)) packageManagers.add('uv');
-    else if (ctx.hasFile('poetry.lock') || /\[tool\.poetry\]/.test(pyproject)) packageManagers.add('poetry');
-    else if (ctx.hasFile('Pipfile.lock')) packageManagers.add('pipenv');
-    else if (hasPyManifest) packageManagers.add('pip');
+    if (ctx.hasFile('uv.lock') || /\[tool\.uv\]/.test(pyproject)) {packageManagers.add('uv');}
+    else if (ctx.hasFile('poetry.lock') || /\[tool\.poetry\]/.test(pyproject)) {packageManagers.add('poetry');}
+    else if (ctx.hasFile('Pipfile.lock')) {packageManagers.add('pipenv');}
+    else if (hasPyManifest) {packageManagers.add('pip');}
 
-    if (/fastapi/i.test(pyproject)) frameworks.add('FastAPI');
-    if (/django/i.test(pyproject)) frameworks.add('Django');
-    if (/flask/i.test(pyproject)) frameworks.add('Flask');
+    if (/fastapi/i.test(pyproject)) {frameworks.add('FastAPI');}
+    if (/django/i.test(pyproject)) {frameworks.add('Django');}
+    if (/flask/i.test(pyproject)) {frameworks.add('Flask');}
   }
 
   // Go
@@ -847,15 +869,15 @@ function detectStack(ctx: RepoContext): StackInfo {
   if (ctx.hasAnyFile(['build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts'])) {
     const kotlin = ctx.sourceFiles.filter((f) => f.endsWith('.kt')).length;
     const java = ctx.sourceFiles.filter((f) => f.endsWith('.java')).length;
-    if (kotlin > 0 || java === 0) languages.add('Kotlin');
-    if (java > 0) languages.add('Java');
+    if (kotlin > 0 || java === 0) {languages.add('Kotlin');}
+    if (java > 0) {languages.add('Java');}
     packageManagers.add('gradle');
     const gradleText = ['build.gradle', 'build.gradle.kts', 'app/build.gradle', 'app/build.gradle.kts', 'gradle/libs.versions.toml']
       .map((f) => ctx.readText(f) ?? '')
       .join('\n');
-    if (/com\.android\.|android\s*\{|\bagp\b/.test(gradleText)) frameworks.add('Android');
-    if (/compose/i.test(gradleText)) frameworks.add('Jetpack Compose');
-    if (/spring-boot|org\.springframework/.test(gradleText)) frameworks.add('Spring Boot');
+    if (/com\.android\.|android\s*\{|\bagp\b/.test(gradleText)) {frameworks.add('Android');}
+    if (/compose/i.test(gradleText)) {frameworks.add('Jetpack Compose');}
+    if (/spring-boot|org\.springframework/.test(gradleText)) {frameworks.add('Spring Boot');}
   }
 
   // Swift / Xcode
@@ -863,25 +885,25 @@ function detectStack(ctx: RepoContext): StackInfo {
   const swiftFileCount = ctx.files.filter((f) => f.endsWith('.swift')).length;
   if (ctx.hasFile('Package.swift') || xcodeProject || (ctx.hasFile('project.yml') && swiftFileCount > 0)) {
     languages.add('Swift');
-    if (ctx.hasFile('Package.swift')) packageManagers.add('swiftpm');
-    if (xcodeProject || ctx.hasFile('project.yml')) packageManagers.add('xcodebuild');
-    if (ctx.hasFile('project.yml')) frameworks.add('XcodeGen');
+    if (ctx.hasFile('Package.swift')) {packageManagers.add('swiftpm');}
+    if (xcodeProject || ctx.hasFile('project.yml')) {packageManagers.add('xcodebuild');}
+    if (ctx.hasFile('project.yml')) {frameworks.add('XcodeGen');}
     const swiftSample = ctx.sourceFiles.filter((f) => f.endsWith('.swift')).slice(0, 40);
-    if (swiftSample.some((f) => /^import SwiftUI\b/m.test(ctx.readText(f) ?? ''))) frameworks.add('SwiftUI');
+    if (swiftSample.some((f) => /^import SwiftUI\b/m.test(ctx.readText(f) ?? ''))) {frameworks.add('SwiftUI');}
   }
 
   // Dart / Flutter
   if (ctx.hasFile('pubspec.yaml')) {
     languages.add('Dart');
     packageManagers.add('pub');
-    if (/^\s*flutter\s*:/m.test(ctx.readText('pubspec.yaml') ?? '')) frameworks.add('Flutter');
+    if (/^\s*flutter\s*:/m.test(ctx.readText('pubspec.yaml') ?? '')) {frameworks.add('Flutter');}
   }
 
   // Elixir
   if (ctx.hasFile('mix.exs')) {
     languages.add('Elixir');
     packageManagers.add('mix');
-    if (/:phoenix\b/.test(ctx.readText('mix.exs') ?? '')) frameworks.add('Phoenix');
+    if (/:phoenix\b/.test(ctx.readText('mix.exs') ?? '')) {frameworks.add('Phoenix');}
   }
 
   // C / C++
@@ -896,7 +918,7 @@ function detectStack(ctx: RepoContext): StackInfo {
     languages.add('Ruby');
     packageManagers.add('bundler');
     const gemfile = ctx.readText('Gemfile') ?? '';
-    if (/rails/i.test(gemfile)) frameworks.add('Rails');
+    if (/rails/i.test(gemfile)) {frameworks.add('Rails');}
   }
 
   // PHP
@@ -904,7 +926,7 @@ function detectStack(ctx: RepoContext): StackInfo {
     languages.add('PHP');
     packageManagers.add('composer');
     const composer = ctx.readText('composer.json') ?? '';
-    if (/laravel/i.test(composer)) frameworks.add('Laravel');
+    if (/laravel/i.test(composer)) {frameworks.add('Laravel');}
   }
 
   // .NET / C#
@@ -976,16 +998,16 @@ function detectStack(ctx: RepoContext): StackInfo {
   // No manifest matched: name the language the source files are written in.
   if (languages.size === 0) {
     const byExt = new Map<string, number>();
-    for (const f of ctx.sourceFiles) byExt.set(extname(f), (byExt.get(extname(f)) ?? 0) + 1);
+    for (const f of ctx.sourceFiles) {byExt.set(extname(f), (byExt.get(extname(f)) ?? 0) + 1);}
     const top = [...byExt.entries()].sort((a, b) => b[1] - a[1])[0];
-    const label = top && top[1] >= 2 ? LANGUAGE_BY_EXT[top[0]] : undefined;
-    if (label) languages.add(label);
+    const label = top && top[1] >= 2 ? lookup(LANGUAGE_BY_EXT, top[0]) : undefined;
+    if (label) {languages.add(label);}
   }
 
   // The language most of the code is written in comes first: advice is worded for it.
   const shareOf = (lang: string): number => {
-    const exts = Object.entries(LANGUAGE_BY_EXT).filter(([, l]) => l === lang).map(([e]) => e);
-    return ctx.sourceFiles.filter((f) => exts.includes(extname(f))).length;
+    const exts = new Set(Object.entries(LANGUAGE_BY_EXT).filter(([, l]) => l === lang).map(([e]) => e));
+    return ctx.sourceFiles.filter((f) => exts.has(extname(f))).length;
   };
   const ranked = [...languages].sort((a, b) => shareOf(b) - shareOf(a));
 
@@ -1031,7 +1053,7 @@ function detectGitStats(root: string): GitStats {
 
   // People only, one per person: a coding agent or a bot that authors a commit is not a second
   // reviewer, and one person committing under two addresses is still one person.
-  const countPeople = (args: string[]): number => {
+  const countPeople = (args: Array<string>): number => {
     try {
       const out = execFileSync('git', ['log', ...args, '--format=%ae%x09%an'], {
         cwd: root, env: GIT_ENV,
@@ -1043,7 +1065,7 @@ function detectGitStats(root: string): GitStats {
       const byEmail = new Map<string, string>();
       for (const line of out.split('\n')) {
         const [email, name = ''] = line.trim().toLowerCase().split('\t');
-        if (!email || AUTOMATION_EMAIL.test(email) || AUTOMATION_NAME.test(name)) continue;
+        if (!email || AUTOMATION_EMAIL.test(email) || AUTOMATION_NAME.test(name)) {continue;}
         byEmail.set(email, name || email);
       }
       return new Set(byEmail.values()).size;
@@ -1054,7 +1076,7 @@ function detectGitStats(root: string): GitStats {
   const gitAuthors90d = countPeople(['--since=90 days ago']);
   const authorsAllTime = Math.max(gitAuthors90d, countPeople(['-n', '3000']));
 
-  const count = (args: string[]): number => {
+  const count = (args: Array<string>): number => {
     try {
       return Number.parseInt(execFileSync('git', ['rev-list', '--count', ...args, 'HEAD'], { cwd: root, env: GIT_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 }).trim(), 10) || 0;
     } catch {
@@ -1073,9 +1095,9 @@ function detectGitStats(root: string): GitStats {
   // A checkout on another branch that is behind the default one: what ships may hold files this
   // branch lacks (a CI workflow, a brief), and an audit of the checkout would report them missing.
   let behindDefault: number | undefined;
-  let defaultBranchOnly: string[] | undefined;
+  let defaultBranchOnly: Array<string> | undefined;
   if (defaultBranch && branch && branch !== 'HEAD' && branch !== defaultBranch) {
-    const git = (args: string[]): string => execFileSync('git', args, { cwd: root, env: GIT_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 });
+    const git = (args: Array<string>): string => execFileSync('git', args, { cwd: root, env: GIT_ENV, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 3000 });
     for (const ref of [`refs/remotes/origin/${defaultBranch}`, `refs/heads/${defaultBranch}`]) {
       try {
         behindDefault = Number.parseInt(git(['rev-list', '--count', `HEAD..${ref}`]).trim(), 10) || 0;
@@ -1090,7 +1112,7 @@ function detectGitStats(root: string): GitStats {
     }
   }
 
-  let commits30d = 0;
+  let commits30d: number;
   try {
     const out = execFileSync('git', ['rev-list', '--count', '--since=30 days ago', 'HEAD'], {
       cwd: root, env: GIT_ENV,

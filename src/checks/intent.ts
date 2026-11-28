@@ -10,12 +10,17 @@ const BOILERPLATE_PATTERNS: Array<{ label: string; regex: RegExp }> = [
   { label: 'generic "always test your changes"', regex: /\balways test your (changes|code)\b/i },
 ];
 
+interface BareAgentsImport {
+  bare: boolean;
+  backticked: boolean;
+}
+
 /**
  * Checks whether a markdown file contains a bare `@AGENTS.md` import line
  * outside fenced code blocks and outside inline backticks (Claude Code only
  * imports bare `@AGENTS.md`).
  */
-export function hasBareAgentsImport(content: string): { bare: boolean; backticked: boolean } {
+export function hasBareAgentsImport(content: string): BareAgentsImport {
   const lines = content.split(/\r?\n/);
   let inFence = false;
   let bare = false;
@@ -28,7 +33,7 @@ export function hasBareAgentsImport(content: string): { bare: boolean; backticke
       continue;
     }
     if (inFence) {
-      if (/@AGENTS\.md\b/.test(trimmed)) backticked = true;
+      if (/@AGENTS\.md\b/.test(trimmed)) {backticked = true;}
       continue;
     }
     if (/^@AGENTS\.md\s*$/.test(trimmed)) {
@@ -36,7 +41,7 @@ export function hasBareAgentsImport(content: string): { bare: boolean; backticke
       continue;
     }
     // Check inline bare @AGENTS.md not wrapped in backticks
-    const withoutBackticks = trimmed.replace(/`[^`]*`/g, '');
+    const withoutBackticks = trimmed.replaceAll(/`[^`]*`/g, '');
     if (/(^|\s)@AGENTS\.md(\s|$)/.test(withoutBackticks)) {
       bare = true;
     } else if (/`[^`]*@AGENTS\.md[^`]*`/.test(trimmed)) {
@@ -48,12 +53,12 @@ export function hasBareAgentsImport(content: string): { bare: boolean; backticke
 }
 
 function countLines(text: string): number {
-  if (!text) return 0;
+  if (!text) {return 0;}
   return text.replace(/\r?\n$/, '').split(/\r?\n/).length;
 }
 
-export function runIntentChecks(ctx: RepoContext): CheckResult[] {
-  const results: CheckResult[] = [];
+export function runIntentChecks(ctx: RepoContext): Array<CheckResult> {
+  const results: Array<CheckResult> = [];
 
   const hasAgentsMd = ctx.hasFile('AGENTS.md');
   const hasClaudeMd = ctx.hasFile('CLAUDE.md');
@@ -68,22 +73,21 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
   const claudeLink = hasClaudeMd ? ctx.linkTarget('CLAUDE.md') : undefined;
   const agentsLink = hasAgentsMd ? ctx.linkTarget('AGENTS.md') : undefined;
   const sameFile = claudeLink === 'AGENTS.md' || agentsLink === 'CLAUDE.md';
-  const named = (file: string, link: string | undefined): string => (link ? `${file} → ${link}` : file);
   // On this machine but ignored by git: the author has a brief, a teammate or a CI agent does not.
   const localOnlyBriefs = ['AGENTS.md', 'CLAUDE.md'].filter((f) => ctx.isLocalOnly(f));
 
   // 1. intent.instructions-file
   {
-    const found: string[] = [];
-    if (hasAgentsMd) found.push(named('AGENTS.md', agentsLink));
-    if (hasClaudeMd) found.push(named('CLAUDE.md', claudeLink));
+    const found: Array<string> = [];
+    if (hasAgentsMd) {found.push(named('AGENTS.md', agentsLink));}
+    if (hasClaudeMd) {found.push(named('CLAUDE.md', claudeLink));}
     for (const f of localOnlyBriefs) {
       found.push(`${f} exists on this machine but git ignores it — teammates and CI agents never see it`);
     }
-    if (cursorMdcFiles.length > 0) found.push(`.cursor/rules/*.mdc (${cursorMdcFiles.length})`);
-    if (claudeRuleFiles.length > 0) found.push(`.claude/rules/*.md (${claudeRuleFiles.length})`);
-    if (hasCopilot) found.push('.github/copilot-instructions.md');
-    if (hasLegacyCursorRules) found.push('.cursorrules (undocumented legacy format)');
+    if (cursorMdcFiles.length > 0) {found.push(`.cursor/rules/*.mdc (${cursorMdcFiles.length})`);}
+    if (claudeRuleFiles.length > 0) {found.push(`.claude/rules/*.md (${claudeRuleFiles.length})`);}
+    if (hasCopilot) {found.push('.github/copilot-instructions.md');}
+    if (hasLegacyCursorRules) {found.push('.cursorrules (undocumented legacy format)');}
     if (cursorPlainMdFiles.length > 0) {
       found.push(`.cursor/rules/*.md (${cursorPlainMdFiles.length} ignored — must be .mdc)`);
     }
@@ -94,7 +98,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
     const scriptNames = Object.keys(ctx.packageJson?.scripts ?? {}).filter((n) => n.length >= 4);
     const grounded = (text: string): boolean =>
       repoPathsIn(text, (p) => ctx.hasFile(p) || ctx.findFiles((f) => f.startsWith(`${p.replace(/\/$/, '')}/`)).length > 0) ||
-      scriptNames.some((n) => new RegExp(`\\b(?:run\\s+)?${n.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&')}\\b`).test(text) && /\b(npm|pnpm|yarn|bun|vp)\b/.test(text));
+      scriptNames.some((n) => new RegExp(`\\b(?:run\\s+)?${n.replaceAll(/[.*+?^$()|[\]{}\\]/g, String.raw`\$&`)}\\b`).test(text) && /\b(npm|pnpm|yarn|bun|vp)\b/.test(text));
     const applicableMdc = cursorMdcFiles.filter((f) => {
       const body = ctx.readText(f) ?? '';
       const front = /^---\n([\s\S]*?)\n---/.exec(body)?.[1] ?? '';
@@ -116,7 +120,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
     const uncommittedBriefs = ['AGENTS.md', 'CLAUDE.md'].filter((f) => ctx.hasFile(f) && ctx.isTracked(f) === false);
     if (uncommittedBriefs.length > 0) {
       found.push(`${uncommittedBriefs.join(', ')} not committed yet`);
-      if (status === 'pass') status = 'warn';
+      if (status === 'pass') {status = 'warn';}
     }
     const onlyLocalBrief = !hasPrimary && localOnlyBriefs.length > 0;
 
@@ -434,7 +438,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
       const text = ctx.readText(primaryFile) ?? '';
       const lines = countLines(text);
       const bytes = Buffer.byteLength(text, 'utf8');
-      const fillerHits = BOILERPLATE_PATTERNS.filter((p) => p.regex.test(text)).map((p) => p.label);
+      const fillerHits = BOILERPLATE_PATTERNS.flatMap((p) => (p.regex.test(text) ? [p.label] : []));
 
       const primaryLink = primaryFile === 'AGENTS.md' ? agentsLink : claudeLink;
       const evidence = [`${named(primaryFile, primaryLink)}: ${lines} lines (${(bytes / 1024).toFixed(1)} KiB)`];
@@ -489,7 +493,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
     // Nested briefs load when an agent works in that directory; a root brief that sends agents to
     // a doc per area ("Read before you touch") scopes context too.
     const { nestedBriefs, routedDocs } = ctx.brief;
-    const claudeRulesWithoutPaths: string[] = [];
+    const claudeRulesWithoutPaths: Array<string> = [];
     for (const rf of claudeRuleFiles) {
       const content = ctx.readText(rf) ?? '';
       if (!/^---[\s\S]*?\bpaths\s*:/m.test(content)) {
@@ -501,10 +505,10 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
     // A Cursor rule is scoped when it has globs (or always applies); without either Cursor never loads it.
     const scopedMdc = cursorMdcFiles.filter((f) => /^---\n[\s\S]*?(?:globs:[ \t]*\S|alwaysApply:[ \t]*true)[\s\S]*?\n---/.test(ctx.readText(f) ?? ''));
     const totalScoped = scopedMdc.length + claudeRuleFiles.length + nestedBriefs.length + (routesToDocs ? routedDocs.length : 0);
-    const evidence: string[] = [];
-    if (claudeRuleFiles.length > 0) evidence.push(`.claude/rules/*.md: ${claudeRuleFiles.length}`);
-    if (scopedMdc.length > 0) evidence.push(`.cursor/rules/*.mdc with globs: ${scopedMdc.length}`);
-    if (cursorMdcFiles.length > scopedMdc.length) evidence.push(`${cursorMdcFiles.length - scopedMdc.length} .cursor rule(s) have no \`globs\` and \`alwaysApply: false\`, so Cursor never applies them`);
+    const evidence: Array<string> = [];
+    if (claudeRuleFiles.length > 0) {evidence.push(`.claude/rules/*.md: ${claudeRuleFiles.length}`);}
+    if (scopedMdc.length > 0) {evidence.push(`.cursor/rules/*.mdc with globs: ${scopedMdc.length}`);}
+    if (cursorMdcFiles.length > scopedMdc.length) {evidence.push(`${cursorMdcFiles.length - scopedMdc.length} .cursor rule(s) have no \`globs\` and \`alwaysApply: false\`, so Cursor never applies them`);}
     if (nestedBriefs.length > 0) {
       evidence.push(`Nested briefs (${nestedBriefs.length}): ${nestedBriefs.slice(0, 5).join(', ')}${nestedBriefs.length > 5 ? ', …' : ''}`);
     }
@@ -589,14 +593,14 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
       ]),
     ];
 
-    const evidence: string[] = [];
-    if (skillFiles.length > 0) evidence.push(`Reusable skills: ${skillFiles.length} (${skillFiles.slice(0, 3).join(', ')})`);
+    const evidence: Array<string> = [];
+    if (skillFiles.length > 0) {evidence.push(`Reusable skills: ${skillFiles.length} (${skillFiles.slice(0, 3).join(', ')})`);}
     if (productSkills.length > 0) {
       evidence.push(`${productSkills.length} SKILL.md file(s) outside the agent tool folders (e.g. ${productSkills[0]}) read as product content and are not counted`);
     }
-    if (prTemplate) evidence.push(`PR template: ${prTemplate}`);
-    if (issueTemplates.length > 0) evidence.push(`Issue templates: ${issueTemplates.length}`);
-    if (specDocs.length > 0) evidence.push(`Design/spec/standard docs: ${specDocs.slice(0, 5).join(', ')}`);
+    if (prTemplate) {evidence.push(`PR template: ${prTemplate}`);}
+    if (issueTemplates.length > 0) {evidence.push(`Issue templates: ${issueTemplates.length}`);}
+    if (specDocs.length > 0) {evidence.push(`Design/spec/standard docs: ${specDocs.slice(0, 5).join(', ')}`);}
 
     const categoriesHit =
       (skillFiles.length > 0 ? 1 : 0) +
@@ -605,7 +609,7 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
 
     const status: CheckResult['status'] = categoriesHit >= 2 ? 'pass' : categoriesHit === 1 ? 'warn' : 'fail';
     // Name only what this repository lacks.
-    const missingKinds = { en: [] as string[], pl: [] as string[] };
+    const missingKinds = { en: [] as Array<string>, pl: [] as Array<string> };
     if (skillFiles.length === 0) {
       missingKinds.en.push('a reusable skill for a procedure you repeat (`.claude/skills/<name>/SKILL.md` or `.agents/skills/`)');
       missingKinds.pl.push('skilla dla powtarzanej procedury (`.claude/skills/<nazwa>/SKILL.md` lub `.agents/skills/`)');
@@ -646,4 +650,8 @@ export function runIntentChecks(ctx: RepoContext): CheckResult[] {
   }
 
   return results;
+}
+
+function named(file: string, link: string | undefined): string {
+  return link ? `${file} → ${link}` : file;
 }

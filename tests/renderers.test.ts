@@ -1,15 +1,16 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { auditRepo, renderHtml, renderJson, renderMarkdown, renderTerminal } from '../src/index.js';
-import { createAntiPatternRepo, createTempRepo, createWellHarnessedRepo, type TempRepo } from './fixtures.js';
+import { createAntiPatternRepo, createTempRepo, createWellHarnessedRepo, parseJsonAs } from './fixtures.js';
+import type { TempRepo } from './fixtures.js';
 
-const repos: TempRepo[] = [];
+const repos: Array<TempRepo> = [];
 const track = (r: TempRepo): TempRepo => {
   repos.push(r);
   return r;
 };
 
 afterEach(() => {
-  while (repos.length > 0) repos.pop()!.cleanup();
+  while (repos.length > 0) {repos.pop()!.cleanup();}
 });
 
 describe('renderers (terminal, markdown, html, json)', () => {
@@ -17,22 +18,22 @@ describe('renderers (terminal, markdown, html, json)', () => {
     const repo = track(createWellHarnessedRepo());
     const reportEn = auditRepo(repo.dir, { lang: 'en' });
     const rawEn = renderJson(reportEn);
-    const parsedEn = JSON.parse(rawEn) as Record<string, unknown>;
+    const parsedEn = parseJsonAs<{ schemaVersion: string; level: number; stations: Array<unknown>; checks: Array<unknown> }>(rawEn);
 
-    expect(parsedEn['schemaVersion']).toBe('1.1.0');
-    expect(parsedEn['level']).toBe(5);
-    expect(Array.isArray(parsedEn['stations'])).toBe(true);
-    expect((parsedEn['stations'] as unknown[]).length).toBe(6);
-    expect((parsedEn['checks'] as unknown[]).length).toBe(30);
+    expect(parsedEn.schemaVersion).toBe('1.1.0');
+    expect(parsedEn.level).toBe(5);
+    expect(Array.isArray(parsedEn.stations)).toBe(true);
+    expect(parsedEn.stations.length).toBe(6);
+    expect(parsedEn.checks.length).toBe(30);
     expect(rawEn).not.toContain('services/');
     expect(rawEn).not.toContain('books/');
 
     const reportPl = auditRepo(repo.dir, { lang: 'pl' });
-    const parsedPl = JSON.parse(renderJson(reportPl)) as {
+    const parsedPl = parseJsonAs<{
       lang: string;
       levelName: string;
       checks: Array<{ docsUrl: string }>;
-    };
+    }>(renderJson(reportPl));
     expect(parsedPl.lang).toBe('pl');
     expect(parsedPl.levelName).toBe('Ciemna fabryka');
     expect(parsedPl.checks[0]!.docsUrl.startsWith('https://developertoolkit.ai/pl/')).toBe(true);

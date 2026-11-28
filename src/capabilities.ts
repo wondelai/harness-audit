@@ -1,4 +1,5 @@
 import type { RepoContext } from './fs-scanner.js';
+import { lookup } from './lookup.js';
 
 /** What a command proves when it exits 0. */
 export type VerifyKind = 'test' | 'lint' | 'typecheck' | 'build' | 'format';
@@ -6,16 +7,16 @@ export type VerifyKind = 'test' | 'lint' | 'typecheck' | 'build' | 'format';
 export interface VerifyCommand {
   /** Runnable from the repository root. */
   command: string;
-  kinds: VerifyKind[];
+  kinds: Array<VerifyKind>;
   /** Where the command was found: `package.json`, `Makefile`, `AGENTS.md`, a build tool. */
   source: string;
 }
 
 export interface VerifyCapabilities {
   /** Every verify command the repository offers, most general first. */
-  commands: VerifyCommand[];
+  commands: Array<VerifyCommand>;
   /** Commands quoted in the root agent instructions (AGENTS.md / CLAUDE.md). */
-  documented: VerifyCommand[];
+  documented: Array<VerifyCommand>;
   kinds: Set<VerifyKind>;
   /** One command that runs the tests and at least one static check. */
   unified: VerifyCommand | undefined;
@@ -33,10 +34,10 @@ const TWO_WORD_WRAPPERS = new Set([
 ]);
 
 /** The program a command line runs and its arguments, with env assignments and wrappers removed. */
-function programOf(command: string): { program: string; args: string[] } | undefined {
+function programOf(command: string): { program: string; args: Array<string> } | undefined {
   let tokens = command.trim().split(/\s+/).filter(Boolean);
   for (let guard = 0; guard < 6 && tokens.length > 0; guard++) {
-    const first = tokens[0]!;
+    const first = (tokens[0] ?? '');
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first) || first === '--') {
       tokens = tokens.slice(1);
     } else if (tokens.length > 1 && TWO_WORD_WRAPPERS.has(`${first} ${tokens[1]}`)) {
@@ -44,15 +45,15 @@ function programOf(command: string): { program: string; args: string[] } | undef
     } else if (ONE_WORD_WRAPPERS.has(first)) {
       tokens = tokens.slice(1);
       // npx -y, npx --yes, npx -p pkg
-      while (tokens.length > 0 && tokens[0]!.startsWith('-') && tokens[0] !== '--') {
+      while (tokens.length > 0 && (tokens[0] ?? '').startsWith('-') && tokens[0] !== '--') {
         tokens = tokens.slice(tokens[0] === '-p' || tokens[0] === '--package' ? 2 : 1);
       }
     } else {
       break;
     }
   }
-  if (tokens.length === 0) return undefined;
-  const program = tokens[0]!.replace(/^.*\//, '').replace(/\.(bat|cmd|exe)$/, '').replace(/@[\w.^~-]+$/, '');
+  if (tokens.length === 0) {return undefined;}
+  const program = (tokens[0] ?? '').replace(/^.*\//, '').replace(/\.(bat|cmd|exe)$/, '').replace(/@[\w.^~-]+$/, '');
   return { program, args: tokens.slice(1) };
 }
 
@@ -67,142 +68,142 @@ const BUNDLERS = new Set(['vite', 'next', 'astro', 'nuxt', 'webpack', 'rollup', 
  * merely names a tool (`oxlint --vitest-plugin`) proves nothing about that tool. A compiled
  * language's build or test run also type-checks.
  */
-function kindsOfInvocation(program: string, args: string[]): VerifyKind[] {
+function kindsOfInvocation(program: string, args: Array<string>): Array<VerifyKind> {
   const sub = args.find((a) => !a.startsWith('-')) ?? '';
-  const has = (...names: string[]): boolean => args.some((a) => names.includes(a));
-  const kinds: VerifyKind[] = [];
-  const add = (...k: VerifyKind[]): void => {
+  const has = (...names: Array<string>): boolean => args.some((a) => names.includes(a));
+  const kinds: Array<VerifyKind> = [];
+  const add = (...k: Array<VerifyKind>): void => {
     kinds.push(...k);
   };
 
-  if (TEST_RUNNERS.has(program)) add('test');
-  if (LINTERS.has(program)) add('lint');
-  if (TYPECHECKERS.has(program)) add('typecheck');
-  if (FORMATTERS.has(program)) add('format');
-  if (BUNDLERS.has(program) && has('build', 'pack', 'export')) add('build');
+  if (TEST_RUNNERS.has(program)) {add('test');}
+  if (LINTERS.has(program)) {add('lint');}
+  if (TYPECHECKERS.has(program)) {add('typecheck');}
+  if (FORMATTERS.has(program)) {add('format');}
+  if (BUNDLERS.has(program) && has('build', 'pack', 'export')) {add('build');}
 
   switch (program) {
     case 'tsc':
       // Emitting is a tsconfig matter (`noEmit`); the name of the script says whether it is the build.
       add('typecheck');
-      if (has('--build', '-b')) add('build');
+      if (has('--build', '-b')) {add('build');}
       break;
     case 'biome':
-      if (has('lint', 'check', 'ci')) add('lint');
-      if (has('format', 'check', 'ci')) add('format');
+      if (has('lint', 'check', 'ci')) {add('lint');}
+      if (has('format', 'check', 'ci')) {add('format');}
       break;
     case 'ruff':
       add(sub === 'format' ? 'format' : 'lint');
       break;
     case 'node':
-      if (has('--test')) add('test');
+      if (has('--test')) {add('test');}
       break;
     case 'bun':
-      if (sub === 'test') add('test');
-      if (sub === 'check') add('typecheck');
-      if (sub === 'fmt') add('format');
-      if (sub === 'build') add('build');
+      if (sub === 'test') {add('test');}
+      if (sub === 'check') {add('typecheck');}
+      if (sub === 'fmt') {add('format');}
+      if (sub === 'build') {add('build');}
       break;
     case 'deno':
-      if (sub === 'test') add('test');
-      if (sub === 'lint') add('lint');
-      if (sub === 'check') add('typecheck');
-      if (sub === 'fmt') add('format');
+      if (sub === 'test') {add('test');}
+      if (sub === 'lint') {add('lint');}
+      if (sub === 'check') {add('typecheck');}
+      if (sub === 'fmt') {add('format');}
       break;
     case 'vp':
-      if (sub === 'test') add('test');
-      if (sub === 'lint') add('lint');
-      if (sub === 'check') add('lint', 'format', 'typecheck');
-      if (sub === 'fmt') add('format');
-      if (sub === 'build' || sub === 'pack') add('build');
+      if (sub === 'test') {add('test');}
+      if (sub === 'lint') {add('lint');}
+      if (sub === 'check') {add('lint', 'format', 'typecheck');}
+      if (sub === 'fmt') {add('format');}
+      if (sub === 'build' || sub === 'pack') {add('build');}
       break;
     case 'astro':
     case 'ty':
-      if (sub === 'check') add('typecheck');
+      if (sub === 'check') {add('typecheck');}
       break;
     case 'next':
       // `next build` type-checks the project as part of the build.
-      if (sub === 'build') add('typecheck');
-      if (sub === 'lint') add('lint');
+      if (sub === 'build') {add('typecheck');}
+      if (sub === 'lint') {add('lint');}
       break;
     case 'turbo':
     case 'nx':
-      for (const a of args) add(...kindsFromName(a));
+      for (const a of args) {add(...kindsFromName(a));}
       break;
     case 'go':
-      if (sub === 'test') add('test', 'typecheck');
-      if (sub === 'vet') add('lint', 'typecheck');
-      if (sub === 'build') add('build', 'typecheck');
+      if (sub === 'test') {add('test', 'typecheck');}
+      if (sub === 'vet') {add('lint', 'typecheck');}
+      if (sub === 'build') {add('build', 'typecheck');}
       break;
     case 'cargo':
-      if (sub === 'test' || sub === 'nextest') add('test', 'typecheck');
-      if (sub === 'clippy') add('lint');
-      if (sub === 'check') add('typecheck');
-      if (sub === 'build') add('build', 'typecheck');
-      if (sub === 'fmt') add('format');
+      if (sub === 'test' || sub === 'nextest') {add('test', 'typecheck');}
+      if (sub === 'clippy') {add('lint');}
+      if (sub === 'check') {add('typecheck');}
+      if (sub === 'build') {add('build', 'typecheck');}
+      if (sub === 'fmt') {add('format');}
       break;
     case 'swift':
-      if (sub === 'test') add('test', 'typecheck');
-      if (sub === 'build') add('build', 'typecheck');
+      if (sub === 'test') {add('test', 'typecheck');}
+      if (sub === 'build') {add('build', 'typecheck');}
       break;
     case 'dotnet':
-      if (sub === 'test') add('test', 'typecheck');
-      if (sub === 'build') add('build', 'typecheck');
-      if (sub === 'format') add('format');
+      if (sub === 'test') {add('test', 'typecheck');}
+      if (sub === 'build') {add('build', 'typecheck');}
+      if (sub === 'format') {add('format');}
       break;
     case 'zig':
     case 'forge':
     case 'sbt':
-      if (sub === 'test') add('test', 'typecheck');
-      if (sub === 'build') add('build', 'typecheck');
+      if (sub === 'test') {add('test', 'typecheck');}
+      if (sub === 'build') {add('build', 'typecheck');}
       break;
     case 'flutter':
     case 'dart':
-      if (sub === 'test') add('test');
-      if (sub === 'analyze') add('lint', 'typecheck');
-      if (sub === 'format') add('format');
-      if (sub === 'build' || sub === 'compile') add('build', 'typecheck');
+      if (sub === 'test') {add('test');}
+      if (sub === 'analyze') {add('lint', 'typecheck');}
+      if (sub === 'format') {add('format');}
+      if (sub === 'build' || sub === 'compile') {add('build', 'typecheck');}
       break;
     case 'mix':
-      if (sub === 'test') add('test');
-      if (sub === 'credo') add('lint');
-      if (sub === 'format') add('format');
+      if (sub === 'test') {add('test');}
+      if (sub === 'credo') {add('lint');}
+      if (sub === 'format') {add('format');}
       break;
     case 'rake':
-      if (sub === 'test' || sub === 'spec') add('test');
+      if (sub === 'test' || sub === 'spec') {add('test');}
       break;
     case 'fastlane':
-      if (args.some((a) => /^(tests?|scan)$/.test(a))) add('test');
+      if (args.some((a) => /^(tests?|scan)$/.test(a))) {add('test');}
       break;
     case 'srb':
-      if (sub === 'tc') add('typecheck');
+      if (sub === 'tc') {add('typecheck');}
       break;
     case 'gradle':
     case 'gradlew':
-      for (const task of args.filter((a) => !a.startsWith('-')).map((a) => a.replace(/^.*:/, ''))) {
-        if (/[tT]est/.test(task) || task === 'check') add('test', 'typecheck');
-        if (/^(lint|detekt|ktlint)/.test(task) || task === 'spotlessCheck' || task === 'check') add('lint');
-        if (/^(assemble|compile|bundle)/.test(task) || task === 'build') add('build', 'typecheck');
-        if (/^spotless|^ktlintFormat$/.test(task)) add('format');
+      for (const task of args.flatMap((a) => (a.startsWith('-') ? [] : [a.replace(/^.*:/, '')]))) {
+        if (/[tT]est/.test(task) || task === 'check') {add('test', 'typecheck');}
+        if (/^(lint|detekt|ktlint)/.test(task) || task === 'spotlessCheck' || task === 'check') {add('lint');}
+        if (/^(assemble|compile|bundle)/.test(task) || task === 'build') {add('build', 'typecheck');}
+        if (/^spotless|^ktlintFormat$/.test(task)) {add('format');}
       }
       break;
     case 'mvn':
     case 'mvnw':
-      if (has('test', 'verify', 'install')) add('test', 'typecheck');
-      if (has('compile', 'package', 'install', 'verify')) add('build', 'typecheck');
+      if (has('test', 'verify', 'install')) {add('test', 'typecheck');}
+      if (has('compile', 'package', 'install', 'verify')) {add('build', 'typecheck');}
       break;
     case 'xcodebuild':
-      if (has('test', 'test-without-building')) add('test', 'typecheck');
-      if (has('build', 'archive', 'build-for-testing', 'analyze')) add('build', 'typecheck');
+      if (has('test', 'test-without-building')) {add('test', 'typecheck');}
+      if (has('build', 'archive', 'build-for-testing', 'analyze')) {add('build', 'typecheck');}
       break;
     case 'wrangler':
-      if (sub === 'deploy' && has('--dry-run')) add('build');
+      if (sub === 'deploy' && has('--dry-run')) {add('build');}
       break;
     case 'cmake':
-      if (has('--build')) add('build');
+      if (has('--build')) {add('build');}
       break;
     case 'docker':
-      if (sub === 'build') add('build');
+      if (sub === 'build') {add('build');}
       break;
     default:
       break;
@@ -211,17 +212,17 @@ function kindsOfInvocation(program: string, args: string[]): VerifyKind[] {
 }
 
 /** What a script or target proves by its name alone, when its body is a custom program. */
-function kindsFromName(name: string): VerifyKind[] {
+function kindsFromName(name: string): Array<VerifyKind> {
   const n = name.toLowerCase();
-  if (/^(test|tests|spec)([:._-].*)?$/.test(n)) return ['test'];
-  if (/^lint([:._-](?!fix).*)?$/.test(n)) return ['lint'];
-  if (/^(typecheck|type-check|types|tsc|check[:._-]types)$/.test(n)) return ['typecheck'];
-  if (/^build([:._-].*)?$/.test(n)) return ['build'];
-  if (/^(fmt|format)[:._-]check$/.test(n)) return ['format'];
+  if (/^(test|tests|spec)([:._-].*)?$/.test(n)) {return ['test'];}
+  if (/^lint([:._-](?!fix).*)?$/.test(n)) {return ['lint'];}
+  if (/^(typecheck|type-check|types|tsc|check[:._-]types)$/.test(n)) {return ['typecheck'];}
+  if (/^build([:._-].*)?$/.test(n)) {return ['build'];}
+  if (/^(fmt|format)[:._-]check$/.test(n)) {return ['format'];}
   return [];
 }
 
-const PM_BUILTINS: Record<string, ReadonlySet<string>> = {
+const PM_BUILTINS = {
   bun: new Set(['test', 'build', 'check', 'fmt', 'install', 'add', 'remove', 'x', 'pm', 'link', 'init', 'create', 'upgrade']),
   vp: new Set(['test', 'build', 'check', 'fmt', 'lint', 'dev', 'preview', 'pack', 'install', 'add', 'remove', 'env', 'dlx', 'exec']),
   npm: new Set(['install', 'ci', 'exec', 'publish', 'pack', 'audit', 'view']),
@@ -230,64 +231,64 @@ const PM_BUILTINS: Record<string, ReadonlySet<string>> = {
 };
 
 /** An own key, not an inherited one: `toString` is not a package manager and not a script. */
-const owns = (object: object, key: string): boolean => Object.prototype.hasOwnProperty.call(object, key);
+const owns = <Table extends object>(table: Table, key: string): boolean => Object.hasOwn(table, key);
 
 /** The script names a package-manager invocation asks for, whether or not this package defines them. */
-function scriptNamesIn(program: string, args: string[]): string[] {
-  if (!owns(PM_BUILTINS, program) && program !== 'vpr') return [];
+function scriptNamesIn(program: string, args: Array<string>): Array<string> {
+  if (!owns(PM_BUILTINS, program) && program !== 'vpr') {return [];}
   const positional = args.filter((a) => !a.startsWith('-'));
-  if (program === 'vpr') return positional.slice(0, 1);
+  if (program === 'vpr') {return positional.slice(0, 1);}
   const runIndex = positional.findIndex((a) => a === 'run' || a === 'run-script');
-  if (runIndex >= 0) return positional.slice(runIndex + 1, runIndex + 2);
+  if (runIndex >= 0) {return positional.slice(runIndex + 1, runIndex + 2);}
   // `npm test`, `yarn lint`, `pnpm typecheck`
   const first = positional[0];
-  return first && (first === 'test' || !PM_BUILTINS[program]!.has(first)) ? [first] : [];
+  return first && (first === 'test' || !(lookup(PM_BUILTINS, program)?.has(first) ?? false)) ? [first] : [];
 }
 
 /** The package scripts a command such as `bun run --parallel lint check test` invokes. */
-function scriptsCalledBy(command: string, scripts: Scripts): string[] {
+function scriptsCalledBy(command: string, scripts: Scripts): Array<string> {
   const tokens = command.trim().split(/\s+/);
   const runner = tokens[0] ?? '';
-  if (runner === 'vpr') return tokens.slice(1).filter((t) => owns(scripts, t)).slice(0, 1);
-  if (!owns(PM_BUILTINS, runner)) return [];
+  if (runner === 'vpr') {return tokens.slice(1).filter((t) => owns(scripts, t)).slice(0, 1);}
+  if (!owns(PM_BUILTINS, runner)) {return [];}
   // `bun run --parallel a b c` names several scripts; `npm run build lint` passes `lint` to `build`.
   const several = runner === 'bun' && tokens.some((t) => t === '--parallel' || t === '--sequential');
 
   let i = 1;
-  while (i < tokens.length && tokens[i]!.startsWith('-')) i++;
+  while (i < tokens.length && (tokens[i] ?? '').startsWith('-')) {i++;}
   const explicitRun = tokens[i] === 'run' || tokens[i] === 'run-script';
-  if (explicitRun) i++;
+  if (explicitRun) {i++;}
 
-  const names: string[] = [];
+  const names: Array<string> = [];
   for (; i < tokens.length; i++) {
-    const tok = tokens[i]!;
-    if (tok === '--') break;
+    const tok = (tokens[i] ?? '');
+    if (tok === '--') {break;}
     if (tok === '--filter' || tok === '-F' || tok === '--workspace' || tok === '-w') {
       i++;
       continue;
     }
-    if (tok.startsWith('-')) continue;
-    if (!owns(scripts, tok)) break;
-    if (!explicitRun && PM_BUILTINS[runner]!.has(tok)) break;
+    if (tok.startsWith('-')) {continue;}
+    if (!owns(scripts, tok)) {break;}
+    if (!explicitRun && lookup(PM_BUILTINS, runner)?.has(tok)) {break;}
     names.push(tok);
-    if (!several) break;
+    if (!several) {break;}
   }
   return names;
 }
 
 interface RecipeBook {
   tool: 'make' | 'just';
-  recipes: Map<string, { deps: string[]; lines: string[] }>;
+  recipes: Map<string, { deps: Array<string>; lines: Array<string> }>;
 }
 
 function parseRecipes(text: string, tool: RecipeBook['tool']): RecipeBook {
   const recipes: RecipeBook['recipes'] = new Map();
-  let current: { deps: string[]; lines: string[] } | undefined;
+  let current: { deps: Array<string>; lines: Array<string> } | undefined;
   for (const raw of text.split(/\r?\n/)) {
     const header = /^([A-Za-z0-9_.-]+)(?:\s+[^:=]*)?:(?!=)\s*([^#]*)/.exec(raw);
     if (header && !/^\s/.test(raw)) {
       current = { deps: (header[2] ?? '').trim().split(/\s+/).filter(Boolean), lines: [] };
-      recipes.set(header[1]!, current);
+      recipes.set((header[1] ?? ''), current);
     } else if (current && /^\s+\S/.test(raw)) {
       current.lines.push(raw.trim().replace(/^[@-]+/, ''));
     } else if (raw.trim() === '') {
@@ -305,13 +306,13 @@ const SCRIPT_FILE = /(?:^|[\s"'=])(?:\.\/)?((?:scripts?|bin|ci|tools|\.github\/s
 const VERIFY_NAMED = /(verify|check|test|lint|typecheck|preflight|validate|guard|(^|[-_/])ci([-_.]|$))/i;
 
 /** The commands of a shell line whose failure fails the line: `vitest run || true` proves nothing. */
-function gatingParts(commandLine: string): string[] {
+function gatingParts(commandLine: string): Array<string> {
   const tokens = commandLine.split(/(&&|\|\||;|\n)/);
-  const parts: string[] = [];
+  const parts: Array<string> = [];
   for (let i = 0; i < tokens.length; i += 2) {
     const fallback = tokens[i + 1] === '||' ? (tokens[i + 2] ?? '').trim() : '';
-    if (/^(true|:|exit 0)(\s|$)/.test(fallback)) continue;
-    parts.push(tokens[i]!);
+    if (/^(true|:|exit 0)(\s|$)/.test(fallback)) {continue;}
+    parts.push((tokens[i] ?? ''));
   }
   return parts;
 }
@@ -336,7 +337,7 @@ export const DEPLOY_TOOL =
 /** The command line runs a deploy tool for real: not a dry run, not a tool name inside a quoted message. */
 export function runsDeployTool(cmd: string): boolean {
   const hit = DEPLOY_TOOL.exec(cmd);
-  if (!hit || /--dry-run\b|--dry\b/.test(cmd)) return false;
+  if (!hit || /--dry-run\b|--dry\b/.test(cmd)) {return false;}
   const before = cmd.slice(0, hit.index);
   const quotes = (ch: string): number => before.split(ch).length - 1;
   return quotes("'") % 2 === 0 && quotes('"') % 2 === 0;
@@ -344,7 +345,7 @@ export function runsDeployTool(cmd: string): boolean {
 
 export class CommandClassifier {
   private readonly scripts: Scripts;
-  private readonly books: RecipeBook[] = [];
+  private readonly books: Array<RecipeBook> = [];
   private readonly ctx: RepoContext;
 
   /** `scripts`: the package scripts commands resolve against; the root package's by default. */
@@ -352,12 +353,12 @@ export class CommandClassifier {
     this.ctx = ctx;
     this.scripts = scripts ?? ctx.packageJson?.scripts ?? {};
     const makefile = ctx.readText('Makefile') ?? ctx.readText('makefile');
-    if (makefile) this.books.push(parseRecipes(makefile, 'make'));
+    if (makefile) {this.books.push(parseRecipes(makefile, 'make'));}
     const justfile = ctx.readText('justfile') ?? ctx.readText('Justfile');
-    if (justfile) this.books.push(parseRecipes(justfile, 'just'));
+    if (justfile) {this.books.push(parseRecipes(justfile, 'just'));}
   }
 
-  recipeNames(tool: RecipeBook['tool']): string[] {
+  recipeNames(tool: RecipeBook['tool']): Array<string> {
     return [...(this.books.find((b) => b.tool === tool)?.recipes.keys() ?? [])];
   }
 
@@ -367,28 +368,29 @@ export class CommandClassifier {
     for (const part of gatingParts(commandLine)) {
       const cmd = part.trim().replace(/^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+/, '');
       // Printing or exporting a value runs nothing, even when it mentions a tool.
-      if (!cmd || /^(#|echo\b|printf\b|export\b|cd\b|set\b)/.test(cmd)) continue;
+      if (!cmd || /^(#|echo\b|printf\b|export\b|cd\b|set\b)/.test(cmd)) {continue;}
 
       const scriptFile = SCRIPT_FILE.exec(cmd)?.[1];
-      if (scriptFile && VERIFY_NAMED.test(scriptFile.split('/').pop()!) && this.ctx.hasFile(scriptFile)) {
-        for (const k of this.classifyFile(scriptFile, seen)) kinds.add(k);
+      if (scriptFile && VERIFY_NAMED.test(scriptFile.split('/').at(-1) ?? '') && this.ctx.hasFile(scriptFile)) {
+        for (const k of this.classifyFile(scriptFile, seen)) {kinds.add(k);}
       }
 
       for (const name of scriptsCalledBy(cmd, this.scripts)) {
-        for (const k of this.classifyScript(name, seen)) kinds.add(k);
+        for (const k of this.classifyScript(name, seen)) {kinds.add(k);}
       }
 
       const recipeCall = /^(make|just)\s+(?:-\S+\s+)*([A-Za-z0-9_.-]+)/.exec(cmd);
-      if (recipeCall) {
-        for (const k of this.classifyRecipe(recipeCall[1] as RecipeBook['tool'], recipeCall[2]!, seen)) kinds.add(k);
+      const recipeTool = recipeCall?.[1];
+      if (recipeTool === 'make' || recipeTool === 'just') {
+        for (const k of this.classifyRecipe(recipeTool, recipeCall?.[2] ?? '', seen)) {kinds.add(k);}
       }
 
       const invocation = programOf(cmd);
       if (invocation) {
-        for (const k of kindsOfInvocation(invocation.program, invocation.args)) kinds.add(k);
+        for (const k of kindsOfInvocation(invocation.program, invocation.args)) {kinds.add(k);}
         // `npm run test:ci` inside a sub-package: the script is not ours to read, its name still says what it is.
         for (const name of scriptNamesIn(invocation.program, invocation.args)) {
-          if (!(name in this.scripts)) for (const k of kindsFromName(name)) kinds.add(k);
+          if (!(name in this.scripts)) {for (const k of kindsFromName(name)) {kinds.add(k);}}
         }
       }
     }
@@ -398,16 +400,16 @@ export class CommandClassifier {
   /** What a checked-in shell or task script proves: its own name plus every command inside it. */
   classifyFile(file: string, seen: Set<string> = new Set()): Set<VerifyKind> {
     const key = `file:${file}`;
-    const base = file.split('/').pop()!.replace(/\.[a-z]+$/, '');
+    const base = (file.split('/').at(-1) ?? '').replace(/\.[a-z]+$/, '');
     // Only a name that says test, lint or typecheck speaks for the file; `build_dataset.py` is a program, not a build.
-    const stem = base.split(/[-_.]/)[0]!;
+    const stem = base.split(/[-_.]/)[0] ?? '';
     const kinds = new Set<VerifyKind>(/^(tests?|lint|typecheck)$/.test(stem) ? kindsFromName(stem) : []);
-    if (seen.has(key) || seen.size > 24) return kinds;
+    if (seen.has(key) || seen.size > 24) {return kinds;}
     seen.add(key);
     // Only shell scripts are read line by line; a .mjs/.py program is judged by its name.
     if (/\.(sh|bash|zsh)$/.test(file) || !/\.[a-z]+$/.test(file)) {
       for (const line of (this.ctx.readText(file) ?? '').split(/\r?\n/)) {
-        for (const k of this.classify(line.trim().replace(/\s*\\$/, ''), seen)) kinds.add(k);
+        for (const k of this.classify(line.trim().replace(/\s*\\$/, ''), seen)) {kinds.add(k);}
       }
     }
     return kinds;
@@ -420,19 +422,19 @@ export class CommandClassifier {
   deploys(commandLine: string, seen: Set<string> = new Set()): boolean {
     for (const part of commandLine.split(/&&|\|\||;|\n/)) {
       const cmd = part.trim().replace(/^(?:[A-Z_][A-Z0-9_]*=\S*\s+)+/, '');
-      if (!cmd || /^(#|echo\b|printf\b)/.test(cmd)) continue;
-      if (runsDeployTool(cmd)) return true;
+      if (!cmd || /^(#|echo\b|printf\b)/.test(cmd)) {continue;}
+      if (runsDeployTool(cmd)) {return true;}
       for (const name of scriptsCalledBy(cmd, this.scripts)) {
         const key = `deploy:script:${name}`;
-        if (seen.has(key)) continue;
+        if (seen.has(key)) {continue;}
         seen.add(key);
-        const body = this.scripts[name]!;
-        if (!refusesFirst(body) && this.deploys(body, seen)) return true;
+        const body = this.scripts[name] ?? '';
+        if (!refusesFirst(body) && this.deploys(body, seen)) {return true;}
       }
       const scriptFile = SCRIPT_FILE.exec(cmd)?.[1];
       if (scriptFile && /\.(sh|bash|zsh)$/.test(scriptFile) && !seen.has(scriptFile) && this.ctx.hasFile(scriptFile)) {
         seen.add(scriptFile);
-        if ((this.ctx.readText(scriptFile) ?? '').split(/\r?\n/).some((line) => this.deploys(line, seen))) return true;
+        if ((this.ctx.readText(scriptFile) ?? '').split(/\r?\n/).some((line) => this.deploys(line, seen))) {return true;}
       }
     }
     return false;
@@ -443,11 +445,11 @@ export class CommandClassifier {
     const body = this.scripts[name];
     // A name promises; the body delivers. `"build": "echo no build step"` builds nothing, and
     // `"test": "vitest run || true"` cannot fail.
-    if (body !== undefined && (onlyPrints(body) || gatingParts(body).every((p) => onlyPrints(p) || p.trim() === ''))) return new Set();
+    if (body !== undefined && (onlyPrints(body) || gatingParts(body).every((p) => onlyPrints(p) || p.trim() === ''))) {return new Set();}
     const kinds = new Set<VerifyKind>(kindsFromName(name));
-    if (body === undefined || seen.has(key)) return kinds;
+    if (body === undefined || seen.has(key)) {return kinds;}
     seen.add(key);
-    for (const k of this.classify(body, seen)) kinds.add(k);
+    for (const k of this.classify(body, seen)) {kinds.add(k);}
     return kinds;
   }
 
@@ -455,39 +457,40 @@ export class CommandClassifier {
     const key = `${tool}:${target}`;
     const kinds = new Set<VerifyKind>(kindsFromName(target));
     const recipe = this.books.find((b) => b.tool === tool)?.recipes.get(target);
-    if (!recipe || seen.has(key)) return kinds;
+    if (!recipe || seen.has(key)) {return kinds;}
     seen.add(key);
     for (const dep of recipe.deps) {
-      for (const k of this.classifyRecipe(tool, dep, seen)) kinds.add(k);
+      for (const k of this.classifyRecipe(tool, dep, seen)) {kinds.add(k);}
     }
     for (const line of recipe.lines) {
-      for (const k of this.classify(line, seen)) kinds.add(k);
+      for (const k of this.classify(line, seen)) {kinds.add(k);}
     }
     return kinds;
   }
 }
 
-const KIND_ORDER: VerifyKind[] = ['lint', 'format', 'typecheck', 'build', 'test'];
+const KIND_ORDER: Array<VerifyKind> = ['lint', 'format', 'typecheck', 'build', 'test'];
 
-export function sortKinds(kinds: Iterable<VerifyKind>): VerifyKind[] {
+export function sortKinds(kinds: Iterable<VerifyKind>): Array<VerifyKind> {
   const set = new Set(kinds);
   return KIND_ORDER.filter((k) => set.has(k));
 }
 
-function isUnified(kinds: VerifyKind[]): boolean {
+function isUnified(kinds: Array<VerifyKind>): boolean {
   return kinds.includes('test') && (kinds.includes('lint') || kinds.includes('typecheck'));
 }
 
 /** How the repository's package scripts are run: `bun run x`, `pnpm run x`, `yarn x`, `npm run x`. */
 export function scriptRunner(ctx: RepoContext): (script: string) => string {
-  const runners: Record<string, (script: string) => string> = {
-    bun: (s) => `bun run ${s}`,
-    pnpm: (s) => `pnpm run ${s}`,
-    yarn: (s) => `yarn ${s}`,
-    npm: (s) => (s === 'test' ? 'npm test' : `npm run ${s}`),
+  const runners = {
+    bun: (s: string) => `bun run ${s}`,
+    pnpm: (s: string) => `pnpm run ${s}`,
+    yarn: (s: string) => `yarn ${s}`,
+    npm: (s: string) => (s === 'test' ? 'npm test' : `npm run ${s}`),
   };
+  const isManager = (name: string): name is keyof typeof runners => Object.hasOwn(runners, name);
   const declared = /^(bun|pnpm|yarn|npm)@/.exec(ctx.packageJson?.packageManager ?? '')?.[1];
-  if (declared) return runners[declared]!;
+  if (declared && isManager(declared)) {return runners[declared];}
 
   const locked = [
     ctx.hasFile('bun.lock') || ctx.hasFile('bun.lockb') ? 'bun' : '',
@@ -500,17 +503,18 @@ export function scriptRunner(ctx: RepoContext): (script: string) => string {
     const workflows = ctx.findFiles((f) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f)).map((f) => ctx.readText(f) ?? '').join('\n');
     const inCi = /\b(npm) ci\b|\b(pnpm|yarn|bun) install\b/.exec(workflows);
     const ciManager = inCi?.[1] ?? inCi?.[2];
-    if (ciManager && locked.includes(ciManager)) return runners[ciManager]!;
+    if (ciManager && isManager(ciManager) && locked.includes(ciManager)) {return runners[ciManager];}
   }
-  return runners[locked[0] ?? 'npm']!;
+  const firstLocked = locked[0];
+  return firstLocked !== undefined && isManager(firstLocked) ? runners[firstLocked] : runners.npm;
 }
 
 const SCRIPT_PRIORITY = ['verify', 'check', 'ci', 'validate', 'test', 'lint', 'typecheck', 'type-check', 'build', 'fmt:check', 'format:check'];
 const RECIPE_PRIORITY = ['verify', 'check', 'ci', 'test', 'lint', 'typecheck', 'build', 'fmt-check', 'format-check'];
 
 /** Commands quoted in a markdown brief: fenced shell lines and inline code spans that look runnable. */
-function quotedCommands(markdown: string, isRepoFile: (path: string) => boolean): string[] {
-  const out: string[] = [];
+function quotedCommands(markdown: string, isRepoFile: (path: string) => boolean): Array<string> {
+  const out: Array<string> = [];
   let inFence = false;
   for (const raw of markdown.split(/\r?\n/)) {
     const line = raw.trim();
@@ -520,13 +524,13 @@ function quotedCommands(markdown: string, isRepoFile: (path: string) => boolean)
     }
     if (inFence) {
       const cmd = line.replace(/^\$\s+/, '').replace(/\s+#.*$/, '');
-      if (cmd && !cmd.startsWith('#') && cmd.length <= 240) out.push(cmd);
+      if (cmd && !cmd.startsWith('#') && cmd.length <= 240) {out.push(cmd);}
       continue;
     }
     for (const span of line.matchAll(/`([^`\n]{3,240})`/g)) {
-      const cmd = span[1]!.trim();
+      const cmd = (span[1] ?? '').trim();
       const looksRunnable = /\s/.test(cmd) || cmd.startsWith('./') || /^(pytest|tox|nox|make|just|rspec)$/.test(cmd);
-      if (looksRunnable || (/\.(sh|bash|zsh)$/.test(cmd) && isRepoFile(cmd))) out.push(cmd);
+      if (looksRunnable || (/\.(sh|bash|zsh)$/.test(cmd) && isRepoFile(cmd))) {out.push(cmd);}
     }
   }
   return out;
@@ -535,12 +539,12 @@ function quotedCommands(markdown: string, isRepoFile: (path: string) => boolean)
 export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   let simulatorTestScheme: string | undefined;
   const classifier = new CommandClassifier(ctx);
-  const commands: VerifyCommand[] = [];
+  const commands: Array<VerifyCommand> = [];
   const add = (command: string, kinds: Iterable<VerifyKind>, source: string): void => {
     const sorted = sortKinds(kinds);
-    if (sorted.length === 0 || commands.some((c) => c.command === command)) return;
+    if (sorted.length === 0 || commands.some((c) => c.command === command)) {return;}
     // A command that builds on its way to a deploy is a deploy.
-    if (classifier.deploys(command)) return;
+    if (classifier.deploys(command)) {return;}
     commands.push({ command, kinds: sorted, source });
   };
 
@@ -554,7 +558,7 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
     ...SCRIPT_PRIORITY.filter((n) => owns(scripts, n) && !longRunning(n)),
     ...Object.keys(scripts).filter((n) => /^test[:._-]/.test(n) && !longRunning(n)).slice(0, 4),
   ];
-  for (const name of scriptNames) add(run(name), classifier.classifyScript(name), 'package.json');
+  for (const name of scriptNames) {add(run(name), classifier.classifyScript(name), 'package.json');}
 
   // 1b. Scripts of workspace members, for the kinds the root does not offer: a repository whose
   // packages live in subfolders verifies there.
@@ -566,8 +570,8 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
       const kinds = sortKinds(memberClassifier.classifyScript(name));
       const covered = new Set(commands.flatMap((c) => c.kinds));
       // A member's test script is always its own suite; other kinds only fill what is missing.
-      if (kinds.length === 0 || (!kinds.includes('test') && kinds.every((k) => covered.has(k)))) continue;
-      if (memberClassifier.deploys(memberScripts[name]!)) continue;
+      if (kinds.length === 0 || (!kinds.includes('test') && kinds.every((k) => covered.has(k)))) {continue;}
+      if (memberClassifier.deploys(memberScripts[name] ?? '')) {continue;}
       const runIn = run(name).replace(/^(bun run|pnpm run|yarn|npm run|npm)\b/, (runner) =>
         runner.startsWith('bun') ? `bun run --cwd ${dir}` : runner.startsWith('pnpm') ? `pnpm --dir ${dir} run` : runner.startsWith('yarn') ? `yarn --cwd ${dir}` : `npm --prefix ${dir} run`,
       );
@@ -587,7 +591,7 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   const scriptFiles = ctx.findFiles((f) =>
     /^(scripts?|bin|ci|tools)\/(verify|check|test|tests|lint|ci|preflight|validate|typecheck|guard)([-_][\w-]+)?(\.(sh|bash|zsh))?$/.test(f),
   );
-  for (const file of scriptFiles.slice(0, 6)) add(`./${file}`, classifier.classifyFile(file), file);
+  for (const file of scriptFiles.slice(0, 6)) {add(`./${file}`, classifier.classifyFile(file), file);}
 
   // 4. Build tools whose verify commands are conventions rather than scripts
   const gradle = ctx.hasFile('gradlew') ? './gradlew' : undefined;
@@ -600,18 +604,18 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   }
   if (ctx.hasFile('Package.swift')) {
     add('swift build', ['build', 'typecheck'], 'Package.swift');
-    if (ctx.testFiles.some((f) => f.endsWith('.swift'))) add('swift test', ['test', 'typecheck'], 'Package.swift');
+    if (ctx.testFiles.some((f) => f.endsWith('.swift'))) {add('swift test', ['test', 'typecheck'], 'Package.swift');}
   }
   // A Swift package inside an Xcode project (Packages/Kit, AppKit/) is built and tested in place.
   for (const manifest of ctx.findFiles((f) => /^(?:[^/]+\/){1,2}Package\.swift$/.test(f)).slice(0, 3)) {
     const dir = manifest.replace(/\/Package\.swift$/, '');
     add(`swift build --package-path ${dir}`, ['build', 'typecheck'], manifest);
-    if (ctx.testFiles.some((f) => f.startsWith(`${dir}/`) && f.endsWith('.swift'))) add(`swift test --package-path ${dir}`, ['test', 'typecheck'], manifest);
+    if (ctx.testFiles.some((f) => f.startsWith(`${dir}/`) && f.endsWith('.swift'))) {add(`swift test --package-path ${dir}`, ['test', 'typecheck'], manifest);}
   }
   // An Xcode project with a committed shared scheme builds from the command line as it stands.
   const scheme = ctx.findFiles((f) => /\.xcodeproj\/xcshareddata\/xcschemes\/[^/]+\.xcscheme$/.test(f))[0];
   if (scheme) {
-    const name = scheme.split('/').pop()!.replace(/\.xcscheme$/, '');
+    const name = (scheme.split('/').at(-1) ?? '').replace(/\.xcscheme$/, '');
     const hasTests = /<TestableReference/.test(ctx.readText(scheme) ?? '') && ctx.testFiles.some((f) => f.endsWith('.swift'));
     // An iOS scheme builds for a device by default, which needs signing; the simulator build does not.
     const project = ctx.readText(scheme.replace(/xcshareddata\/.*$/, 'project.pbxproj')) ?? '';
@@ -619,8 +623,8 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
     add(`xcodebuild -scheme ${name}${ios ? " -destination 'generic/platform=iOS Simulator' CODE_SIGNING_ALLOWED=NO" : ''} build`, ['build', 'typecheck'], scheme);
     // Tests on iOS run on a named simulator, and which ones are installed is not in the repository:
     // a guessed device would put a failing command into the brief and the allow-list.
-    if (hasTests && ios) simulatorTestScheme = name;
-    else if (hasTests) add(`xcodebuild -scheme ${name} test`, ['test', 'typecheck'], scheme);
+    if (hasTests && ios) {simulatorTestScheme = name;}
+    else if (hasTests) {add(`xcodebuild -scheme ${name} test`, ['test', 'typecheck'], scheme);}
   }
   if (ctx.hasFile('Cargo.toml')) {
     add('cargo test', ['test', 'typecheck'], 'Cargo.toml');
@@ -638,43 +642,43 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   if (hasPython) {
     const prefix = ctx.hasFile('uv.lock') || /\[tool\.uv\]/.test(pyproject) ? 'uv run ' : ctx.hasFile('poetry.lock') ? 'poetry run ' : '';
     const pyTests = ctx.testFiles.some((f) => f.endsWith('.py'));
-    if (pyTests || /\[tool\.pytest|pytest/.test(pyproject) || ctx.hasFile('pytest.ini')) add(`${prefix}pytest`, ['test'], 'pytest');
-    if (/\[tool\.ruff/.test(pyproject) || ctx.hasAnyFile(['ruff.toml', '.ruff.toml'])) add(`${prefix}ruff check .`, ['lint'], 'ruff');
-    if (/\[tool\.(pyright|basedpyright)\]/.test(pyproject) || ctx.hasFile('pyrightconfig.json')) add(`${prefix}pyright`, ['typecheck'], 'pyright');
-    else if (/\[tool\.mypy\]/.test(pyproject) || ctx.hasAnyFile(['mypy.ini', '.mypy.ini'])) add(`${prefix}mypy .`, ['typecheck'], 'mypy');
+    if (pyTests || /\[tool\.pytest|pytest/.test(pyproject) || ctx.hasFile('pytest.ini')) {add(`${prefix}pytest`, ['test'], 'pytest');}
+    if (/\[tool\.ruff/.test(pyproject) || ctx.hasAnyFile(['ruff.toml', '.ruff.toml'])) {add(`${prefix}ruff check .`, ['lint'], 'ruff');}
+    if (/\[tool\.(pyright|basedpyright)\]/.test(pyproject) || ctx.hasFile('pyrightconfig.json')) {add(`${prefix}pyright`, ['typecheck'], 'pyright');}
+    else if (/\[tool\.mypy\]/.test(pyproject) || ctx.hasAnyFile(['mypy.ini', '.mypy.ini'])) {add(`${prefix}mypy .`, ['typecheck'], 'mypy');}
   }
   if (ctx.hasFile('pubspec.yaml')) {
     const flutter = /^\s*flutter\s*:/m.test(ctx.readText('pubspec.yaml') ?? '');
     const tool = flutter ? 'flutter' : 'dart';
     add(`${tool} analyze`, ['lint', 'typecheck'], 'pubspec.yaml');
-    if (ctx.testFiles.some((f) => f.endsWith('.dart'))) add(`${tool} test`, ['test'], 'pubspec.yaml');
+    if (ctx.testFiles.some((f) => f.endsWith('.dart'))) {add(`${tool} test`, ['test'], 'pubspec.yaml');}
   }
   if (ctx.hasFile('mix.exs')) {
     add('mix test', ['test'], 'mix.exs');
     add('mix format --check-formatted', ['format'], 'mix.exs');
   }
   if (ctx.hasFile('Gemfile')) {
-    if (ctx.hasFile('.rspec') || ctx.testFiles.some((f) => f.startsWith('spec/'))) add('bundle exec rspec', ['test'], 'Gemfile');
-    if (ctx.hasFile('.rubocop.yml')) add('bundle exec rubocop', ['lint'], '.rubocop.yml');
+    if (ctx.hasFile('.rspec') || ctx.testFiles.some((f) => f.startsWith('spec/'))) {add('bundle exec rspec', ['test'], 'Gemfile');}
+    if (ctx.hasFile('.rubocop.yml')) {add('bundle exec rubocop', ['lint'], '.rubocop.yml');}
   }
   if (ctx.findFiles((f) => f.endsWith('.sln') || f.endsWith('.csproj')).length > 0) {
     add('dotnet build', ['build', 'typecheck'], '.NET');
-    if (ctx.testFiles.some((f) => f.endsWith('.cs'))) add('dotnet test', ['test', 'typecheck'], '.NET');
+    if (ctx.testFiles.some((f) => f.endsWith('.cs'))) {add('dotnet test', ['test', 'typecheck'], '.NET');}
   }
 
   // 5. Commands the root brief tells agents to run
-  const documented: VerifyCommand[] = [];
+  const documented: Array<VerifyCommand> = [];
   // A brief that sends its reader to the README ("read README.md first") hands over the README's commands too.
   const sendsToReadme = ctx.hasFile('README.md') && ['AGENTS.md', 'CLAUDE.md'].some((f) => /\bREADME\.md\b/.test(ctx.readText(f) ?? ''));
   for (const briefFile of ['AGENTS.md', 'CLAUDE.md', ...(sendsToReadme ? ['README.md'] : [])]) {
     const text = ctx.readText(briefFile);
-    if (!text) continue;
+    if (!text) {continue;}
     for (const cmd of quotedCommands(text, (p) => ctx.hasFile(p))) {
       const kinds = sortKinds(classifier.classify(cmd));
-      if (kinds.length === 0 || documented.some((d) => d.command === cmd) || classifier.deploys(cmd)) continue;
+      if (kinds.length === 0 || documented.some((d) => d.command === cmd) || classifier.deploys(cmd)) {continue;}
       // A quoted command counts as a verify command when it tests or checks; a bare build or a
       // data-processing program the brief mentions is not something to hand to CI.
-      if (!kinds.some((k) => k === 'test' || k === 'lint' || k === 'typecheck')) continue;
+      if (!kinds.some((k) => k === 'test' || k === 'lint' || k === 'typecheck')) {continue;}
       documented.push({ command: cmd, kinds, source: briefFile });
     }
   }
@@ -683,11 +687,11 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   // "Run `bun test`" in prose, in a repository with no test script and no test file, proves nothing.
   const backed = (cmd: string): boolean => {
     const file = SCRIPT_FILE.exec(cmd)?.[1];
-    if (file && ctx.hasFile(file)) return true;
+    if (file && ctx.hasFile(file)) {return true;}
     const program = programOf(cmd)?.program ?? '';
     return /^(gradlew|gradle|xcodebuild|swift|cargo|go|make|just|mvn|mvnw|dotnet|flutter|dart|mix)$/.test(program);
   };
-  for (const doc of documented.slice(0, 8)) if (backed(doc.command)) add(doc.command, doc.kinds, doc.source);
+  for (const doc of documented.slice(0, 8)) {if (backed(doc.command)) {add(doc.command, doc.kinds, doc.source);}}
 
   const kinds = new Set<VerifyKind>(commands.flatMap((c) => c.kinds));
   const unified =
@@ -704,21 +708,21 @@ export function describeCommand(cmd: VerifyCommand): string {
  * The fewest detected commands that together cover typecheck, lint, test and build: what a brief
  * should quote, what CI should run, what a permission policy should allow.
  */
-export function minimalVerifySet(caps: VerifyCapabilities): string[] {
+export function minimalVerifySet(caps: VerifyCapabilities): Array<string> {
   const chosen = caps.unified ? [caps.unified] : [];
   for (const kind of ['typecheck', 'lint', 'test', 'build'] as const) {
-    if (chosen.some((c) => c.kinds.includes(kind))) continue;
+    if (chosen.some((c) => c.kinds.includes(kind))) {continue;}
     // The most specific command for the kind: `npm run lint` before a broader script that also lints.
     const isMember = (c: VerifyCommand): boolean => c.source.endsWith('package.json') && c.source !== 'package.json';
     // The root's own command first; a member's suite is added below, next to it, not instead of it.
     const next = caps.commands
       .filter((c) => c.kinds.includes(kind))
       .sort((a, b) => Number(isMember(a)) - Number(isMember(b)) || a.kinds.length - b.kinds.length)[0];
-    if (next) chosen.push(next);
+    if (next) {chosen.push(next);}
   }
   // Each package's own test suite is a separate thing to run: one root `pytest` does not test the Worker next to it.
   for (const member of caps.commands.filter((c) => c.source.endsWith('package.json') && c.source !== 'package.json' && c.kinds.includes('test')).slice(0, 4)) {
-    if (!chosen.includes(member)) chosen.push(member);
+    if (!chosen.includes(member)) {chosen.push(member);}
   }
   return chosen.map((c) => c.command);
 }
@@ -728,7 +732,7 @@ export function minimalVerifySet(caps: VerifyCapabilities): string[] {
  * agents not to run. Allowing `npm test` in a repository whose brief says "never run `npm test`"
  * would have the harness contradict its own instructions.
  */
-export function allowedVerifySet(ctx: RepoContext): string[] {
+export function allowedVerifySet(ctx: RepoContext): Array<string> {
   const forbidden = ctx.brief.forbiddenCommands;
   return minimalVerifySet(ctx.verify).filter((cmd) => !forbidden.some((f) => cmd === f || cmd.startsWith(`${f} `)));
 }
@@ -747,12 +751,12 @@ export function deployScriptGuards(ctx: RepoContext): Map<string, string> {
   const run = scriptRunner(ctx);
   const guards = new Map<string, string>();
   for (const [name, body] of Object.entries(scripts)) {
-    if (!classifier.deploys(body)) continue;
+    if (!classifier.deploys(body)) {continue;}
     // Only `&&` makes the deploy wait for the guard to pass: after `;` it ships whatever the guard said.
     const steps = [scripts[`pre${name}`] ?? '', body].join(' && ').split(/&&/).map((s) => s.trim()).filter(Boolean);
     const shipsAt = steps.findIndex((s) => classifier.deploys(s));
     const guard = steps.slice(0, shipsAt === -1 ? steps.length : shipsAt).find((s) => DEPLOY_GUARD.test(s));
-    if (guard) guards.set(run(name), guard);
+    if (guard) {guards.set(run(name), guard);}
   }
   return guards;
 }
@@ -762,7 +766,7 @@ export function deployScriptGuards(ctx: RepoContext): Map<string, string> {
  * the script is called), checked-in deploy shell scripts, and the platform CLI the repository is
  * configured for. A script that only refuses (`echo … && exit 1`) or tails logs is not one.
  */
-export function localDeployCommands(ctx: RepoContext): string[] {
+export function localDeployCommands(ctx: RepoContext): Array<string> {
   const classifier = new CommandClassifier(ctx);
   const scripts = ctx.packageJson?.scripts ?? {};
   const run = scriptRunner(ctx);
@@ -775,26 +779,26 @@ export function localDeployCommands(ctx: RepoContext): string[] {
     .map(([name]) => run(name));
 
   for (const file of ctx.findFiles((f) => /(^|\/)deploy[\w.-]*\.(sh|bash)$/.test(f) && f.split('/').length <= 3).slice(0, 3)) {
-    if ((ctx.readText(file) ?? '').split(/\r?\n/).some((line) => classifier.deploys(line))) commands.push(`./${file}`);
+    if ((ctx.readText(file) ?? '').split(/\r?\n/).some((line) => classifier.deploys(line))) {commands.push(`./${file}`);}
   }
   // A Worker anywhere in the workspace can be deployed with the platform CLI.
   const workerConfigs = ctx.findFiles(
     (f) => /(^|\/)wrangler\.(toml|jsonc|json)$/.test(f) && f.split('/').length <= 3 && !/(^|\/)(examples?|templates?|fixtures?|tests?|docs?)\//.test(f),
   );
-  if (ctx.hasFile('vercel.json')) commands.push('npx vercel --prod');
-  if (ctx.hasFile('fly.toml')) commands.push('fly deploy');
-  if (ctx.hasFile('netlify.toml')) commands.push('npx netlify deploy --prod');
+  if (ctx.hasFile('vercel.json')) {commands.push('npx vercel --prod');}
+  if (ctx.hasFile('fly.toml')) {commands.push('fly deploy');}
+  if (ctx.hasFile('netlify.toml')) {commands.push('npx netlify deploy --prod');}
   // Deploy commands the brief itself spells out (a manual `wrangler pages deploy`, a remote migration).
   for (const briefFile of ['AGENTS.md', 'CLAUDE.md']) {
     for (const quoted of quotedCommands(ctx.readText(briefFile) ?? '', (p) => ctx.hasFile(p))) {
       const hit = DEPLOY_TOOL.exec(quoted);
       // A cell like `apply db [--local|--remote]` is notation, not a command anyone runs.
-      if (!hit || /--dry-run\b/.test(quoted) || /[\[\]|<>]/.test(quoted)) continue;
+      if (!hit || /--dry-run\b/.test(quoted) || /[[\]|<>]/.test(quoted)) {continue;}
       // Up to the tool and its subcommand, with the runner the brief uses (`bunx wrangler …`).
       const runner = /(?:^|\s)((?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)$/.exec(quoted.slice(0, hit.index))?.[1] ?? '';
-      const command = `${runner}${hit[0].replace(/\s+/g, ' ').replace(/\s+\S*[\[\]|<>].*$/, '').replace(/\s+--remote$/, ' --remote')}`.trim();
+      const command = `${runner}${hit[0].replaceAll(/\s+/g, ' ').replace(/\s+\S*[[\]|<>].*$/, '').replace(/\s+--remote$/, ' --remote')}`.trim();
       // Only plain words: a table cell like `[--local|--remote` must never become a permission rule.
-      if (/^[\w@./: =-]+$/.test(command)) commands.push(command);
+      if (/^[\w@./: =-]+$/.test(command)) {commands.push(command);}
     }
   }
   // The platform CLI itself, unless the brief already named it with its own runner (`bunx wrangler deploy`).
@@ -802,6 +806,6 @@ export function localDeployCommands(ctx: RepoContext): string[] {
   const pages =
     workerConfigs.some((f) => /pages_build_output_dir/.test(ctx.readText(f) ?? '')) || Object.values(scripts).some((body) => /wrangler\s+pages\s+deploy/.test(body));
   const cli = pages ? 'wrangler pages deploy' : 'wrangler deploy';
-  if (workerConfigs.length > 0 && !commands.some((c) => c.includes(cli))) commands.push(`npx ${cli}`);
+  if (workerConfigs.length > 0 && !commands.some((c) => c.includes(cli))) {commands.push(`npx ${cli}`);}
   return [...new Set(commands)];
 }

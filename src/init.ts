@@ -2,11 +2,12 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { allowedVerifySet, localDeployCommands, minimalVerifySet } from './capabilities.js';
 import { RepoContext } from './fs-scanner.js';
+import { lookup } from './lookup.js';
 import type { InitAction, InitOptions, InitResult, SupportedTool } from './types.js';
 
-const DEFAULT_TOOLS: SupportedTool[] = ['claude-code', 'cursor', 'codex'];
+const DEFAULT_TOOLS: Array<SupportedTool> = ['claude-code', 'cursor', 'codex'];
 
-const INSTALL_COMMAND: Record<string, string> = {
+const INSTALL_COMMAND = {
   bun: 'bun install --frozen-lockfile',
   pnpm: 'pnpm install --frozen-lockfile',
   yarn: 'yarn install --frozen-lockfile',
@@ -25,7 +26,7 @@ const INSTALL_COMMAND: Record<string, string> = {
 
 function buildAgentsMd(ctx: RepoContext): string {
   const stack = ctx.stack;
-  const install = stack.packageManagers.map((pm) => INSTALL_COMMAND[pm]).find(Boolean);
+  const install = stack.packageManagers.map((pm) => lookup(INSTALL_COMMAND, pm)).find(Boolean);
   const verify = minimalVerifySet(ctx.verify);
   const stackLine =
     [...stack.languages, ...stack.frameworks].join(' · ') || 'TODO: name the stack';
@@ -70,21 +71,21 @@ Do not copy stale server lists from blog posts. Discover verified official serve
  */
 function buildClaudeSettings(ctx: RepoContext): string {
   const allow = allowedVerifySet(ctx).map((cmd) => `Bash(${cmd}:*)`);
-  const deny: string[] = [];
+  const deny: Array<string> = [];
   for (const command of localDeployCommands(ctx)) {
     deny.push(`Bash(${command}:*)`);
     // The platform CLI is reachable without the npx prefix and through bunx as well.
     const bare = /^npx (.+)$/.exec(command)?.[1];
-    if (bare) deny.push(`Bash(${bare}:*)`, `Bash(bunx ${bare}:*)`);
+    if (bare) {deny.push(`Bash(${bare}:*)`, `Bash(bunx ${bare}:*)`);}
   }
   // A rule matches from its first word on, so the flag is denied in front of the remote and after it.
   deny.push('Bash(git push --force*)', 'Bash(git push * --force*)', 'Bash(git push -f*)', 'Bash(git push * -f*)');
   // The local secret files of this stack, so an agent cannot read them into its context.
   // Named files, not `.env.*`: an agent has to be able to read `.env.example`.
   const secretFiles = ['.env', '.env.local', '.env.*.local', '.env.production', '.env.development'];
-  if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json'])) secretFiles.push('.dev.vars');
-  if (ctx.stack.frameworks.includes('Android')) secretFiles.push('local.properties', 'secrets.properties', 'keystore.properties');
-  for (const f of secretFiles) deny.push(`Read(./${f})`);
+  if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json'])) {secretFiles.push('.dev.vars');}
+  if (ctx.stack.frameworks.includes('Android')) {secretFiles.push('local.properties', 'secrets.properties', 'keystore.properties');}
+  for (const f of secretFiles) {deny.push(`Read(./${f})`);}
 
   return `${JSON.stringify(
     {
@@ -104,25 +105,25 @@ function buildClaudeMd(): string {
 /** "Do not weaken the tests", in the constructs of the repository's own language. */
 function oracleRule(ctx: RepoContext): string {
   const langs = ctx.stack.languages;
-  if (langs[0] === 'Swift') return 'Never add `XCTSkip`, disabled tests, `// swiftlint:disable` or assertions on constants (`XCTAssertTrue(true)`) to make checks green.';
-  if (langs[0] === 'Kotlin' || langs[0] === 'Java') return 'Never add `@Ignore` / `@Disabled`, `@Suppress` or assertions on constants (`assertTrue(true)`) to make checks green.';
-  if (langs[0] === 'Python') return 'Never add `@pytest.mark.skip`, `# type: ignore` or assertions on constants (`assert True`) to make checks green.';
-  if (langs[0] === 'Go') return 'Never add `t.Skip()` or assertions that cannot fail to make checks green.';
+  if (langs[0] === 'Swift') {return 'Never add `XCTSkip`, disabled tests, `// swiftlint:disable` or assertions on constants (`XCTAssertTrue(true)`) to make checks green.';}
+  if (langs[0] === 'Kotlin' || langs[0] === 'Java') {return 'Never add `@Ignore` / `@Disabled`, `@Suppress` or assertions on constants (`assertTrue(true)`) to make checks green.';}
+  if (langs[0] === 'Python') {return 'Never add `@pytest.mark.skip`, `# type: ignore` or assertions on constants (`assert True`) to make checks green.';}
+  if (langs[0] === 'Go') {return 'Never add `t.Skip()` or assertions that cannot fail to make checks green.';}
   return 'Never add `.skip()`, `.only()`, `@ts-ignore`, or tautological assertions (`expect(true).toBe(true)`) to make checks green.';
 }
 
 /** Where this stack keeps its tests, as globs for a path-scoped rule. */
-function testGlobs(ctx: RepoContext): string[] {
+function testGlobs(ctx: RepoContext): Array<string> {
   // Every language the repository is written in: a Swift app with a TypeScript backend has both.
   const langs = ctx.stack.languages;
-  const globs: string[] = [];
-  if (langs.includes('Swift')) globs.push('Tests/**', '**/*Tests.swift', '**/*UITests/**');
-  if (langs.includes('Kotlin') || langs.includes('Java')) globs.push('**/src/test/**', '**/src/androidTest/**');
-  if (langs.includes('Go')) globs.push('**/*_test.go');
-  if (langs.includes('Python')) globs.push('tests/**', '**/test_*.py', '**/*_test.py');
-  if (langs.includes('Rust')) globs.push('tests/**', 'src/**/tests.rs');
-  if (langs.includes('Dart')) globs.push('test/**', 'integration_test/**');
-  if (langs.includes('TypeScript') || langs.includes('JavaScript') || globs.length === 0) globs.push('**/*.test.*', '**/*.spec.*', 'tests/**', '__tests__/**');
+  const globs: Array<string> = [];
+  if (langs.includes('Swift')) {globs.push('Tests/**', '**/*Tests.swift', '**/*UITests/**');}
+  if (langs.includes('Kotlin') || langs.includes('Java')) {globs.push('**/src/test/**', '**/src/androidTest/**');}
+  if (langs.includes('Go')) {globs.push('**/*_test.go');}
+  if (langs.includes('Python')) {globs.push('tests/**', '**/test_*.py', '**/*_test.py');}
+  if (langs.includes('Rust')) {globs.push('tests/**', 'src/**/tests.rs');}
+  if (langs.includes('Dart')) {globs.push('test/**', 'integration_test/**');}
+  if (langs.includes('TypeScript') || langs.includes('JavaScript') || globs.length === 0) {globs.push('**/*.test.*', '**/*.spec.*', 'tests/**', '__tests__/**');}
   return [...new Set(globs)];
 }
 
@@ -182,8 +183,8 @@ ${rows.join('\n')}
  * The tools to scaffold for: what was asked for, else the tools the repository already uses, else
  * all of them. A repository that has never seen Cursor is not handed `.cursor/rules`.
  */
-function toolsFor(ctx: RepoContext, options: InitOptions): SupportedTool[] {
-  if (options.tools && options.tools.length > 0) return options.tools;
+function toolsFor(ctx: RepoContext, options: InitOptions): Array<SupportedTool> {
+  if (options.tools && options.tools.length > 0) {return options.tools;}
   const detected = ctx.stack.detectedTools;
   return detected.length > 0 ? detected : DEFAULT_TOOLS;
 }
@@ -192,12 +193,12 @@ function toolsFor(ctx: RepoContext, options: InitOptions): SupportedTool[] {
  * The files `init` would write for this repository, without writing them. An existing file is
  * always `skip` unless `force` is set.
  */
-export function planInit(ctx: RepoContext, options: InitOptions = {}): InitAction[] {
+export function planInit(ctx: RepoContext, options: InitOptions = {}): Array<InitAction> {
   const force = Boolean(options.force);
   const tools = toolsFor(ctx, options);
 
   const candidates: Array<{ path: string; content: string }> = [];
-  const advice: InitAction[] = [];
+  const advice: Array<InitAction> = [];
 
   // CLAUDE.md already holds the brief: a generated AGENTS.md beside it would be a second, emptier
   // source. The move is the owner's (it rewrites their file), so init says how and writes nothing.
@@ -214,9 +215,8 @@ export function planInit(ctx: RepoContext, options: InitOptions = {}): InitActio
   }
 
   if (tools.includes('claude-code')) {
-    if (!claudeOnly) candidates.push({ path: 'CLAUDE.md', content: buildClaudeMd() });
-    candidates.push({ path: '.claude/rules/testing.md', content: buildClaudeTestingRule(ctx) });
-    candidates.push({ path: '.claude/settings.json', content: buildClaudeSettings(ctx) });
+    if (!claudeOnly) {candidates.push({ path: 'CLAUDE.md', content: buildClaudeMd() });}
+    candidates.push({ path: '.claude/rules/testing.md', content: buildClaudeTestingRule(ctx) }, { path: '.claude/settings.json', content: buildClaudeSettings(ctx) });
   }
 
   if (tools.includes('cursor')) {
@@ -234,7 +234,7 @@ export function planInit(ctx: RepoContext, options: InitOptions = {}): InitActio
   }
 
   const ci = buildCiWorkflow(ctx);
-  if (ci) candidates.push({ path: '.github/workflows/ci.yml', content: ci });
+  if (ci) {candidates.push({ path: '.github/workflows/ci.yml', content: ci });}
 
   return [...advice, ...candidates.map(planOne)];
 
@@ -258,16 +258,22 @@ export function planInit(ctx: RepoContext, options: InitOptions = {}): InitActio
  * guess safely, so they get the advice in the report instead of a file.
  */
 function buildCiWorkflow(ctx: RepoContext): string | undefined {
-  if (ctx.ci.files.length > 0 || !ctx.packageJson) return undefined;
+  if (ctx.ci.files.length > 0 || !ctx.packageJson) {return undefined;}
   const verify = minimalVerifySet(ctx.verify);
-  const pm = ctx.stack.packageManagers.find((p) => p in INSTALL_COMMAND && ['bun', 'pnpm', 'yarn', 'npm'].includes(p));
-  if (verify.length === 0 || !pm) return undefined;
+  const lockfiles = {
+    bun: ['bun.lock', 'bun.lockb'],
+    pnpm: ['pnpm-lock.yaml'],
+    yarn: ['yarn.lock'],
+    npm: ['package-lock.json', 'npm-shrinkwrap.json'],
+  };
+  const pm = ctx.stack.packageManagers.find((p): p is keyof typeof lockfiles => Object.hasOwn(lockfiles, p));
+  if (verify.length === 0 || !pm) {return undefined;}
   // A workflow that cannot run is worse than none: `npm ci` needs a lockfile, pnpm/action-setup needs
   // a version to install, and an Ubuntu runner cannot run `xcodebuild` or a Gradle wrapper it never set up.
-  const lockfile = { bun: ['bun.lock', 'bun.lockb'], pnpm: ['pnpm-lock.yaml'], yarn: ['yarn.lock'], npm: ['package-lock.json', 'npm-shrinkwrap.json'] }[pm as 'bun' | 'pnpm' | 'yarn' | 'npm'];
-  if (!lockfile.some((f) => ctx.hasFile(f))) return undefined;
-  if (pm === 'pnpm' && !ctx.packageJson?.packageManager?.startsWith('pnpm')) return undefined;
-  if (!verify.every((c) => /^(?:npm|pnpm|yarn|bun|npx|bunx|vp|node)\b/.test(c))) return undefined;
+  const lockfile = lockfiles[pm];
+  if (!lockfile.some((f) => ctx.hasFile(f))) {return undefined;}
+  if (pm === 'pnpm' && !ctx.packageJson?.packageManager?.startsWith('pnpm')) {return undefined;}
+  if (!verify.every((c) => /^(?:npm|pnpm|yarn|bun|npx|bunx|vp|node)\b/.test(c))) {return undefined;}
   const nodeVersion = ctx.hasFile('.node-version') ? 'node-version-file: .node-version' : ctx.hasFile('.nvmrc') ? 'node-version-file: .nvmrc' : 'node-version: 22';
   const setup =
     pm === 'bun'
@@ -304,7 +310,7 @@ export function initHarness(repoPath: string, options: InitOptions = {}): InitRe
   const tools = toolsFor(ctx, options);
 
   const actions = planInit(ctx, options).map((item): InitAction => {
-    if (item.action === 'skip' || dryRun) return item;
+    if (item.action === 'skip' || dryRun) {return item;}
     const fullPath = join(ctx.root, item.path);
     mkdirSync(dirname(fullPath), { recursive: true });
     writeFileSync(fullPath, item.content, 'utf8');

@@ -1,8 +1,15 @@
-import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
+import { isJsonObject, parseJson } from './json.js';
 import type { AutonomyLevel, Lang, LocalizedText, StationId } from './types.js';
 
 /** The version in package.json, which sits one directory above both `src/` and the built `dist/`. */
-export const TOOL_VERSION: string = (createRequire(import.meta.url)('../package.json') as { version: string }).version;
+export const TOOL_VERSION: string = readToolVersion();
+
+function readToolVersion(): string {
+  const manifest = parseJson(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+  const version = isJsonObject(manifest) ? manifest['version'] : undefined;
+  return typeof version === 'string' ? version : '0.0.0';
+}
 export const BASE_DOCS_URL = 'https://developertoolkit.ai';
 
 export function docsUrl(lang: Lang, docsPath: string): string {
@@ -23,7 +30,7 @@ export interface StationMeta {
   docsPath: string;
 }
 
-export const STATIONS: readonly StationMeta[] = [
+export const STATIONS: ReadonlyArray<StationMeta> = [
   {
     id: 'intent',
     order: 1,
@@ -92,9 +99,16 @@ export const STATIONS: readonly StationMeta[] = [
   },
 ] as const;
 
-export const STATION_MAP: Record<StationId, StationMeta> = Object.fromEntries(
-  STATIONS.map((s) => [s.id, s]),
-) as Record<StationId, StationMeta>;
+/** The station with this id, or undefined for text that merely looks like one. */
+export function findStation(id: string): StationMeta | undefined {
+  return STATIONS.find((s) => s.id === id);
+}
+
+export function stationMeta(id: StationId): StationMeta {
+  const meta = findStation(id);
+  if (!meta) {throw new Error(`Unknown station ${id}`);}
+  return meta;
+}
 
 export interface LevelMeta {
   level: AutonomyLevel;
@@ -173,7 +187,7 @@ export interface BookCatalogEntry {
   urlPath: string;
 }
 
-export const BOOK_CATALOG: Record<string, BookCatalogEntry> = {
+export const BOOK_CATALOG = {
   handbook: {
     id: 'handbook',
     title: { en: 'The AI Engineering Handbook', pl: 'Podręcznik inżynierii AI' },
@@ -227,7 +241,7 @@ export const BOOK_CATALOG: Record<string, BookCatalogEntry> = {
     },
     urlPath: 'books/',
   },
-};
+} satisfies Record<string, BookCatalogEntry>;
 
 export const UI = {
   reportTitle: {

@@ -1,3 +1,5 @@
+import type { JsonObject } from './json.js';
+
 export type Lang = 'en' | 'pl';
 
 export type StationId =
@@ -41,12 +43,12 @@ export interface CheckResult {
   status: CheckStatus;
   severity: Severity;
   title: LocalizedText;
-  evidence: string[];
+  evidence: Array<string>;
   why: LocalizedText;
   fix: LocalizedText;
   docsPath: string;
   /** Optional structured metadata useful for gating caps and prompt generation. */
-  meta?: Record<string, unknown>;
+  meta?: JsonObject;
   /**
    * Points the overall score gains when this check passes. Set by the scoring pass for every
    * failing or warning check; absent on passing and informational ones.
@@ -73,24 +75,24 @@ export interface StationScore {
   warned: number;
   failed: number;
   info: number;
-  checks: CheckResult[];
+  checks: Array<CheckResult>;
 }
 
 export interface LevelCap {
   cappedTo: AutonomyLevel;
   reason: LocalizedText;
-  triggeredBy: string[];
+  triggeredBy: Array<string>;
 }
 
 export interface StackInfo {
-  languages: string[];
-  frameworks: string[];
-  packageManagers: string[];
+  languages: Array<string>;
+  frameworks: Array<string>;
+  packageManagers: Array<string>;
   monorepo: boolean;
-  verifyScripts: string[];
+  verifyScripts: Array<string>;
   /** Runnable verify commands with what each proves, e.g. `bun run verify (lint + typecheck + test)`. */
-  verifyCommands: string[];
-  detectedTools: SupportedTool[];
+  verifyCommands: Array<string>;
+  detectedTools: Array<SupportedTool>;
   sourceFileCount: number;
   testFileCount: number;
 }
@@ -109,7 +111,7 @@ export interface GitStats {
   /** Commits the default branch has that this checkout lacks, when another branch is checked out. */
   behindDefault?: number;
   /** Harness files (CI workflows, briefs, settings) on the default branch that this checkout lacks. */
-  defaultBranchOnly?: string[];
+  defaultBranchOnly?: Array<string>;
   remoteName?: string;
 }
 
@@ -123,8 +125,8 @@ export interface InterviewAnswer {
 export interface InterviewResult {
   role: InterviewRole;
   score: number; // 0-100
-  answers: InterviewAnswer[];
-  gaps: LocalizedText[];
+  answers: Array<InterviewAnswer>;
+  gaps: Array<LocalizedText>;
 }
 
 export interface DeepFinding {
@@ -138,9 +140,9 @@ export interface DeepFinding {
 export interface DeepReviewResult {
   provider: string;
   model?: string;
-  filesInspected: string[];
+  filesInspected: Array<string>;
   summary: string;
-  findings: DeepFinding[];
+  findings: Array<DeepFinding>;
   error?: string;
 }
 
@@ -173,17 +175,17 @@ export interface AuditReport {
   /** The weighted station total on its own. */
   stationScore: number;
   /** Points taken off for critical findings (5 each, 15 at most) and the checks that caused it. */
-  criticalPenalty: { points: number; checks: string[] };
+  criticalPenalty: { points: number; checks: Array<string> };
   rawLevel: AutonomyLevel;
   level: AutonomyLevel;
-  levelCaps: LevelCap[];
+  levelCaps: Array<LevelCap>;
   /** Absent at Level 5. */
   nextLevel?: NextLevel;
   /** Files `harness-audit init` would create here (it never overwrites an existing file). */
-  scaffold: string[];
-  stations: StationScore[];
-  checks: CheckResult[];
-  topPriorities: CheckResult[];
+  scaffold: Array<string>;
+  stations: Array<StationScore>;
+  checks: Array<CheckResult>;
+  topPriorities: Array<CheckResult>;
   interview?: InterviewResult;
   deepReview?: DeepReviewResult;
   recommendations: {
@@ -211,7 +213,7 @@ export interface RenderOptions {
 export interface InitOptions {
   dryRun?: boolean;
   force?: boolean;
-  tools?: SupportedTool[];
+  tools?: Array<SupportedTool>;
   lang?: Lang;
 }
 
@@ -225,6 +227,6 @@ export interface InitAction {
 export interface InitResult {
   repoPath: string;
   dryRun: boolean;
-  tools: SupportedTool[];
-  actions: InitAction[];
+  tools: Array<SupportedTool>;
+  actions: Array<InitAction>;
 }

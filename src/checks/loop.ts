@@ -1,11 +1,15 @@
 import { dirname, join } from 'node:path';
 import { describeCommand } from '../capabilities.js';
-import { stripJsonComments, type RepoContext } from '../fs-scanner.js';
+import { parseJsonc } from '../fs-scanner.js';
+import type { RepoContext } from '../fs-scanner.js';
+import { isJsonObject, parseJson } from '../json.js';
+import type { JsonObject } from '../json.js';
+import { lookup } from '../lookup.js';
 import type { CheckResult, LocalizedText } from '../types.js';
 
 interface TsConfigShape {
-  compilerOptions?: Record<string, unknown>;
-  extends?: string | string[];
+  compilerOptions?: JsonObject;
+  extends?: string | Array<string>;
   references?: Array<{ path?: string }>;
 }
 
@@ -13,20 +17,19 @@ interface TsConfigShape {
 type StrictVerdict = { strict: boolean; via: string; set?: boolean } | { unresolved: string };
 
 /** Where an installed package's `exports` map sends a spec such as `agents/tsconfig`. */
-function packageExportTargets(ctx: RepoContext, spec: string): string[] {
+function packageExportTargets(ctx: RepoContext, spec: string): Array<string> {
   const parts = spec.split('/');
-  const name = spec.startsWith('@') ? parts.slice(0, 2).join('/') : parts[0]!;
+  const name = spec.startsWith('@') ? parts.slice(0, 2).join('/') : (parts[0] ?? '');
   const subpath = `./${parts.slice(name.split('/').length).join('/')}`.replace(/\/$/, '');
   const raw = ctx.readUnscannedText(`node_modules/${name}/package.json`);
-  if (!raw) return [];
-  try {
-    const pkg = JSON.parse(raw) as { exports?: Record<string, unknown>; tsconfig?: string };
-    const entry = subpath === '.' ? (pkg.tsconfig ?? pkg.exports?.['.']) : pkg.exports?.[subpath];
-    const target = typeof entry === 'string' ? entry : entry && typeof entry === 'object' ? Object.values(entry).find((v) => typeof v === 'string') : undefined;
-    return typeof target === 'string' ? [`node_modules/${name}/${target.replace(/^\.\//, '')}`] : [];
-  } catch {
-    return [];
-  }
+  if (!raw) {return [];}
+  const pkg = parseJson(raw);
+  if (!isJsonObject(pkg)) {return [];}
+  const exportsMap = pkg['exports'];
+  const exportEntries = isJsonObject(exportsMap) ? exportsMap : undefined;
+  const entry = subpath === '.' ? (pkg['tsconfig'] ?? exportEntries?.['.']) : exportEntries?.[subpath];
+  const target = typeof entry === 'string' ? entry : isJsonObject(entry) ? Object.values(entry).find((v) => typeof v === 'string') : undefined;
+  return typeof target === 'string' ? [`node_modules/${name}/${target.replace(/^\.\//, '')}`] : [];
 }
 
 /**
@@ -35,23 +38,13 @@ function packageExportTargets(ctx: RepoContext, spec: string): string[] {
  */
 function resolveStrict(ctx: RepoContext, file: string, depth = 0): StrictVerdict {
   const raw = ctx.readText(file) ?? ctx.readUnscannedText(file);
-  if (raw === null) return { unresolved: file };
-  let config: TsConfigShape;
-  try {
-    config = JSON.parse(raw) as TsConfigShape;
-  } catch {
-    try {
-      config = JSON.parse(stripJsonComments(raw)) as TsConfigShape;
-    } catch {
-      return { unresolved: file };
-    }
-  }
-
-  // `null`, a number, an array: valid JSON, not a tsconfig.
-  if (typeof config !== 'object' || config === null || Array.isArray(config)) return { unresolved: file };
+  if (raw === null) {return { unresolved: file };}
+  const config = parseJsonc<TsConfigShape>(raw);
+  // Not JSON at all, or `null`, a number, an array: valid JSON, not a tsconfig.
+  if (typeof config !== 'object' || config === null || Array.isArray(config)) {return { unresolved: file };}
   const own = config.compilerOptions?.['strict'];
-  if (typeof own === 'boolean') return { strict: own, via: file, set: true };
-  if (depth >= 6) return { strict: false, via: file };
+  if (typeof own === 'boolean') {return { strict: own, via: file, set: true };}
+  if (depth >= 6) {return { strict: false, via: file };}
 
   const parents = (config.extends === undefined ? [] : Array.isArray(config.extends) ? config.extends : [config.extends]).filter((p): p is string => typeof p === 'string');
   let open: string | undefined;
@@ -60,18 +53,18 @@ function resolveStrict(ctx: RepoContext, file: string, depth = 0): StrictVerdict
     const candidates = spec.startsWith('.')
       ? [join(dirname(file), spec), join(dirname(file), `${spec}.json`)]
       : [...packageExportTargets(ctx, spec), `node_modules/${spec}`, `node_modules/${spec}.json`, `node_modules/${spec}/tsconfig.json`];
-    const target = candidates.map((c) => c.replace(/\\/g, '/')).find((c) => /\.json$/.test(c) && (ctx.readText(c) ?? ctx.readUnscannedText(c)) !== null);
+    const target = candidates.map((c) => c.replaceAll('\\', '/')).find((c) => /\.json$/.test(c) && (ctx.readText(c) ?? ctx.readUnscannedText(c)) !== null);
     if (!target) {
       // Presets whose name says it are strict by definition, installed or not.
-      if (/strict/i.test(spec)) return { strict: true, via: spec };
+      if (/strict/i.test(spec)) {return { strict: true, via: spec };}
       open = spec;
       continue;
     }
     const verdict = resolveStrict(ctx, target, depth + 1);
     // A parent that sets `strict` decides. One that leaves it unset (its verdict names itself, not
     // a config that said `false`) does not shadow an earlier parent that sets it.
-    if ('strict' in verdict && (verdict.strict || verdict.set)) return verdict;
-    if ('unresolved' in verdict) open = verdict.unresolved;
+    if ('strict' in verdict && (verdict.strict || verdict.set)) {return verdict;}
+    if ('unresolved' in verdict) {open = verdict.unresolved;}
   }
   return open ? { unresolved: open } : { strict: false, via: file };
 }
@@ -84,26 +77,26 @@ function resolveStrict(ctx: RepoContext, file: string, depth = 0): StrictVerdict
 function xcodegenRemotePackages(projectYml: string): boolean {
   const lines = projectYml.split(/\r?\n/);
   const start = lines.findIndex((l) => /^packages:\s*$/.test(l));
-  if (start === -1) return false;
+  if (start === -1) {return false;}
   for (const line of lines.slice(start + 1)) {
-    if (line.trim() === '') continue;
-    if (!/^\s/.test(line)) break;
-    if (/^\s+(url|github):/.test(line)) return true;
+    if (line.trim() === '') {continue;}
+    if (!/^\s/.test(line)) {break;}
+    if (/^\s+(url|github):/.test(line)) {return true;}
   }
   return false;
 }
 
-export function runLoopChecks(ctx: RepoContext): CheckResult[] {
-  const results: CheckResult[] = [];
+export function runLoopChecks(ctx: RepoContext): Array<CheckResult> {
+  const results: Array<CheckResult> = [];
   const stack = ctx.stack;
 
   // 1. loop.stack-detection
   {
     const hasKnownStack = stack.languages.length > 0 || stack.packageManagers.length > 0;
-    const evidence: string[] = [];
-    if (stack.languages.length > 0) evidence.push(`Languages: ${stack.languages.join(', ')}`);
-    if (stack.frameworks.length > 0) evidence.push(`Frameworks: ${stack.frameworks.join(', ')}`);
-    if (stack.packageManagers.length > 0) evidence.push(`Package managers: ${stack.packageManagers.join(', ')}`);
+    const evidence: Array<string> = [];
+    if (stack.languages.length > 0) {evidence.push(`Languages: ${stack.languages.join(', ')}`);}
+    if (stack.frameworks.length > 0) {evidence.push(`Frameworks: ${stack.frameworks.join(', ')}`);}
+    if (stack.packageManagers.length > 0) {evidence.push(`Package managers: ${stack.packageManagers.join(', ')}`);}
     evidence.push(`Layout: ${stack.monorepo ? 'Monorepo' : 'Single repository'} (${stack.sourceFileCount} source files, ${stack.testFileCount} test files)`);
 
     results.push({
@@ -137,7 +130,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     const hasBrief = ctx.hasFile('AGENTS.md') || ctx.hasFile('CLAUDE.md');
     const documented = verify.documented;
 
-    const evidence: string[] = [];
+    const evidence: Array<string> = [];
     if (verify.commands.length > 0) {
       const shown = verify.commands.slice(0, 4);
       evidence.push(`Verify commands: ${shown.map(describeCommand).join(' · ')}${verify.commands.length > shown.length ? ` · +${verify.commands.length - shown.length} more` : ''}`);
@@ -148,13 +141,13 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       evidence.push(
         documented.length > 0
           ? documented.every((d) => d.source === 'README.md')
-            ? `${ctx.brief.primary} sends agents to README.md, which quotes ${documented.length} verify command(s), e.g. \`${documented[0]!.command}\``
-            : `Root instructions quote ${documented.length} verify command(s), e.g. \`${documented[0]!.command}\``
+            ? `${ctx.brief.primary} sends agents to README.md, which quotes ${documented.length} verify command(s), e.g. \`${documented[0]?.command ?? ''}\``
+            : `Root instructions quote ${documented.length} verify command(s), e.g. \`${documented[0]?.command ?? ''}\``
           : 'Root instructions quote no test, lint or type-check command (looked in backticks and code fences; a build command alone does not count)',
       );
     }
     const missing = [!hasTest ? 'tests' : '', !hasStatic ? 'lint or typecheck' : ''].filter(Boolean);
-    if (missing.length > 0 && verify.commands.length > 0) evidence.push(`Missing from the loop: ${missing.join(', ')}`);
+    if (missing.length > 0 && verify.commands.length > 0) {evidence.push(`Missing from the loop: ${missing.join(', ')}`);}
     if (verify.simulatorTestScheme) {
       evidence.push(
         `Scheme ${verify.simulatorTestScheme} has a test action; its command needs a simulator this audit cannot choose, so quote yours in the brief: \`xcodebuild test -scheme ${verify.simulatorTestScheme} -destination 'platform=iOS Simulator,name=<installed simulator>'\``,
@@ -179,13 +172,13 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       verify.commands.length === 0
         ? 'Give the repository one command that proves a change: tests plus a static check (lint or typecheck), exiting non-zero on failure. Expose it where your stack expects it (a package script, a Makefile target, a Gradle task, `scripts/verify.sh`) and quote it in `AGENTS.md`.'
         : missing.length > 0
-          ? `Add the missing half of the loop (${missing.join(' and ')}) next to \`${quote!.command}\`, ideally behind one \`verify\`/\`check\` command, and quote it in \`AGENTS.md\`.`
+          ? `Add the missing half of the loop (${missing.join(' and ')}) next to \`${quote?.command ?? ''}\`, ideally behind one \`verify\`/\`check\` command, and quote it in \`AGENTS.md\`.`
           : `Quote the exact commands in \`AGENTS.md\` inside backticks so agents run them before finishing: ${verify.commands.slice(0, 3).map((c) => `\`${c.command}\``).join(', ')}.`;
     const fixPl =
       verify.commands.length === 0
         ? 'Daj repozytorium jedną komendę, która dowodzi poprawności zmiany: testy plus sprawdzenie statyczne (lint lub typecheck), z niezerowym kodem wyjścia przy błędzie. Udostępnij ją tam, gdzie oczekuje tego Twój stos (skrypt pakietu, cel Makefile, zadanie Gradle, `scripts/verify.sh`) i wpisz ją do `AGENTS.md`.'
         : missing.length > 0
-          ? `Dodaj brakującą część pętli (${missing.join(' i ')}) obok \`${quote!.command}\`, najlepiej pod jedną komendą \`verify\`/\`check\`, i wpisz ją do \`AGENTS.md\`.`
+          ? `Dodaj brakującą część pętli (${missing.join(' i ')}) obok \`${quote?.command ?? ''}\`, najlepiej pod jedną komendą \`verify\`/\`check\`, i wpisz ją do \`AGENTS.md\`.`
           : `Wpisz dokładne komendy do \`AGENTS.md\` w backtickach, aby agenci uruchamiali je przed zakończeniem pracy: ${verify.commands.slice(0, 3).map((c) => `\`${c.command}\``).join(', ')}.`;
 
     results.push({
@@ -211,8 +204,8 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
 
   // 3. loop.static-types
   {
-    const evidence: string[] = [];
-    let status: CheckResult['status'] = 'fail';
+    const evidence: Array<string> = [];
+    let status: CheckResult['status'];
 
     const nativeTyped = stack.languages.filter((l) => ['Go', 'Rust', 'Java', 'Kotlin', 'C#', 'Swift', 'Dart', 'Scala'].includes(l));
     // The root tsconfig, or in a workspace without one, the first few package configs.
@@ -222,28 +215,28 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
         ? ctx.findFiles((f) => /(^|\/)tsconfig\.json$/.test(f) && f.split('/').length <= 4).slice(0, 5)
         : [];
     if (tsconfigs.length > 0) {
-      const root = ctx.readJson<TsConfigShape>(tsconfigs[0]!);
+      const root = ctx.readJson<TsConfigShape>(tsconfigs[0] ?? '');
       // A solution-style root only points at the real configs.
       const targets =
         tsconfigs.length === 1 && root?.compilerOptions?.['strict'] === undefined && root?.extends === undefined && (root?.references?.length ?? 0) > 0
-          ? root!.references!.map((r) => (typeof r?.path === 'string' ? r.path : '').replace(/^\.\//, '')).filter(Boolean).map((p) => (p.endsWith('.json') ? p : `${p}/tsconfig.json`)).slice(0, 5)
+          ? (root?.references ?? []).map((r) => (typeof r?.path === 'string' ? r.path : '').replace(/^\.\//, '')).filter(Boolean).map((p) => (p.endsWith('.json') ? p : `${p}/tsconfig.json`)).slice(0, 5)
           : tsconfigs;
       // References that name no path leave nothing to follow: judge the root itself.
-      if (targets.length === 0) targets.push(...tsconfigs);
+      if (targets.length === 0) {targets.push(...tsconfigs);}
       const verdicts = targets.map((t) => ({ file: t, verdict: resolveStrict(ctx, t) }));
-      const strictOnes = verdicts.filter((v) => 'strict' in v.verdict && v.verdict.strict);
+      const strictOnes = verdicts.flatMap((v) => ('strict' in v.verdict && v.verdict.strict ? [{ file: v.file, via: v.verdict.via }] : []));
       // A referenced config that covers only build-tool config files (`vite.config.ts`) is not the application's type check.
       const toolingOnly = (file: string): boolean => {
-        const include = ctx.readJson<{ include?: string[] }>(file)?.include;
+        const include = ctx.readJson<{ include?: Array<string> }>(file)?.include;
         return Array.isArray(include) && include.length > 0 && include.every((p) => /(^|\/)[\w.*-]*\.config\.[\w*{},]+$|^scripts?\//.test(p));
       };
       const looseOnes = verdicts.filter((v) => 'strict' in v.verdict && !v.verdict.strict && !(strictOnes.length > 0 && toolingOnly(v.file)));
-      const openOnes = verdicts.filter((v) => 'unresolved' in v.verdict);
+      const openOnes = verdicts.flatMap((v) => ('unresolved' in v.verdict ? [{ file: v.file, unresolved: v.verdict.unresolved }] : []));
 
-      if (looseOnes.length === 0 && strictOnes.length > 0) {
+      const [first] = strictOnes;
+      if (looseOnes.length === 0 && first !== undefined) {
         status = 'pass';
-        const first = strictOnes[0]!;
-        const via = (first.verdict as { via: string }).via;
+        const { via } = first;
         evidence.push(
           strictOnes.length > 1
             ? `${strictOnes.length} tsconfig files set \`strict: true\` (${strictOnes.slice(0, 3).map((v) => v.file).join(', ')}${strictOnes.length > 3 ? ', …' : ''})`
@@ -256,15 +249,16 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
         const tsFiles = ctx.sourceFiles.filter((f) => /\.(ts|tsx|mts|cts)$/.test(f)).length;
         if (jsFiles >= 20 && jsFiles > tsFiles * 0.3) {
           evidence.push(`${jsFiles} of ${jsFiles + tsFiles} source files are plain JavaScript, outside the type checker`);
-          if (jsFiles > tsFiles) status = 'warn';
+          if (jsFiles > tsFiles) {status = 'warn';}
         }
       } else if (looseOnes.length > 0) {
         status = 'warn';
         evidence.push(`${looseOnes.map((v) => v.file).join(', ')}: \`compilerOptions.strict\` is not enabled (checked the extends chain)`);
       } else {
         status = 'info';
-        const open = (openOnes[0]!.verdict as { unresolved: string }).unresolved;
-        evidence.push(`${openOnes[0]!.file} extends \`${open}\`, which is not installed here — run the install step and re-audit to verify strict mode`);
+        const [openFirst] = openOnes;
+        const open = openFirst?.unresolved ?? '';
+        evidence.push(`${openFirst?.file ?? ''} extends \`${open}\`, which is not installed here — run the install step and re-audit to verify strict mode`);
       }
     } else if (stack.languages.includes('TypeScript')) {
       // bun, tsx and Node strip types without checking them: with no tsconfig nothing ever does.
@@ -359,11 +353,11 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
 
   // 4. loop.formatter-linter
   {
-    const toolsFound: string[] = [];
+    const toolsFound: Array<string> = [];
     const found = (label: string): void => {
-      if (!toolsFound.includes(label)) toolsFound.push(label);
+      if (!toolsFound.includes(label)) {toolsFound.push(label);}
     };
-    const configFiles: Array<[string[], string]> = [
+    const configFiles: Array<[Array<string>, string]> = [
       [['biome.json', 'biome.jsonc'], 'Biome'],
       [['dprint.json', '.dprint.json', 'dprint.jsonc'], 'dprint'],
       [['.oxlintrc.json', 'oxlint.json'], 'oxlint'],
@@ -385,25 +379,25 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       [['.pre-commit-config.yaml'], 'pre-commit hooks'],
     ];
     for (const [files, label] of configFiles) {
-      if (ctx.hasAnyFile(files)) found(label);
+      if (ctx.hasAnyFile(files)) {found(label);}
     }
 
     const pkg = ctx.packageJson;
     if (pkg) {
-      if (ctx.hasDependency('vite-plus')) found('vite-plus (oxlint/vp lint)');
-      if (ctx.hasDependency('oxlint')) found('oxlint');
-      if (ctx.hasDependency('@biomejs/biome')) found('Biome');
-      if (ctx.hasDependency('eslint')) found('ESLint');
-      if (ctx.hasDependency('prettier')) found('Prettier');
-      if (ctx.hasDependency('dprint')) found('dprint');
-      if (ctx.hasDependency('oxfmt')) found('oxfmt');
+      if (ctx.hasDependency('vite-plus')) {found('vite-plus (oxlint/vp lint)');}
+      if (ctx.hasDependency('oxlint')) {found('oxlint');}
+      if (ctx.hasDependency('@biomejs/biome')) {found('Biome');}
+      if (ctx.hasDependency('eslint')) {found('ESLint');}
+      if (ctx.hasDependency('prettier')) {found('Prettier');}
+      if (ctx.hasDependency('dprint')) {found('dprint');}
+      if (ctx.hasDependency('oxfmt')) {found('oxfmt');}
     }
 
     const pyproject = ctx.readText('pyproject.toml') ?? '';
-    if (/\[tool\.ruff/i.test(pyproject)) found('Ruff');
-    if (/\[tool\.black\]/i.test(pyproject)) found('Black');
-    if (ctx.hasFile('Cargo.toml')) found('cargo fmt / clippy');
-    if (ctx.hasFile('go.mod')) found('gofmt / go vet');
+    if (/\[tool\.ruff/i.test(pyproject)) {found('Ruff');}
+    if (/\[tool\.black\]/i.test(pyproject)) {found('Black');}
+    if (ctx.hasFile('Cargo.toml')) {found('cargo fmt / clippy');}
+    if (ctx.hasFile('go.mod')) {found('gofmt / go vet');}
 
     const gradleText = ctx
       .findFiles((f) => /(^|\/)(build\.gradle(\.kts)?|libs\.versions\.toml)$/.test(f) && f.split('/').length <= 3)
@@ -411,11 +405,11 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       .map((f) => ctx.readText(f) ?? '')
       .join('\n');
     if (gradleText) {
-      if (/detekt/i.test(gradleText)) found('detekt');
-      if (/ktlint/i.test(gradleText)) found('ktlint');
-      if (/spotless/i.test(gradleText)) found('Spotless');
-      if (/checkstyle/i.test(gradleText)) found('Checkstyle');
-      if (stack.frameworks.includes('Android')) found('Android Lint (`./gradlew lint`)');
+      if (/detekt/i.test(gradleText)) {found('detekt');}
+      if (/ktlint/i.test(gradleText)) {found('ktlint');}
+      if (/spotless/i.test(gradleText)) {found('Spotless');}
+      if (/checkstyle/i.test(gradleText)) {found('Checkstyle');}
+      if (stack.frameworks.includes('Android')) {found('Android Lint (`./gradlew lint`)');}
     }
 
     // Biome with its linter switched off is a formatter.
@@ -430,10 +424,10 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       .filter((c) => c.kinds.includes('lint') || c.kinds.includes('format'))
       .sort((a, b) => a.kinds.length - b.kinds.length)[0];
     const customLintOnly = toolsFound.length === 0 && lintCommand !== undefined;
-    const lintBody = customLintOnly && pkg?.scripts ? pkg.scripts[lintCommand.command.split(' ').pop()!] : undefined;
+    const lintBody = customLintOnly && pkg?.scripts ? pkg.scripts[lintCommand.command.split(' ').at(-1) ?? ''] : undefined;
 
     // Android Lint ships with the Android Gradle plugin: on its own it formats nothing and knows no Kotlin style.
-    const androidLintOnly = toolsFound.length === 1 && toolsFound[0]!.startsWith('Android Lint');
+    const androidLintOnly = toolsFound.length === 1 && toolsFound[0]?.startsWith('Android Lint') === true;
     const noCode = toolsFound.length === 0 && !customLintOnly && ctx.sourceFiles.length === 0;
     const status: CheckResult['status'] = noCode ? 'info' : androidLintOnly || formatterOnly ? 'warn' : toolsFound.length > 0 ? 'pass' : customLintOnly ? 'warn' : 'fail';
 
@@ -496,7 +490,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       'Podfile.lock',
       'flake.lock',
     ]);
-    const isLock = (f: string): boolean => lockNames.has(f.split('/').pop()!) && f.split('/').length <= 6;
+    const isLock = (f: string): boolean => lockNames.has(f.split('/').at(-1) ?? '') && f.split('/').length <= 6;
     // A lockfile that is on disk but not committed pins nothing for a teammate or for CI.
     const lockfiles = ctx.findFiles((f) => isLock(f) && ctx.isTracked(f) !== false).slice(0, 4);
     const uncommittedLocks = ctx.findFiles((f) => isLock(f) && ctx.isTracked(f) === false).slice(0, 3);
@@ -506,7 +500,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       stack.languages.includes('Swift') &&
       ctx.ignoredPaths(['Package.resolved', 'App.xcodeproj/project.xcworkspace/xcshareddata/swiftpm/Package.resolved']).size > 0;
 
-    const runtimePins: string[] = [];
+    const runtimePins: Array<string> = [];
     for (const f of [
       '.node-version',
       '.nvmrc',
@@ -525,31 +519,34 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
       '.sdkmanrc',
       'gradle/wrapper/gradle-wrapper.properties',
     ]) {
-      if (ctx.hasFile(f)) runtimePins.push(f);
+      if (ctx.hasFile(f)) {runtimePins.push(f);}
     }
     const pkg = ctx.packageJson;
-    if (pkg?.packageManager) runtimePins.push(`package.json packageManager (${pkg.packageManager.split('+')[0]})`);
+    if (pkg?.packageManager) {runtimePins.push(`package.json packageManager (${pkg.packageManager.split('+')[0]})`);}
     // `>=22` admits every later major: a floor, not a pin.
-    const engineRanges: string[] = [];
+    const engineRanges: Array<string> = [];
     for (const engine of ['node', 'bun']) {
       const wanted = pkg?.engines?.[engine];
-      if (typeof wanted !== 'string') continue;
-      if (/^[=v]?\d+(\.\d+){0,2}$/.test(wanted.trim())) runtimePins.push(`package.json engines.${engine} (${wanted})`);
-      else engineRanges.push(`engines.${engine} ${wanted}`);
+      if (typeof wanted !== 'string') {continue;}
+      if (/^[=v]?\d+(\.\d+){0,2}$/.test(wanted.trim())) {runtimePins.push(`package.json engines.${engine} (${wanted})`);}
+      else {engineRanges.push(`engines.${engine} ${wanted}`);}
     }
     const goMod = ctx.readText('go.mod');
-    if (goMod && /^go\s+\d+\.\d+/m.test(goMod)) runtimePins.push('go.mod go directive');
-    if (/^\s*requires-python\s*=/m.test(ctx.readText('pyproject.toml') ?? '')) runtimePins.push('pyproject.toml requires-python');
-    if (/swift-tools-version/.test(ctx.readText('Package.swift') ?? '')) runtimePins.push('Package.swift swift-tools-version');
-    if (/^\s*sdk\s*:/m.test(ctx.readText('pubspec.yaml') ?? '')) runtimePins.push('pubspec.yaml environment.sdk');
+    if (goMod && /^go\s+\d+\.\d+/m.test(goMod)) {runtimePins.push('go.mod go directive');}
+    if (/^\s*requires-python\s*=/m.test(ctx.readText('pyproject.toml') ?? '')) {runtimePins.push('pyproject.toml requires-python');}
+    if (/swift-tools-version/.test(ctx.readText('Package.swift') ?? '')) {runtimePins.push('Package.swift swift-tools-version');}
+    if (/^\s*sdk\s*:/m.test(ctx.readText('pubspec.yaml') ?? '')) {runtimePins.push('pubspec.yaml environment.sdk');}
     const ciPins = [...new Set(ctx.ci.workflows.flatMap((w) => w.toolchainPins))].slice(0, 3);
-    if (ciPins.length > 0) runtimePins.push(`CI pins ${ciPins.join(', ')}`);
+    if (ciPins.length > 0) {runtimePins.push(`CI pins ${ciPins.join(', ')}`);}
 
     // make, cmake and xcodebuild build the project; they do not resolve dependencies to lock.
     const resolvesPackages = stack.packageManagers.some((pm) => !['make', 'cmake', 'xcodebuild'].includes(pm));
     // Two JavaScript package managers' lockfiles at the root: each install resolves a different tree.
-    const jsLockOwners: Record<string, string> = { 'package-lock.json': 'npm', 'npm-shrinkwrap.json': 'npm', 'pnpm-lock.yaml': 'pnpm', 'yarn.lock': 'yarn', 'bun.lock': 'bun', 'bun.lockb': 'bun' };
-    const rootJsManagers = [...new Set(lockfiles.filter((f) => f in jsLockOwners).map((f) => jsLockOwners[f]!))];
+    const jsLockOwners = { 'package-lock.json': 'npm', 'npm-shrinkwrap.json': 'npm', 'pnpm-lock.yaml': 'pnpm', 'yarn.lock': 'yarn', 'bun.lock': 'bun', 'bun.lockb': 'bun' };
+    const rootJsManagers = [...new Set(lockfiles.flatMap((f) => {
+      const owner = lookup(jsLockOwners, f);
+      return owner ? [owner] : [];
+    }))];
     const ciInstaller = ctx.ci.workflows
       .map((w) => /\b(npm ci|npm install|pnpm install|yarn install|bun install)\b/.exec(ctx.readText(w.path) ?? '')?.[1])
       .find(Boolean);
@@ -581,20 +578,20 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     const rootJsManifest = ctx.packageJson !== null;
     const rootJsLock = lockfiles.some((f) => f in jsLockOwners);
     const jsFloats = rootJsManifest && !rootJsLock && Object.keys({ ...ctx.packageJson?.dependencies, ...ctx.packageJson?.devDependencies }).length > 0;
-    const evidence: string[] = [];
-    if (lockfiles.length > 0) evidence.push(`Lockfile(s): ${lockfiles.join(', ')}`);
-    else if (versionCatalog) evidence.push('Gradle version catalog pins direct dependencies (gradle/libs.versions.toml); transitive versions are not locked (no gradle.lockfile)');
-    else if (hasManager) evidence.push('No committed dependency lockfile found');
-    if (uncommittedLocks.length > 0) evidence.push(`On disk but not committed: ${uncommittedLocks.join(', ')}`);
-    if (pythonFloats) evidence.push(`Python dependencies are not locked: ${pyManifest} without uv.lock / poetry.lock / pinned requirements`);
-    if (jsFloats && lockfiles.length > 0) evidence.push('package.json at the root has dependencies but no lockfile next to it');
+    const evidence: Array<string> = [];
+    if (lockfiles.length > 0) {evidence.push(`Lockfile(s): ${lockfiles.join(', ')}`);}
+    else if (versionCatalog) {evidence.push('Gradle version catalog pins direct dependencies (gradle/libs.versions.toml); transitive versions are not locked (no gradle.lockfile)');}
+    else if (hasManager) {evidence.push('No committed dependency lockfile found');}
+    if (uncommittedLocks.length > 0) {evidence.push(`On disk but not committed: ${uncommittedLocks.join(', ')}`);}
+    if (pythonFloats) {evidence.push(`Python dependencies are not locked: ${pyManifest} without uv.lock / poetry.lock / pinned requirements`);}
+    if (jsFloats && lockfiles.length > 0) {evidence.push('package.json at the root has dependencies but no lockfile next to it');}
     if (swiftHasDeps && swiftFloating && lockfiles.every((f) => !f.endsWith('Package.resolved'))) {
       evidence.push('Remote Swift packages use version ranges (`from:` / branch) and no Package.resolved is committed');
     }
     if (competingLocks) {
       evidence.push(`Lockfiles from ${rootJsManagers.length} package managers at the root (${rootJsManagers.join(', ')})${ciInstaller ? `; CI installs with \`${ciInstaller}\`` : ''} — keep one`);
     }
-    if (gitignoredResolved) evidence.push('.gitignore excludes Package.resolved — Swift package versions float between machines and CI');
+    if (gitignoredResolved) {evidence.push('.gitignore excludes Package.resolved — Swift package versions float between machines and CI');}
     evidence.push(
       runtimePins.length > 0
         ? `Toolchain pin(s): ${runtimePins.slice(0, 5).join(', ')}`
@@ -625,7 +622,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
     // rewrites thousands of files an agent then has to read past.
     if (ctx.committedNodeModules > 0) {
       evidence.push(`node_modules/ is committed (${ctx.committedNodeModules} tracked files): add it to .gitignore and \`git rm -r --cached node_modules\``);
-      if (status === 'pass' || status === 'info') status = 'warn';
+      if (status === 'pass' || status === 'info') {status = 'warn';}
     }
 
     const lockAdvice: LocalizedText = stack.languages.includes('Swift')
@@ -687,7 +684,7 @@ export function runLoopChecks(ctx: RepoContext): CheckResult[] {
   return results;
 }
 
-function linterSuggestion(languages: string[]): string {
+function linterSuggestion(languages: Array<string>): string {
   const lang = languages[0];
   switch (lang) {
     case 'TypeScript':

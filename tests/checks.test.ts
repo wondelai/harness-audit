@@ -1,14 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { auditRepo } from '../src/index.js';
-import {
-  createAntiPatternRepo,
-  createLevel0BareRepo,
-  createTempRepo,
-  createWellHarnessedRepo,
-  type TempRepo,
-} from './fixtures.js';
+import { createAntiPatternRepo, createLevel0BareRepo, createTempRepo, createWellHarnessedRepo } from './fixtures.js';
+import type { TempRepo } from './fixtures.js';
 
-const repos: TempRepo[] = [];
+const repos: Array<TempRepo> = [];
 const track = (r: TempRepo): TempRepo => {
   repos.push(r);
   return r;

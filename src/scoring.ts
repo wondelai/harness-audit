@@ -23,8 +23,8 @@ const SEVERITY_ORDER: Record<Severity, number> = {
   info: 4,
 };
 
-export function scoreStation(stationId: StationId, checks: CheckResult[]): StationScore {
-  const stationMeta = STATIONS.find((s) => s.id === stationId)!;
+export function scoreStation(stationId: StationId, checks: Array<CheckResult>): StationScore {
+  const stationWeight = STATIONS.find((s) => s.id === stationId)?.weight ?? 0;
   const stationChecks = checks.filter((c) => c.station === stationId);
 
   let earned = 0;
@@ -55,7 +55,7 @@ export function scoreStation(stationId: StationId, checks: CheckResult[]): Stati
 
   return {
     id: stationId,
-    weight: stationMeta.weight,
+    weight: stationWeight,
     score,
     passed,
     warned,
@@ -65,7 +65,7 @@ export function scoreStation(stationId: StationId, checks: CheckResult[]): Stati
   };
 }
 
-export function computeOverallScore(stations: StationScore[]): number {
+export function computeOverallScore(stations: Array<StationScore>): number {
   let sum = 0;
   let totalWeight = 0;
   for (const st of stations) {
@@ -80,40 +80,48 @@ export function isSecurityBlocker(check: CheckResult): boolean {
   return Boolean(check.meta?.['hasHardcodedSecrets'] || check.meta?.['hasHardcodedMcpSecrets'] || check.meta?.['hasCriticalPermissionError']);
 }
 
+export interface CriticalPenalty {
+  points: number;
+  perCheck: Map<string, number>;
+  checks: Array<string>;
+}
+
 /**
  * A critical finding costs more than its share of one station: 5 points for a missing foundation
  * (no brief, no verify loop, no tests, no CI), 15 for a security blocker (a committed credential,
  * a bypassed permission model), 20 at most. Without it a repository that leaks keys still shows a
  * comfortable score.
  */
-export function criticalPenalty(checks: CheckResult[]): { points: number; perCheck: Map<string, number>; checks: string[] } {
+export function criticalPenalty(checks: Array<CheckResult>): CriticalPenalty {
   const critical = checks.filter((c) => c.status === 'fail' && c.severity === 'critical');
   const raw = critical.map((c) => (isSecurityBlocker(c) ? 15 : 5));
   const total = raw.reduce((a, b) => a + b, 0);
   const scale = total > 20 ? 20 / total : 1;
   return {
     points: Math.round(total * scale),
-    perCheck: new Map(critical.map((c, i) => [c.id, raw[i]! * scale])),
+    perCheck: new Map(critical.map((c, i) => [c.id, (raw[i] ?? 0) * scale])),
     checks: critical.map((c) => c.id),
   };
 }
 
 /** Lowest overall score of each level; index = level. */
-const LEVEL_THRESHOLDS: readonly number[] = [0, 25, 45, 63, 78, 90];
+const LEVEL_THRESHOLDS: ReadonlyArray<number> = [0, 25, 45, 63, 78, 90];
+
+const AUTONOMY_LEVELS: ReadonlyArray<AutonomyLevel> = [0, 1, 2, 3, 4, 5];
 
 export function rawLevelFromScore(overallScore: number): AutonomyLevel {
-  let level = 0;
-  for (let l = 1; l < LEVEL_THRESHOLDS.length; l++) {
-    if (overallScore >= LEVEL_THRESHOLDS[l]!) level = l;
+  let level: AutonomyLevel = 0;
+  for (const candidate of AUTONOMY_LEVELS) {
+    if (overallScore >= (LEVEL_THRESHOLDS[candidate] ?? Infinity)) {level = candidate;}
   }
-  return level as AutonomyLevel;
+  return level;
 }
 
 /**
  * Sets `impact` on every failing or warning check: the points the overall score gains when that
  * check alone turns to pass. Mutates the checks so every renderer reads the same number.
  */
-export function assignImpact(checks: CheckResult[]): void {
+export function assignImpact(checks: Array<CheckResult>): void {
   const penalty = criticalPenalty(checks);
   for (const station of STATIONS) {
     const stationChecks = checks.filter((c) => c.station === station.id);
@@ -133,11 +141,13 @@ export function assignImpact(checks: CheckResult[]): void {
   }
 }
 
-export function evaluateLevel(
-  overallScore: number,
-  stations: StationScore[],
-  checks: CheckResult[],
-): { rawLevel: AutonomyLevel; level: AutonomyLevel; caps: LevelCap[] } {
+export interface LevelEvaluation {
+  rawLevel: AutonomyLevel;
+  level: AutonomyLevel;
+  caps: Array<LevelCap>;
+}
+
+export function evaluateLevel(overallScore: number, stations: Array<StationScore>, checks: Array<CheckResult>): LevelEvaluation {
   const rawLevel = rawLevelFromScore(overallScore);
   const caps = capsAt(rawLevel, stations, checks);
 
@@ -158,12 +168,12 @@ export function evaluateLevel(
 export function nextLevelFor(
   level: AutonomyLevel,
   overallScore: number,
-  stations: StationScore[],
-  checks: CheckResult[],
+  stations: Array<StationScore>,
+  checks: Array<CheckResult>,
 ): NextLevel | undefined {
-  if (level >= 5) return undefined;
-  const target = (level + 1) as AutonomyLevel;
-  const scoreNeeded = LEVEL_THRESHOLDS[target]!;
+  const target = AUTONOMY_LEVELS.find((candidate) => candidate === level + 1);
+  if (target === undefined) {return undefined;}
+  const scoreNeeded = LEVEL_THRESHOLDS[target] ?? 100;
   const blockers = capsAt(target, stations, checks)
     .filter((cap) => cap.cappedTo < target)
     .flatMap((cap) => cap.triggeredBy.map((id) => ({ id, requirement: cap.reason })));
@@ -171,10 +181,10 @@ export function nextLevelFor(
 }
 
 /** The gating caps that apply to a repository whose score alone would put it at `rawLevel`. */
-function capsAt(rawLevel: AutonomyLevel, stations: StationScore[], checks: CheckResult[]): LevelCap[] {
+function capsAt(rawLevel: AutonomyLevel, stations: Array<StationScore>, checks: Array<CheckResult>): Array<LevelCap> {
   const byId = new Map(checks.map((c) => [c.id, c]));
   const stationById = new Map(stations.map((s) => [s.id, s]));
-  const caps: LevelCap[] = [];
+  const caps: Array<LevelCap> = [];
 
   const checkStatus = (id: string) => byId.get(id)?.status;
   const checkMeta = (id: string) => byId.get(id)?.meta ?? {};
@@ -266,17 +276,17 @@ function capsAt(rawLevel: AutonomyLevel, stations: StationScore[], checks: Check
 
   // Cap 4: No Level 4+ without strong Verification (>=70), Loop (>=70), passing CI, and non-failing test quality scan
   if (rawLevel >= 4) {
-    const triggers: string[] = [];
+    const triggers: Array<string> = [];
     // Unattended runs are bounded by the weakest station: what the agent is told and allowed counts
     // as much as how its work is checked.
-    if (stationScore('intent') < 60) triggers.push('intent (<60)');
-    if (stationScore('harness') < 60) triggers.push('harness (<60)');
+    if (stationScore('intent') < 60) {triggers.push('intent (<60)');}
+    if (stationScore('harness') < 60) {triggers.push('harness (<60)');}
     // A harness score can clear 60 on hygiene alone; running unattended still needs the rules written down.
-    if (checkStatus('harness.permissions-policy') === 'fail') triggers.push('harness.permissions-policy');
-    if (stationScore('verification') < 70) triggers.push('verification (<70)');
-    if (stationScore('loop') < 70) triggers.push('loop (<70)');
-    if (checkStatus('release.ci-pipeline') !== 'pass') triggers.push('release.ci-pipeline');
-    if (checkStatus('verification.test-quality-scan') === 'fail') triggers.push('verification.test-quality-scan');
+    if (checkStatus('harness.permissions-policy') === 'fail') {triggers.push('harness.permissions-policy');}
+    if (stationScore('verification') < 70) {triggers.push('verification (<70)');}
+    if (stationScore('loop') < 70) {triggers.push('loop (<70)');}
+    if (checkStatus('release.ci-pipeline') !== 'pass') {triggers.push('release.ci-pipeline');}
+    if (checkStatus('verification.test-quality-scan') === 'fail') {triggers.push('verification.test-quality-scan');}
 
     if (triggers.length > 0) {
       caps.push({
@@ -292,12 +302,12 @@ function capsAt(rawLevel: AutonomyLevel, stations: StationScore[], checks: Check
 
   // Cap 5: No Level 5 without protected oracles + Graph >= 70 + Release >= 80 + Harness >= 75 + Verification >= 85
   if (rawLevel === 5) {
-    const triggers: string[] = [];
-    if (checkStatus('verification.oracle-protection') !== 'pass') triggers.push('verification.oracle-protection');
-    if (stationScore('graph') < 70) triggers.push('graph (<70)');
-    if (stationScore('release') < 80) triggers.push('release (<80)');
-    if (stationScore('harness') < 75) triggers.push('harness (<75)');
-    if (stationScore('verification') < 85) triggers.push('verification (<85)');
+    const triggers: Array<string> = [];
+    if (checkStatus('verification.oracle-protection') !== 'pass') {triggers.push('verification.oracle-protection');}
+    if (stationScore('graph') < 70) {triggers.push('graph (<70)');}
+    if (stationScore('release') < 80) {triggers.push('release (<80)');}
+    if (stationScore('harness') < 75) {triggers.push('harness (<75)');}
+    if (stationScore('verification') < 85) {triggers.push('verification (<85)');}
 
     if (triggers.length > 0) {
       caps.push({
@@ -316,7 +326,7 @@ function capsAt(rawLevel: AutonomyLevel, stations: StationScore[], checks: Check
 
 /** Whether fixing the check clears one of the next level's gates. */
 export function unblocksNextLevel(check: CheckResult, next: NextLevel | undefined): boolean {
-  if (!next) return false;
+  if (!next) {return false;}
   return next.blockers.some((b) => b.id === check.id || b.id.startsWith(`${check.station} (`));
 }
 
@@ -324,21 +334,26 @@ export function unblocksNextLevel(check: CheckResult, next: NextLevel | undefine
  * The order to fix things in: critical findings first, then whatever gates the next level, then
  * by severity, and within one severity by the points each fix adds to the score.
  */
-export function selectTopPriorities(checks: CheckResult[], limit = 5, next?: NextLevel): CheckResult[] {
+export function selectTopPriorities(checks: Array<CheckResult>, limit = 5, next?: NextLevel): Array<CheckResult> {
   const rank = (c: CheckResult): number =>
     isSecurityBlocker(c) ? 0 : c.severity === 'critical' ? 1 : unblocksNextLevel(c, next) ? 2 : 3;
   return checks
     .filter((c) => c.status === 'fail' || c.status === 'warn')
     .sort((a, b) => {
       const rankDiff = rank(a) - rank(b);
-      if (rankDiff !== 0) return rankDiff;
+      if (rankDiff !== 0) {return rankDiff;}
       const severityDiff = SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity];
-      if (severityDiff !== 0) return severityDiff;
+      if (severityDiff !== 0) {return severityDiff;}
       const impactDiff = (b.impact ?? 0) - (a.impact ?? 0);
-      if (impactDiff !== 0) return impactDiff;
+      if (impactDiff !== 0) {return impactDiff;}
       return a.status === b.status ? 0 : a.status === 'fail' ? -1 : 1;
     })
     .slice(0, limit);
+}
+
+export interface Recommendations {
+  book: BookRecommendation;
+  service: ServiceRecommendation;
 }
 
 export function buildRecommendations(params: {
@@ -347,11 +362,11 @@ export function buildRecommendations(params: {
   git: GitStats;
   stack: StackInfo;
   role?: InterviewRole;
-}): { book: BookRecommendation; service: ServiceRecommendation } {
+}): Recommendations {
   const { lang, level, git, stack, role } = params;
   const isTeam = git.gitAuthors90d >= 3 || role === 'lead' || role === 'cto';
 
-  let bookId = 'handbook';
+  let bookId: keyof typeof BOOK_CATALOG = 'handbook';
   let bookReason = {
     en: 'End-to-end engineering handbook covering the 6 stations, specs, verification oracles, and multi-tool setup.',
     pl: 'Kompletny podręcznik inżynierski obejmujący 6 stacji fabryki, specyfikacje, wyrocznie testowe i konfigurację narzędzi.',
@@ -398,7 +413,7 @@ export function buildRecommendations(params: {
     };
   }
 
-  const catalogEntry = BOOK_CATALOG[bookId] ?? BOOK_CATALOG['handbook']!;
+  const catalogEntry = BOOK_CATALOG[bookId];
   const book: BookRecommendation = {
     id: catalogEntry.id,
     title: catalogEntry.title,

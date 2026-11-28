@@ -36,7 +36,9 @@ if (mode === 'check') {
       // --prefer-online: the `npm view` before the publish cached this package's version list, and a
       // cached list that predates the release must not answer for it.
       served = capture('npx', ['-y', '--prefer-online', `${name}@${pkg.version}`, '--version'], tmpdir());
-      if (served !== pkg.version) await new Promise((r) => setTimeout(r, 10_000));
+      if (served !== pkg.version) {await new Promise((resolve) => {
+        setTimeout(resolve, 10_000);
+      });}
     }
     if (served !== pkg.version) {
       console.error(`${name}@${pkg.version}: npx printed "${served}" instead of ${pkg.version}`);
@@ -54,7 +56,7 @@ for (const name of NAMES) {
   }
   const stage = mkdtempSync(join(tmpdir(), 'harness-audit-publish-'));
   try {
-    for (const entry of pkg.files) cpSync(join(root, entry), join(stage, entry), { recursive: true });
+    for (const entry of pkg.files) {cpSync(join(root, entry), join(stage, entry), { recursive: true });}
     // The staged manifest carries no scripts: nothing runs on publish but the upload.
     const { scripts: _scripts, devDependencies: _dev, ...manifest } = pkg;
     writeFileSync(join(stage, 'package.json'), `${JSON.stringify({ ...manifest, name }, null, 2)}\n`);

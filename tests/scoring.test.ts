@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { STATIONS } from '../src/i18n.js';
+import type { JsonObject } from '../src/json.js';
 import {
   assignImpact,
   buildRecommendations,
@@ -17,7 +18,7 @@ function makeCheck(
   station: StationId,
   status: CheckResult['status'],
   weight = 20,
-  meta?: Record<string, unknown>,
+  meta?: JsonObject,
 ): CheckResult {
   return {
     id,
@@ -41,7 +42,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('computes exact station scores excluding info checks', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('a', 'intent', 'pass', 40),
       makeCheck('b', 'intent', 'warn', 40), // 20 earned out of 40
       makeCheck('c', 'intent', 'fail', 20), // 0 earned out of 20
@@ -72,7 +73,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps a high raw score at Level 3 when Verification is weak or test quality fails', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),
       makeCheck('harness.permissions-policy', 'harness', 'pass', 100),
       makeCheck('loop.single-command-verify', 'loop', 'pass', 100),
@@ -93,7 +94,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps a 90+ score at Level 3 while the harness station is below 60', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),
       makeCheck('harness.permissions-policy', 'harness', 'fail', 50),
       makeCheck('harness.secret-hygiene', 'harness', 'pass', 50),
@@ -120,7 +121,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps at Level 3 without a permission policy even when hygiene checks carry the harness station', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),
       makeCheck('harness.permissions-policy', 'harness', 'fail', 25),
       makeCheck('harness.secret-hygiene', 'harness', 'pass', 75),
@@ -138,7 +139,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps at Level 2 when there is no project brief, whatever the rest scores', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'fail', 10),
       makeCheck('intent.skills-and-specs', 'intent', 'pass', 90),
       makeCheck('harness.permissions-policy', 'harness', 'pass', 100),
@@ -155,7 +156,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('takes 5 points per missing foundation and 15 for a security blocker, 20 at most, and returns them in the impact', () => {
-    const critical = (id: string, station: StationId, meta?: Record<string, unknown>): CheckResult => ({
+    const critical = (id: string, station: StationId, meta?: JsonObject): CheckResult => ({
       ...makeCheck(id, station, 'fail', 50, meta),
       severity: 'critical',
     });
@@ -178,7 +179,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps at Level 2 while local development reaches production', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),
       makeCheck('harness.permissions-policy', 'harness', 'pass', 85),
       makeCheck('harness.sandbox-readiness', 'harness', 'fail', 15, { localDevReachesProduction: true }),
@@ -195,7 +196,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps a 95+ score at Level 4 when oracle protection is missing', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),
       makeCheck('harness.permissions-policy', 'harness', 'pass', 100),
       makeCheck('loop.single-command-verify', 'loop', 'pass', 100),
@@ -218,13 +219,14 @@ describe('scoring engine & level gating caps', () => {
     const soloEn = buildRecommendations({
       lang: 'en',
       level: 2,
-      git: { isGitRepo: true, gitAuthors90d: 1, commits30d: 12 },
+      git: { isGitRepo: true, gitAuthors90d: 1, authorsAllTime: 1, commits30d: 12, commits90d: 36 },
       stack: {
         languages: ['TypeScript'],
         frameworks: [],
         packageManagers: ['npm'],
         monorepo: false,
         verifyScripts: [],
+        verifyCommands: [],
         detectedTools: ['claude-code'],
         sourceFileCount: 10,
         testFileCount: 2,
@@ -237,13 +239,14 @@ describe('scoring engine & level gating caps', () => {
     const teamPl = buildRecommendations({
       lang: 'pl',
       level: 3,
-      git: { isGitRepo: true, gitAuthors90d: 6, commits30d: 90 },
+      git: { isGitRepo: true, gitAuthors90d: 6, authorsAllTime: 6, commits30d: 90, commits90d: 270 },
       stack: {
         languages: ['TypeScript'],
         frameworks: ['Next.js'],
         packageManagers: ['pnpm'],
         monorepo: true,
         verifyScripts: ['test'],
+        verifyCommands: ['pnpm test (test)'],
         detectedTools: ['claude-code', 'cursor'],
         sourceFileCount: 100,
         testFileCount: 20,

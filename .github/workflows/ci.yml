@@ -6,6 +6,19 @@ on:
     branches: [main]
 
 jobs:
+  # Its own job, in parallel with verify, so a lint failure shows up without waiting for the build.
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
   verify:
     runs-on: ubuntu-latest
     # A check that never returns should fail the run in minutes, not hold a runner for hours.

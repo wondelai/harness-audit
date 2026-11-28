@@ -7,10 +7,13 @@ same version.
 
 ## Commands
 
+The package runs on Node >= 20, but developing it needs Node 22.18+ (or 24+): `oxlint.config.ts` loads only there.
+
 ```bash
 npm ci
-npm run verify       # typecheck + build + tests: the gate, run it before you finish
-npm run typecheck    # tsc --noEmit
+npm run verify       # lint + typecheck + build + tests: the gate, run it before you finish
+npm run lint         # oxlint with @cloudflare/oxlint-config (oxlint.config.ts); --fix applies the safe fixes only
+npm run typecheck    # tsc --noEmit for src/, tsc -p tests for the tests
 npm run build        # esbuild bundles into dist/, then tsc emits the .d.ts files
 npm test             # vitest; the CLI tests run the built dist/cli.js, so build first
 ```
@@ -32,6 +35,7 @@ Try a change on a real repository: `node dist/cli.js /path/to/repo` (add `--verb
   `src/capabilities.ts` (verify commands) and the stack-aware branches of the loop and harness checks.
 - **Every user-facing string exists in `en` and `pl`.**
 - **Zero runtime dependencies.** Parsing YAML, TOML or JSONC stays hand-rolled and line-based.
+- **No lint rule is switched off** (`oxlint.config.ts`, `@cloudflare/oxlint-config`); fix the code. `no-console` is off only in `scripts/`. Two single-line `oxlint-disable-next-line` casts exist, each with its reason: `parseJsonc` in `src/fs-scanner.ts` and `parseJsonAs` in `tests/fixtures.ts`. Untyped input is read through `src/json.ts` (`parseJson`, `isJsonObject`) and `lookup()` in `src/lookup.ts`, not cast.
 
 ## Read before you touch
 

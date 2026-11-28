@@ -27,8 +27,8 @@ export function createTempRepo(prefix = 'harness-audit-test-'): TempRepo {
   let initialised = false;
   // Run from a git hook, the caller's GIT_DIR and author variables would otherwise win over the fixture's.
   const env = { ...process.env };
-  for (const key of Object.keys(env)) if (/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|COMMON_DIR|PREFIX|AUTHOR_|COMMITTER_)/.test(key)) delete env[key];
-  const git = (...args: string[]): void => {
+  for (const key of Object.keys(env)) {if (/^GIT_(DIR|WORK_TREE|INDEX_FILE|OBJECT_DIRECTORY|COMMON_DIR|PREFIX|AUTHOR_|COMMITTER_)/.test(key)) {delete env[key];}}
+  const git = (...args: Array<string>): void => {
     execFileSync('git', args, { cwd: dir, stdio: 'ignore', env });
   };
   return {
@@ -50,11 +50,15 @@ export function createTempRepo(prefix = 'harness-audit-test-'): TempRepo {
       }
       git('add', '-A');
       // One name per address, as real people have; the audit counts people, not addresses.
-      const name = author.split('@')[0]!.replace(/[^a-z0-9]+/gi, ' ').trim() || 'dev';
+      const name = (author.split('@')[0] ?? '').replaceAll(/[^a-z0-9]+/gi, ' ').trim() || 'dev';
+      const commitEnv = { ...env };
+      if (date) {
+        commitEnv.GIT_COMMITTER_DATE = date;
+      }
       execFileSync(
         'git',
         ['-c', `user.email=${author}`, '-c', `user.name=${name}`, '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'snapshot', ...(date ? ['--date', date] : [])],
-        { cwd: dir, stdio: 'ignore', env: { ...env, ...(date ? { GIT_COMMITTER_DATE: date } : {}) } },
+        { cwd: dir, stdio: 'ignore', env: commitEnv },
       );
     },
     cleanup() {
@@ -405,4 +409,11 @@ test('health returns ok', async ({ request }) => {
   );
 
   return repo;
+}
+
+/** Parse JSON the test then reads as the shape it names; an assertion on a wrong shape fails the test. */
+export function parseJsonAs<T>(text: string): T {
+  const parsed: unknown = JSON.parse(text);
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test helper: the test names the shape it asserts on, and a wrong one fails the assertion
+  return parsed as T;
 }

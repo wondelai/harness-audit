@@ -1,13 +1,13 @@
-import { docsUrl, LEVELS, STATION_MAP, t, UI } from '../i18n.js';
+import { docsUrl, LEVELS, stationMeta, t, UI } from '../i18n.js';
 import type { AuditReport, AutonomyLevel, CheckStatus, RenderOptions } from '../types.js';
 
 function escapeHtml(value: string): string {
   return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('\'', '&#39;');
 }
 
 function statusClass(status: CheckStatus): string {
@@ -37,7 +37,7 @@ function statusLabel(status: CheckStatus, lang: 'en' | 'pl'): string {
 }
 
 function renderLadderRuler(current: AutonomyLevel, raw: AutonomyLevel, lang: 'en' | 'pl'): string {
-  const rungs: AutonomyLevel[] = [0, 1, 2, 3, 4, 5];
+  const rungs: Array<AutonomyLevel> = [0, 1, 2, 3, 4, 5];
   return `<div class="ladder-grid" role="list" aria-label="${escapeHtml(t(UI.autonomyLevel, lang))}">
 ${rungs
   .map((lvl) => {
@@ -73,8 +73,7 @@ export function renderHtml(report: AuditReport, options: RenderOptions = {}): st
     ...report.stack.packageManagers.map((pm) => `pm:${pm}`),
     report.stack.monorepo ? 'monorepo' : '',
   ]
-    .filter(Boolean)
-    .map((item) => `<span class="chip">${escapeHtml(item)}</span>`)
+    .flatMap((item) => (item ? [`<span class="chip">${escapeHtml(item)}</span>`] : []))
     .join('');
 
   const capsHtml =
@@ -99,7 +98,7 @@ export function renderHtml(report: AuditReport, options: RenderOptions = {}): st
 
   const stationsHtml = report.stations
     .map((st) => {
-      const meta = STATION_MAP[st.id];
+      const meta = stationMeta(st.id);
       const barClass = st.score >= 78 ? 'bar-ok' : st.score >= 50 ? 'bar-signal' : 'bar-err';
       return `<div class="station-card">
       <div class="station-head">
@@ -144,7 +143,7 @@ export function renderHtml(report: AuditReport, options: RenderOptions = {}): st
 
   const detailsHtml = report.stations
     .map((st) => {
-      const meta = STATION_MAP[st.id];
+      const meta = stationMeta(st.id);
       const rows = st.checks
         .map(
           (c) => `<tr>

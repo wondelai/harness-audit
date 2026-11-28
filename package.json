@@ -48,16 +48,21 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && tsc -p tests",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify": "npm run typecheck && npm run build && npm test",
+    "verify": "npm run lint && npm run typecheck && npm run build && npm test",
     "release:dry-run": "npm run verify && node scripts/publish.mjs --dry-run",
     "release:publish": "npm run verify && node scripts/publish.mjs && node scripts/publish.mjs --check"
   },
   "devDependencies": {
+    "@cloudflare/oxlint-config": "^0.2.0",
     "@types/node": "^22.15.0",
     "esbuild": "^0.25.2",
+    "oxlint": "^1.95.0",
+    "tsrs": "^7.1.0-beta.tsrs5",
     "typescript": "^5.8.3",
     "vitest": "^3.1.2"
   }
