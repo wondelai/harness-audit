@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { auditRepo, initHarness } from '../src/index.js';
 import type { AuditReport, CheckResult } from '../src/types.js';
 import { branchNotes } from '../src/renderers/gates.js';
-import { createTempRepo } from './fixtures.js';
+import { createTempRepo, parseJsonAs } from './fixtures.js';
 import type { TempRepo } from './fixtures.js';
 
 const repos: Array<TempRepo> = [];
@@ -370,7 +370,7 @@ describe('init', () => {
     expect(agents).not.toContain('run typecheck');
 
     initHarness(repo.dir, { tools: ['claude-code'] });
-    const settings = JSON.parse(readFileSync(join(repo.dir, '.claude/settings.json'), 'utf8')) as { permissions: { allow: Array<string>; deny: Array<string> } };
+    const settings = parseJsonAs<{ permissions: { allow: Array<string>; deny: Array<string> } }>(readFileSync(join(repo.dir, '.claude/settings.json'), 'utf8'));
     expect(settings.permissions.allow).toContain('Bash(bun run test:*)');
     expect(settings.permissions.deny).toContain('Bash(bun run deploy:*)');
     expect(settings.permissions.deny).toContain('Bash(wrangler deploy:*)');
@@ -681,7 +681,6 @@ describe('weak evidence is no claim', () => {
     const repo = temp('ha-vars-');
     repo.write('package.json', JSON.stringify({ name: 'w' }));
     repo.write('.gitignore', '.env\n.env.local\n.dev.vars\n');
-    const value = (seed: string): string => `${seed}9f8e7d6c5b4a39281706f5e4d3c2b1a0`;
     const names = ['FAL_KEY', 'AZURE_API_KEY', 'BYPASS_TOKEN', 'IMAGE_SECRET', 'UPSTREAM_API_KEY', 'SIGNING_SECRET', 'BACKUP_TOKEN', 'SEARCH_API_KEY', 'RENDER_KEY', 'QUEUE_TOKEN'];
     repo.write(
       'wrangler.toml',
@@ -1272,7 +1271,7 @@ describe('robustness: no input makes the audit hang', () => {
       `packages:\n${'  Kit:\n    path: Packages/Kit\n'.repeat(400)}`,
       '  - name: value   \n'.repeat(3000),
       `${' '.repeat(20_000)}\n`,
-      `${'\`a\` '.repeat(4000)}\n`,
+      `${'`a` '.repeat(4000)}\n`,
       '---\n'.repeat(1500),
       `${'never deploy production only '.repeat(2500)}\n`,
       `${'A=B '.repeat(4000)}\n`,
@@ -1628,3 +1627,7 @@ describe('second review: edge cases that changed a verdict', () => {
     expect(check(auditRepo(inert.dir), 'intent.single-source').status).not.toBe('pass');
   });
 });
+
+function value(seed: string): string {
+  return `${seed}9f8e7d6c5b4a39281706f5e4d3c2b1a0`;
+}

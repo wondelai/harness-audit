@@ -1,4 +1,4 @@
-import { docsUrl, LEVELS, STATION_MAP, t } from './i18n.js';
+import { docsUrl, LEVELS, stationMeta, t } from './i18n.js';
 import { selectTopPriorities, unblocksNextLevel } from './scoring.js';
 import type { AuditReport, Lang } from './types.js';
 
@@ -22,14 +22,13 @@ export function generateFixPrompt(report: AuditReport, lang: Lang = report.lang)
       ? `Next level: ${next.level} needs score ${next.scoreNeeded} (now ${report.overallScore})${next.blockers.length > 0 ? ` and these gates cleared: ${next.blockers.map((b) => b.id).join(', ')}` : ''}`
       : '',
   ]
-    .filter(Boolean)
-    .map((line) => `- ${line}`)
+    .flatMap((line) => (line ? [`- ${line}`] : []))
     .join('\n');
 
   const formatList = (items: typeof actionable): string =>
     items
       .map((c, i) => {
-        const stationName = t(STATION_MAP[c.station].name, lang);
+        const stationName = t(stationMeta(c.station).name, lang);
         return [
           `### ${i + 1}. \`${c.id}\` (${stationName} · ${c.status.toUpperCase()} · ${c.severity}${c.impact ? ` · +${c.impact} pts` : ''}${next && unblocksNextLevel(c, next) ? ` · gates Level ${next.level}` : ''})`,
           `- **Issue:** ${t(c.title, lang)}`,

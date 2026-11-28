@@ -2,11 +2,12 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { allowedVerifySet, localDeployCommands, minimalVerifySet } from './capabilities.js';
 import { RepoContext } from './fs-scanner.js';
+import { lookup } from './lookup.js';
 import type { InitAction, InitOptions, InitResult, SupportedTool } from './types.js';
 
 const DEFAULT_TOOLS: Array<SupportedTool> = ['claude-code', 'cursor', 'codex'];
 
-const INSTALL_COMMAND: Record<string, string> = {
+const INSTALL_COMMAND = {
   bun: 'bun install --frozen-lockfile',
   pnpm: 'pnpm install --frozen-lockfile',
   yarn: 'yarn install --frozen-lockfile',
@@ -25,7 +26,7 @@ const INSTALL_COMMAND: Record<string, string> = {
 
 function buildAgentsMd(ctx: RepoContext): string {
   const stack = ctx.stack;
-  const install = stack.packageManagers.map((pm) => INSTALL_COMMAND[pm]).find(Boolean);
+  const install = stack.packageManagers.map((pm) => lookup(INSTALL_COMMAND, pm)).find(Boolean);
   const verify = minimalVerifySet(ctx.verify);
   const stackLine =
     [...stack.languages, ...stack.frameworks].join(' · ') || 'TODO: name the stack';
@@ -259,11 +260,17 @@ export function planInit(ctx: RepoContext, options: InitOptions = {}): Array<Ini
 function buildCiWorkflow(ctx: RepoContext): string | undefined {
   if (ctx.ci.files.length > 0 || !ctx.packageJson) {return undefined;}
   const verify = minimalVerifySet(ctx.verify);
-  const pm = ctx.stack.packageManagers.find((p) => p in INSTALL_COMMAND && ['bun', 'pnpm', 'yarn', 'npm'].includes(p));
+  const lockfiles = {
+    bun: ['bun.lock', 'bun.lockb'],
+    pnpm: ['pnpm-lock.yaml'],
+    yarn: ['yarn.lock'],
+    npm: ['package-lock.json', 'npm-shrinkwrap.json'],
+  };
+  const pm = ctx.stack.packageManagers.find((p): p is keyof typeof lockfiles => Object.hasOwn(lockfiles, p));
   if (verify.length === 0 || !pm) {return undefined;}
   // A workflow that cannot run is worse than none: `npm ci` needs a lockfile, pnpm/action-setup needs
   // a version to install, and an Ubuntu runner cannot run `xcodebuild` or a Gradle wrapper it never set up.
-  const lockfile = { bun: ['bun.lock', 'bun.lockb'], pnpm: ['pnpm-lock.yaml'], yarn: ['yarn.lock'], npm: ['package-lock.json', 'npm-shrinkwrap.json'] }[pm as 'bun' | 'pnpm' | 'yarn' | 'npm'];
+  const lockfile = lockfiles[pm];
   if (!lockfile.some((f) => ctx.hasFile(f))) {return undefined;}
   if (pm === 'pnpm' && !ctx.packageJson?.packageManager?.startsWith('pnpm')) {return undefined;}
   if (!verify.every((c) => /^(?:npm|pnpm|yarn|bun|npx|bunx|vp|node)\b/.test(c))) {return undefined;}

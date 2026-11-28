@@ -5,7 +5,7 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { runDeepReview } from '../src/deep.js';
 import { RepoContext } from '../src/fs-scanner.js';
 import { auditRepo, generateFixPrompt, initHarness, INTERVIEW_QUESTIONS, scoreInterview } from '../src/index.js';
-import { createAntiPatternRepo, createLevel0BareRepo, createWellHarnessedRepo } from './fixtures.js';
+import { createAntiPatternRepo, createLevel0BareRepo, createWellHarnessedRepo, parseJsonAs } from './fixtures.js';
 import type { TempRepo } from './fixtures.js';
 
 const PACKAGE_ROOT = resolve(import.meta.dirname, '..');
@@ -34,7 +34,7 @@ describe('CLI modes, --prompt, init, interview, and --deep', () => {
       encoding: 'utf8',
     });
     expect(failRun.status).toBe(1);
-    const parsedFail = JSON.parse(failRun.stdout) as { overallScore: number };
+    const parsedFail = parseJsonAs<{ overallScore: number }>(failRun.stdout);
     expect(parsedFail.overallScore).toBeLessThan(50);
 
     const strong = track(createWellHarnessedRepo());
@@ -42,7 +42,7 @@ describe('CLI modes, --prompt, init, interview, and --deep', () => {
       encoding: 'utf8',
     });
     expect(passRun.status).toBe(0);
-    const parsedPass = JSON.parse(passRun.stdout) as { overallScore: number; level: number };
+    const parsedPass = parseJsonAs<{ overallScore: number; level: number }>(passRun.stdout);
     expect(parsedPass.overallScore).toBeGreaterThanOrEqual(85);
     expect(parsedPass.level).toBe(5);
   });
@@ -92,7 +92,7 @@ describe('CLI modes, --prompt, init, interview, and --deep', () => {
   });
 
   it('prints the version package.json declares', () => {
-    const declared = (JSON.parse(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')) as { version: string }).version;
+    const declared = parseJsonAs<{ version: string }>(readFileSync(join(PACKAGE_ROOT, 'package.json'), 'utf8')).version;
     const printed = spawnSync('node', [CLI_PATH, '--version'], { encoding: 'utf8' }).stdout.trim();
     expect(printed).toBe(declared);
   });

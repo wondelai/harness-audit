@@ -1,4 +1,4 @@
-import { docsUrl, LEVELS, STATION_MAP, t, UI } from '../i18n.js';
+import { docsUrl, LEVELS, stationMeta, t, UI } from '../i18n.js';
 import { unblocksNextLevel } from '../scoring.js';
 import { branchNotes, describeGate, uncappedGates } from './gates.js';
 import type { AuditReport, CheckStatus, RenderOptions } from '../types.js';
@@ -167,7 +167,7 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
   // Six Stations table
   lines.push('', `${c.bold}${t(UI.stationsHeading, lang)}${c.reset}`, `${c.gray}${'─'.repeat(72)}${c.reset}`);
   for (const st of report.stations) {
-    const meta = STATION_MAP[st.id];
+    const meta = stationMeta(st.id);
     const stName = padRight(`${meta.order}. ${t(meta.name, lang)}`, 22);
     const bar = progressBar(st.score, 18);
     const stColor = st.score >= 78 ? c.green : st.score >= 50 ? c.yellow : c.red;
@@ -183,8 +183,7 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
 
   if (report.topPriorities.length > 0) {
     lines.push('', `${c.bold}${t(UI.topPrioritiesHeading, lang)}${c.reset} ${c.dim}${t(UI.topPrioritiesOrder, lang)}${c.reset}`);
-    for (let i = 0; i < report.topPriorities.length; i++) {
-      const check = report.topPriorities[i]!;
+    for (const [i, check] of report.topPriorities.entries()) {
       const tags = [gain(check.impact), next && unblocksNextLevel(check, next) ? `${t(UI.unblocks, lang)} Level ${next.level}` : ''].filter(Boolean);
       lines.push(
         `  ${i + 1}. ${statusBadge(check.status, lang, c)} ${c.bold}${check.id}${c.reset} — ${t(check.title, lang)}${tags.length > 0 ? `  ${c.cyan}${tags.join(' · ')}${c.reset}` : ''}`,
@@ -200,9 +199,8 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
   // Per-station findings: what needs attention in full, what passes in one line
   lines.push('', `${c.bold}${t(UI.allChecksHeading, lang)}${c.reset}${verbose ? '' : ` ${c.dim}${t(UI.verboseHint, lang)}${c.reset}`}`);
   for (const st of report.stations) {
-    const meta = STATION_MAP[st.id];
+    const meta = stationMeta(st.id);
     lines.push('', `  ${c.bold}${meta.order}. ${t(meta.name, lang)} (${st.score}/100)${c.reset} ${c.dim}— ${t(meta.decision, lang)}${c.reset}`);
-    const short = (id: string): string => id.slice(id.indexOf('.') + 1);
 
     const open = st.checks.filter((ch) => ch.status === 'fail' || ch.status === 'warn');
     for (const check of open) {
@@ -290,4 +288,9 @@ export function renderTerminal(report: AuditReport, options: RenderOptions = {})
 
   lines.push('');
   return lines.join('\n');
+}
+
+/** The check id without its station prefix. */
+function short(id: string): string {
+  return id.slice(id.indexOf('.') + 1);
 }

@@ -55,7 +55,7 @@ const REACHES_PRODUCTION = /\b(?:local\w*|dev(?:elopment)?|wrangler dev)\b[\s\S]
 // "An example that was never deployed" reports the past; it forbids nothing.
 const PAST_STATE = /\b(?:was|were|had|has|have|hasn't|haven't)\s+(?:\w+\s+)?never\s+(?:been\s+)?\w+/gi;
 /** Markdown and emoji carry no meaning for a rule: "🚨 **PRODUCTION DEPLOYS — ONE WAY ONLY**" reads as its words. */
-const plain = (text: string): string => text.replaceAll(/\*+|~~|(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])|[^\u0000-\u007F -ɏ‐-―]/g, '').replaceAll(/\s+/g, ' ').trim();
+const plain = (text: string): string => text.replaceAll(/\*+|~~|(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])|[^\p{ASCII}\u00A0-\u024F\u2010-\u2015]/gu, '').replaceAll(/\s+/g, ' ').trim();
 const MAP_HEADING = /^#{2,4}\s+(architecture|directory|structure|project structure|layout|modules?|key paths|where things live|read before (you )?touch(ing)?|ownership|architektura|struktura(?: projektu| katalog[óo]w)?|modu[łl]y)(?![\p{L}])/imu;
 
 /** Whether a document has a section that maps the code: "Architecture", "Project structure", "Struktura". */
@@ -75,11 +75,16 @@ export function ruleStrength(text: string): number {
   return (forbids ? 2 : 0) + (names ? 1 : 0);
 }
 
+export interface BoundaryScan {
+  rules: Array<BriefLine>;
+  reach: Array<BriefLine>;
+}
+
 /**
  * Sentences in a document that forbid or reserve an action on production (`rules`), and sentences
  * that say local work reaches production (`reach`). Rules come strongest first.
  */
-export function scanBoundaries(file: string, markdown: string): { rules: Array<BriefLine>; reach: Array<BriefLine> } {
+export function scanBoundaries(file: string, markdown: string): BoundaryScan {
   const rules: Array<BriefLine> = [];
   const reach: Array<BriefLine> = [];
   let inFence = false;
@@ -108,12 +113,12 @@ export function scanBoundaries(file: string, markdown: string): { rules: Array<B
 
 /** Whether the text names at least one path (a file or a directory with a slash) that exists in the repository. */
 export function repoPathsIn(text: string, exists: (path: string) => boolean): boolean {
-  const candidates = [...text.matchAll(/(?:^|[\s`("'])((?:\.?[\w@-]+\/)+[\w.@-]*)/g)].map((m) => m[1]!.replace(/^\.\//, ''));
+  const candidates = [...text.matchAll(/(?:^|[\s`("'])((?:\.?[\w@-]+\/)+[\w.@-]*)/g)].map((m) => (m[1] ?? '').replace(/^\.\//, ''));
   return [...new Set(candidates)].slice(0, 200).some((p) => p.length > 3 && exists(p));
 }
 
 export function repoDocLinks(markdown: string, exists: (path: string) => boolean): Array<string> {
-  const paths = [...markdown.matchAll(/[`(]((?:[\w.@-]+\/)+[\w.@-]+\.mdx?)[`)#]/g)].map((m) => m[1]!.replace(/^(?:\.\/)+/, ''));
+  const paths = [...markdown.matchAll(/[`(]((?:[\w.@-]+\/)+[\w.@-]+\.mdx?)[`)#]/g)].map((m) => (m[1] ?? '').replace(/^(?:\.\/)+/, ''));
   return [...new Set(paths)].filter(exists);
 }
 
@@ -126,27 +131,28 @@ function quote(text: string): string {
 export function readBrief(ctx: RepoContext): BriefFacts {
   const files = ['AGENTS.md', 'CLAUDE.md'].filter((f) => ctx.hasFile(f));
   const contents = new Map(files.map((f) => [f, ctx.readText(f) ?? '']));
-  const text = files.map((f) => contents.get(f)!).join('\n');
+  const read = (f: string): string => contents.get(f) ?? '';
+  const text = files.map((f) => read(f)).join('\n');
 
   // "See CLAUDE.md" in a few lines: the other file is the brief.
   let pointer: BriefFacts['pointer'];
   if (files.length === 2) {
     for (const [from, to] of [['AGENTS.md', 'CLAUDE.md'], ['CLAUDE.md', 'AGENTS.md']] as const) {
-      const body = contents.get(from)!;
+      const body = read(from);
       const lineCount = body.split(/\r?\n/).filter((l) => l.trim()).length;
       // A real pointer: an import line of its own, or the file named in prose. `@AGENTS.md` inside
       // backticks is an example, and Claude Code imports nothing from it.
       const name = to.replace('.', String.raw`\.`);
       const pointsThere = new RegExp(`^@${name}\\s*$`, 'm').test(body) || new RegExp(`(^|[^\`@])${name}`, 'm').test(body);
-      if (lineCount <= 8 && pointsThere && contents.get(to)!.length > body.length * 2) {pointer = { from, to };}
+      if (lineCount <= 8 && pointsThere && read(to).length > body.length * 2) {pointer = { from, to };}
     }
   }
   let stub: BriefFacts['stub'];
   if (files.length === 2 && !pointer) {
     for (const [small, big] of [['AGENTS.md', 'CLAUDE.md'], ['CLAUDE.md', 'AGENTS.md']] as const) {
-      const smallLines = contents.get(small)!.split(/\r?\n/).filter((l) => l.trim()).length;
-      const importsBig = small === 'CLAUDE.md' && /^@AGENTS\.md\s*$/m.test(contents.get(small)!);
-      if (smallLines <= 20 && !importsBig && contents.get(big)!.length > contents.get(small)!.length * 4) {stub = { file: small, lines: smallLines, real: big };}
+      const smallLines = read(small).split(/\r?\n/).filter((l) => l.trim()).length;
+      const importsBig = small === 'CLAUDE.md' && /^@AGENTS\.md\s*$/m.test(read(small));
+      if (smallLines <= 20 && !importsBig && read(big).length > read(small).length * 4) {stub = { file: small, lines: smallLines, real: big };}
     }
   }
   const primary = pointer?.to ?? stub?.real ?? files[0] ?? 'AGENTS.md';
@@ -154,7 +160,7 @@ export function readBrief(ctx: RepoContext): BriefFacts {
   const boundaryRules: Array<BriefLine> = [];
   const productionReach: Array<BriefLine> = [];
   for (const file of files) {
-    const found = scanBoundaries(file, contents.get(file)!);
+    const found = scanBoundaries(file, read(file));
     boundaryRules.push(...found.rules);
     productionReach.push(...found.reach);
   }
@@ -166,7 +172,7 @@ export function readBrief(ctx: RepoContext): BriefFacts {
   for (const line of text.split(/\r?\n/)) {
     for (const sentence of line.split(/(?<=[.!?;])\s+/)) {
       if (!/\b(?:never|do not|don't|must not)\b[^`.]{0,30}\b(?:run|execute|invoke|call|use)\b/i.test(sentence)) {continue;}
-      for (const m of sentence.matchAll(/`([^`\n]{3,80})`/g)) {forbiddenCommands.push(m[1]!.trim());}
+      for (const m of sentence.matchAll(/`([^`\n]{3,80})`/g)) {forbiddenCommands.push((m[1] ?? '').trim());}
     }
   }
 

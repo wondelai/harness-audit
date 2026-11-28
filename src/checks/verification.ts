@@ -36,7 +36,7 @@ export function runVerificationChecks(ctx: RepoContext): Array<CheckResult> {
     } else if (testCommands.length > 0 && testCommands.some((c) => c.source !== 'Gradle' && c.source !== 'pytest')) {
       // A real test script exists and something runs: the audit could not see the files, which is its limit, not a missing suite.
       status = 'warn';
-      evidence.push(`A test command exists (\`${testCommands[0]!.command}\`, from ${testCommands[0]!.source}), but no file it runs could be identified — coverage unknown`);
+      evidence.push(`A test command exists (\`${testCommands[0]?.command}\`, from ${testCommands[0]?.source}), but no file it runs could be identified — coverage unknown`);
     }
 
     results.push({
@@ -129,7 +129,7 @@ export function runVerificationChecks(ctx: RepoContext): Array<CheckResult> {
     const otherTiers = e2eSignals.filter((s) => /runtime tests|contract tests|instrumented|XCUITest|Maestro|Detox|Flutter|Rendered-UI/.test(s)).length;
     if (neverRun) {e2eSignals.push(`${browserSuite.join(' / ')} is set up, but no CI job and no verify script runs it`);}
 
-    let status: CheckResult['status'] = 'pass';
+    let status: CheckResult['status'];
     if (liveOnly) {
       status = 'warn';
       e2eSignals.push('The Playwright suite targets a deployed URL, starts no local server and is not run in CI: an agent cannot use it as a check');
@@ -194,7 +194,7 @@ export function runVerificationChecks(ctx: RepoContext): Array<CheckResult> {
         .map((l) => l.split(/\s+/))
         // A pattern with no owner after it assigns nobody: it protects nothing.
         .filter((tokens) => tokens.slice(1).some((t) => t.includes('@')))
-        .map((tokens) => tokens[0]!);
+        .map((tokens) => (tokens[0] ?? ''));
       const catchAll = patterns.some((p) => p === '*' || p === '/' || p === '**');
       const guardsTests = catchAll || patterns.some((p) => /^\/?(\*\*\/)?(tests?|__tests__|e2e|specs?|Tests)(\/|\/\*\*?|$)/.test(p) || /\*\.(test|spec)\./.test(p));
       // The whole workflows directory, not one workflow file.
@@ -356,11 +356,10 @@ export function runVerificationChecks(ctx: RepoContext): Array<CheckResult> {
     if (nothingToTest) {
       evidence.push('No source code detected — nothing to scan');
     } else if (unseenSuite) {
-      evidence.push(`The files \`${testCommands[0]!.command}\` runs could not be identified, so they were not scanned`);
+      evidence.push(`The files \`${testCommands[0]?.command}\` runs could not be identified, so they were not scanned`);
     } else if (sampleTests.length === 0) {
       evidence.push('No test files to scan (counted once, under verification.unit-tests)');
     } else {
-      const of = (read: number, total: number): string => (read < total ? `${read} of ${total}` : String(read));
       evidence.push(`Scanned ${of(sampleTests.length, allTestFiles.length)} test file(s) and ${of(sampleSources.length, ctx.sourceFiles.length)} source file(s)`);
     }
     if (onlyHits.length > 0) {evidence.push(`.only() left in tests (${onlyHits.length}): ${onlyHits.slice(0, 3).join(', ')}`);}
@@ -572,4 +571,9 @@ export function runVerificationChecks(ctx: RepoContext): Array<CheckResult> {
   }
 
   return results;
+}
+
+/** `read of total` when the scan stopped short, else just the count. */
+function of(read: number, total: number): string {
+  return read < total ? `${read} of ${total}` : String(read);
 }

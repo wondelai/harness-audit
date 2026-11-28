@@ -1,4 +1,5 @@
 import type { RepoContext } from './fs-scanner.js';
+import { lookup } from './lookup.js';
 
 /** What a command proves when it exits 0. */
 export type VerifyKind = 'test' | 'lint' | 'typecheck' | 'build' | 'format';
@@ -36,7 +37,7 @@ const TWO_WORD_WRAPPERS = new Set([
 function programOf(command: string): { program: string; args: Array<string> } | undefined {
   let tokens = command.trim().split(/\s+/).filter(Boolean);
   for (let guard = 0; guard < 6 && tokens.length > 0; guard++) {
-    const first = tokens[0]!;
+    const first = (tokens[0] ?? '');
     if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(first) || first === '--') {
       tokens = tokens.slice(1);
     } else if (tokens.length > 1 && TWO_WORD_WRAPPERS.has(`${first} ${tokens[1]}`)) {
@@ -44,7 +45,7 @@ function programOf(command: string): { program: string; args: Array<string> } | 
     } else if (ONE_WORD_WRAPPERS.has(first)) {
       tokens = tokens.slice(1);
       // npx -y, npx --yes, npx -p pkg
-      while (tokens.length > 0 && tokens[0]!.startsWith('-') && tokens[0] !== '--') {
+      while (tokens.length > 0 && (tokens[0] ?? '').startsWith('-') && tokens[0] !== '--') {
         tokens = tokens.slice(tokens[0] === '-p' || tokens[0] === '--package' ? 2 : 1);
       }
     } else {
@@ -52,7 +53,7 @@ function programOf(command: string): { program: string; args: Array<string> } | 
     }
   }
   if (tokens.length === 0) {return undefined;}
-  const program = tokens[0]!.replace(/^.*\//, '').replace(/\.(bat|cmd|exe)$/, '').replace(/@[\w.^~-]+$/, '');
+  const program = (tokens[0] ?? '').replace(/^.*\//, '').replace(/\.(bat|cmd|exe)$/, '').replace(/@[\w.^~-]+$/, '');
   return { program, args: tokens.slice(1) };
 }
 
@@ -179,7 +180,7 @@ function kindsOfInvocation(program: string, args: Array<string>): Array<VerifyKi
       break;
     case 'gradle':
     case 'gradlew':
-      for (const task of args.filter((a) => !a.startsWith('-')).map((a) => a.replace(/^.*:/, ''))) {
+      for (const task of args.flatMap((a) => (a.startsWith('-') ? [] : [a.replace(/^.*:/, '')]))) {
         if (/[tT]est/.test(task) || task === 'check') {add('test', 'typecheck');}
         if (/^(lint|detekt|ktlint)/.test(task) || task === 'spotlessCheck' || task === 'check') {add('lint');}
         if (/^(assemble|compile|bundle)/.test(task) || task === 'build') {add('build', 'typecheck');}
@@ -221,7 +222,7 @@ function kindsFromName(name: string): Array<VerifyKind> {
   return [];
 }
 
-const PM_BUILTINS: Record<string, ReadonlySet<string>> = {
+const PM_BUILTINS = {
   bun: new Set(['test', 'build', 'check', 'fmt', 'install', 'add', 'remove', 'x', 'pm', 'link', 'init', 'create', 'upgrade']),
   vp: new Set(['test', 'build', 'check', 'fmt', 'lint', 'dev', 'preview', 'pack', 'install', 'add', 'remove', 'env', 'dlx', 'exec']),
   npm: new Set(['install', 'ci', 'exec', 'publish', 'pack', 'audit', 'view']),
@@ -230,7 +231,7 @@ const PM_BUILTINS: Record<string, ReadonlySet<string>> = {
 };
 
 /** An own key, not an inherited one: `toString` is not a package manager and not a script. */
-const owns = (object: object, key: string): boolean => Object.hasOwn(object, key);
+const owns = <Table extends object>(table: Table, key: string): boolean => Object.hasOwn(table, key);
 
 /** The script names a package-manager invocation asks for, whether or not this package defines them. */
 function scriptNamesIn(program: string, args: Array<string>): Array<string> {
@@ -241,7 +242,7 @@ function scriptNamesIn(program: string, args: Array<string>): Array<string> {
   if (runIndex >= 0) {return positional.slice(runIndex + 1, runIndex + 2);}
   // `npm test`, `yarn lint`, `pnpm typecheck`
   const first = positional[0];
-  return first && (first === 'test' || !PM_BUILTINS[program]!.has(first)) ? [first] : [];
+  return first && (first === 'test' || !(lookup(PM_BUILTINS, program)?.has(first) ?? false)) ? [first] : [];
 }
 
 /** The package scripts a command such as `bun run --parallel lint check test` invokes. */
@@ -254,13 +255,13 @@ function scriptsCalledBy(command: string, scripts: Scripts): Array<string> {
   const several = runner === 'bun' && tokens.some((t) => t === '--parallel' || t === '--sequential');
 
   let i = 1;
-  while (i < tokens.length && tokens[i]!.startsWith('-')) {i++;}
+  while (i < tokens.length && (tokens[i] ?? '').startsWith('-')) {i++;}
   const explicitRun = tokens[i] === 'run' || tokens[i] === 'run-script';
   if (explicitRun) {i++;}
 
   const names: Array<string> = [];
   for (; i < tokens.length; i++) {
-    const tok = tokens[i]!;
+    const tok = (tokens[i] ?? '');
     if (tok === '--') {break;}
     if (tok === '--filter' || tok === '-F' || tok === '--workspace' || tok === '-w') {
       i++;
@@ -268,7 +269,7 @@ function scriptsCalledBy(command: string, scripts: Scripts): Array<string> {
     }
     if (tok.startsWith('-')) {continue;}
     if (!owns(scripts, tok)) {break;}
-    if (!explicitRun && PM_BUILTINS[runner]!.has(tok)) {break;}
+    if (!explicitRun && lookup(PM_BUILTINS, runner)?.has(tok)) {break;}
     names.push(tok);
     if (!several) {break;}
   }
@@ -287,7 +288,7 @@ function parseRecipes(text: string, tool: RecipeBook['tool']): RecipeBook {
     const header = /^([A-Za-z0-9_.-]+)(?:\s+[^:=]*)?:(?!=)\s*([^#]*)/.exec(raw);
     if (header && !/^\s/.test(raw)) {
       current = { deps: (header[2] ?? '').trim().split(/\s+/).filter(Boolean), lines: [] };
-      recipes.set(header[1]!, current);
+      recipes.set((header[1] ?? ''), current);
     } else if (current && /^\s+\S/.test(raw)) {
       current.lines.push(raw.trim().replace(/^[@-]+/, ''));
     } else if (raw.trim() === '') {
@@ -311,7 +312,7 @@ function gatingParts(commandLine: string): Array<string> {
   for (let i = 0; i < tokens.length; i += 2) {
     const fallback = tokens[i + 1] === '||' ? (tokens[i + 2] ?? '').trim() : '';
     if (/^(true|:|exit 0)(\s|$)/.test(fallback)) {continue;}
-    parts.push(tokens[i]!);
+    parts.push((tokens[i] ?? ''));
   }
   return parts;
 }
@@ -370,7 +371,7 @@ export class CommandClassifier {
       if (!cmd || /^(#|echo\b|printf\b|export\b|cd\b|set\b)/.test(cmd)) {continue;}
 
       const scriptFile = SCRIPT_FILE.exec(cmd)?.[1];
-      if (scriptFile && VERIFY_NAMED.test(scriptFile.split('/').pop()!) && this.ctx.hasFile(scriptFile)) {
+      if (scriptFile && VERIFY_NAMED.test(scriptFile.split('/').at(-1) ?? '') && this.ctx.hasFile(scriptFile)) {
         for (const k of this.classifyFile(scriptFile, seen)) {kinds.add(k);}
       }
 
@@ -379,8 +380,9 @@ export class CommandClassifier {
       }
 
       const recipeCall = /^(make|just)\s+(?:-\S+\s+)*([A-Za-z0-9_.-]+)/.exec(cmd);
-      if (recipeCall) {
-        for (const k of this.classifyRecipe(recipeCall[1] as RecipeBook['tool'], recipeCall[2]!, seen)) {kinds.add(k);}
+      const recipeTool = recipeCall?.[1];
+      if (recipeTool === 'make' || recipeTool === 'just') {
+        for (const k of this.classifyRecipe(recipeTool, recipeCall?.[2] ?? '', seen)) {kinds.add(k);}
       }
 
       const invocation = programOf(cmd);
@@ -398,9 +400,9 @@ export class CommandClassifier {
   /** What a checked-in shell or task script proves: its own name plus every command inside it. */
   classifyFile(file: string, seen: Set<string> = new Set()): Set<VerifyKind> {
     const key = `file:${file}`;
-    const base = file.split('/').pop()!.replace(/\.[a-z]+$/, '');
+    const base = (file.split('/').at(-1) ?? '').replace(/\.[a-z]+$/, '');
     // Only a name that says test, lint or typecheck speaks for the file; `build_dataset.py` is a program, not a build.
-    const stem = base.split(/[-_.]/)[0]!;
+    const stem = base.split(/[-_.]/)[0] ?? '';
     const kinds = new Set<VerifyKind>(/^(tests?|lint|typecheck)$/.test(stem) ? kindsFromName(stem) : []);
     if (seen.has(key) || seen.size > 24) {return kinds;}
     seen.add(key);
@@ -426,7 +428,7 @@ export class CommandClassifier {
         const key = `deploy:script:${name}`;
         if (seen.has(key)) {continue;}
         seen.add(key);
-        const body = this.scripts[name]!;
+        const body = this.scripts[name] ?? '';
         if (!refusesFirst(body) && this.deploys(body, seen)) {return true;}
       }
       const scriptFile = SCRIPT_FILE.exec(cmd)?.[1];
@@ -480,14 +482,15 @@ function isUnified(kinds: Array<VerifyKind>): boolean {
 
 /** How the repository's package scripts are run: `bun run x`, `pnpm run x`, `yarn x`, `npm run x`. */
 export function scriptRunner(ctx: RepoContext): (script: string) => string {
-  const runners: Record<string, (script: string) => string> = {
-    bun: (s) => `bun run ${s}`,
-    pnpm: (s) => `pnpm run ${s}`,
-    yarn: (s) => `yarn ${s}`,
-    npm: (s) => (s === 'test' ? 'npm test' : `npm run ${s}`),
+  const runners = {
+    bun: (s: string) => `bun run ${s}`,
+    pnpm: (s: string) => `pnpm run ${s}`,
+    yarn: (s: string) => `yarn ${s}`,
+    npm: (s: string) => (s === 'test' ? 'npm test' : `npm run ${s}`),
   };
+  const isManager = (name: string): name is keyof typeof runners => Object.hasOwn(runners, name);
   const declared = /^(bun|pnpm|yarn|npm)@/.exec(ctx.packageJson?.packageManager ?? '')?.[1];
-  if (declared) {return runners[declared]!;}
+  if (declared && isManager(declared)) {return runners[declared];}
 
   const locked = [
     ctx.hasFile('bun.lock') || ctx.hasFile('bun.lockb') ? 'bun' : '',
@@ -500,9 +503,10 @@ export function scriptRunner(ctx: RepoContext): (script: string) => string {
     const workflows = ctx.findFiles((f) => /^\.github\/workflows\/[^/]+\.ya?ml$/.test(f)).map((f) => ctx.readText(f) ?? '').join('\n');
     const inCi = /\b(npm) ci\b|\b(pnpm|yarn|bun) install\b/.exec(workflows);
     const ciManager = inCi?.[1] ?? inCi?.[2];
-    if (ciManager && locked.includes(ciManager)) {return runners[ciManager]!;}
+    if (ciManager && isManager(ciManager) && locked.includes(ciManager)) {return runners[ciManager];}
   }
-  return runners[locked[0] ?? 'npm']!;
+  const firstLocked = locked[0];
+  return firstLocked !== undefined && isManager(firstLocked) ? runners[firstLocked] : runners.npm;
 }
 
 const SCRIPT_PRIORITY = ['verify', 'check', 'ci', 'validate', 'test', 'lint', 'typecheck', 'type-check', 'build', 'fmt:check', 'format:check'];
@@ -524,7 +528,7 @@ function quotedCommands(markdown: string, isRepoFile: (path: string) => boolean)
       continue;
     }
     for (const span of line.matchAll(/`([^`\n]{3,240})`/g)) {
-      const cmd = span[1]!.trim();
+      const cmd = (span[1] ?? '').trim();
       const looksRunnable = /\s/.test(cmd) || cmd.startsWith('./') || /^(pytest|tox|nox|make|just|rspec)$/.test(cmd);
       if (looksRunnable || (/\.(sh|bash|zsh)$/.test(cmd) && isRepoFile(cmd))) {out.push(cmd);}
     }
@@ -567,7 +571,7 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
       const covered = new Set(commands.flatMap((c) => c.kinds));
       // A member's test script is always its own suite; other kinds only fill what is missing.
       if (kinds.length === 0 || (!kinds.includes('test') && kinds.every((k) => covered.has(k)))) {continue;}
-      if (memberClassifier.deploys(memberScripts[name]!)) {continue;}
+      if (memberClassifier.deploys(memberScripts[name] ?? '')) {continue;}
       const runIn = run(name).replace(/^(bun run|pnpm run|yarn|npm run|npm)\b/, (runner) =>
         runner.startsWith('bun') ? `bun run --cwd ${dir}` : runner.startsWith('pnpm') ? `pnpm --dir ${dir} run` : runner.startsWith('yarn') ? `yarn --cwd ${dir}` : `npm --prefix ${dir} run`,
       );
@@ -611,7 +615,7 @@ export function detectVerifyCapabilities(ctx: RepoContext): VerifyCapabilities {
   // An Xcode project with a committed shared scheme builds from the command line as it stands.
   const scheme = ctx.findFiles((f) => /\.xcodeproj\/xcshareddata\/xcschemes\/[^/]+\.xcscheme$/.test(f))[0];
   if (scheme) {
-    const name = scheme.split('/').pop()!.replace(/\.xcscheme$/, '');
+    const name = (scheme.split('/').at(-1) ?? '').replace(/\.xcscheme$/, '');
     const hasTests = /<TestableReference/.test(ctx.readText(scheme) ?? '') && ctx.testFiles.some((f) => f.endsWith('.swift'));
     // An iOS scheme builds for a device by default, which needs signing; the simulator build does not.
     const project = ctx.readText(scheme.replace(/xcshareddata\/.*$/, 'project.pbxproj')) ?? '';
@@ -789,10 +793,10 @@ export function localDeployCommands(ctx: RepoContext): Array<string> {
     for (const quoted of quotedCommands(ctx.readText(briefFile) ?? '', (p) => ctx.hasFile(p))) {
       const hit = DEPLOY_TOOL.exec(quoted);
       // A cell like `apply db [--local|--remote]` is notation, not a command anyone runs.
-      if (!hit || /--dry-run\b/.test(quoted) || /[\[\]|<>]/.test(quoted)) {continue;}
+      if (!hit || /--dry-run\b/.test(quoted) || /[[\]|<>]/.test(quoted)) {continue;}
       // Up to the tool and its subcommand, with the runner the brief uses (`bunx wrangler …`).
       const runner = /(?:^|\s)((?:npx|bunx|pnpm exec|pnpm dlx|yarn)\s+)$/.exec(quoted.slice(0, hit.index))?.[1] ?? '';
-      const command = `${runner}${hit[0].replaceAll(/\s+/g, ' ').replace(/\s+\S*[\[\]|<>].*$/, '').replace(/\s+--remote$/, ' --remote')}`.trim();
+      const command = `${runner}${hit[0].replaceAll(/\s+/g, ' ').replace(/\s+\S*[[\]|<>].*$/, '').replace(/\s+--remote$/, ' --remote')}`.trim();
       // Only plain words: a table cell like `[--local|--remote` must never become a permission rule.
       if (/^[\w@./: =-]+$/.test(command)) {commands.push(command);}
     }

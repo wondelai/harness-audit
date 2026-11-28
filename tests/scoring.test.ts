@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { STATIONS } from '../src/i18n.js';
+import type { JsonObject } from '../src/json.js';
 import {
   assignImpact,
   buildRecommendations,
@@ -17,7 +18,7 @@ function makeCheck(
   station: StationId,
   status: CheckResult['status'],
   weight = 20,
-  meta?: Record<string, unknown>,
+  meta?: JsonObject,
 ): CheckResult {
   return {
     id,
@@ -155,7 +156,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('takes 5 points per missing foundation and 15 for a security blocker, 20 at most, and returns them in the impact', () => {
-    const critical = (id: string, station: StationId, meta?: Record<string, unknown>): CheckResult => ({
+    const critical = (id: string, station: StationId, meta?: JsonObject): CheckResult => ({
       ...makeCheck(id, station, 'fail', 50, meta),
       severity: 'critical',
     });

@@ -24,7 +24,7 @@ const SEVERITY_ORDER: Record<Severity, number> = {
 };
 
 export function scoreStation(stationId: StationId, checks: Array<CheckResult>): StationScore {
-  const stationMeta = STATIONS.find((s) => s.id === stationId)!;
+  const stationWeight = STATIONS.find((s) => s.id === stationId)?.weight ?? 0;
   const stationChecks = checks.filter((c) => c.station === stationId);
 
   let earned = 0;
@@ -55,7 +55,7 @@ export function scoreStation(stationId: StationId, checks: Array<CheckResult>): 
 
   return {
     id: stationId,
-    weight: stationMeta.weight,
+    weight: stationWeight,
     score,
     passed,
     warned,
@@ -80,20 +80,26 @@ export function isSecurityBlocker(check: CheckResult): boolean {
   return Boolean(check.meta?.['hasHardcodedSecrets'] || check.meta?.['hasHardcodedMcpSecrets'] || check.meta?.['hasCriticalPermissionError']);
 }
 
+export interface CriticalPenalty {
+  points: number;
+  perCheck: Map<string, number>;
+  checks: Array<string>;
+}
+
 /**
  * A critical finding costs more than its share of one station: 5 points for a missing foundation
  * (no brief, no verify loop, no tests, no CI), 15 for a security blocker (a committed credential,
  * a bypassed permission model), 20 at most. Without it a repository that leaks keys still shows a
  * comfortable score.
  */
-export function criticalPenalty(checks: Array<CheckResult>): { points: number; perCheck: Map<string, number>; checks: Array<string> } {
+export function criticalPenalty(checks: Array<CheckResult>): CriticalPenalty {
   const critical = checks.filter((c) => c.status === 'fail' && c.severity === 'critical');
   const raw = critical.map((c) => (isSecurityBlocker(c) ? 15 : 5));
   const total = raw.reduce((a, b) => a + b, 0);
   const scale = total > 20 ? 20 / total : 1;
   return {
     points: Math.round(total * scale),
-    perCheck: new Map(critical.map((c, i) => [c.id, raw[i]! * scale])),
+    perCheck: new Map(critical.map((c, i) => [c.id, (raw[i] ?? 0) * scale])),
     checks: critical.map((c) => c.id),
   };
 }
@@ -101,12 +107,14 @@ export function criticalPenalty(checks: Array<CheckResult>): { points: number; p
 /** Lowest overall score of each level; index = level. */
 const LEVEL_THRESHOLDS: ReadonlyArray<number> = [0, 25, 45, 63, 78, 90];
 
+const AUTONOMY_LEVELS: ReadonlyArray<AutonomyLevel> = [0, 1, 2, 3, 4, 5];
+
 export function rawLevelFromScore(overallScore: number): AutonomyLevel {
-  let level = 0;
-  for (let l = 1; l < LEVEL_THRESHOLDS.length; l++) {
-    if (overallScore >= LEVEL_THRESHOLDS[l]!) {level = l;}
+  let level: AutonomyLevel = 0;
+  for (const candidate of AUTONOMY_LEVELS) {
+    if (overallScore >= (LEVEL_THRESHOLDS[candidate] ?? Infinity)) {level = candidate;}
   }
-  return level as AutonomyLevel;
+  return level;
 }
 
 /**
@@ -133,11 +141,13 @@ export function assignImpact(checks: Array<CheckResult>): void {
   }
 }
 
-export function evaluateLevel(
-  overallScore: number,
-  stations: Array<StationScore>,
-  checks: Array<CheckResult>,
-): { rawLevel: AutonomyLevel; level: AutonomyLevel; caps: Array<LevelCap> } {
+export interface LevelEvaluation {
+  rawLevel: AutonomyLevel;
+  level: AutonomyLevel;
+  caps: Array<LevelCap>;
+}
+
+export function evaluateLevel(overallScore: number, stations: Array<StationScore>, checks: Array<CheckResult>): LevelEvaluation {
   const rawLevel = rawLevelFromScore(overallScore);
   const caps = capsAt(rawLevel, stations, checks);
 
@@ -161,9 +171,9 @@ export function nextLevelFor(
   stations: Array<StationScore>,
   checks: Array<CheckResult>,
 ): NextLevel | undefined {
-  if (level >= 5) {return undefined;}
-  const target = (level + 1) as AutonomyLevel;
-  const scoreNeeded = LEVEL_THRESHOLDS[target]!;
+  const target = AUTONOMY_LEVELS.find((candidate) => candidate === level + 1);
+  if (target === undefined) {return undefined;}
+  const scoreNeeded = LEVEL_THRESHOLDS[target] ?? 100;
   const blockers = capsAt(target, stations, checks)
     .filter((cap) => cap.cappedTo < target)
     .flatMap((cap) => cap.triggeredBy.map((id) => ({ id, requirement: cap.reason })));
@@ -341,17 +351,22 @@ export function selectTopPriorities(checks: Array<CheckResult>, limit = 5, next?
     .slice(0, limit);
 }
 
+export interface Recommendations {
+  book: BookRecommendation;
+  service: ServiceRecommendation;
+}
+
 export function buildRecommendations(params: {
   lang: Lang;
   level: AutonomyLevel;
   git: GitStats;
   stack: StackInfo;
   role?: InterviewRole;
-}): { book: BookRecommendation; service: ServiceRecommendation } {
+}): Recommendations {
   const { lang, level, git, stack, role } = params;
   const isTeam = git.gitAuthors90d >= 3 || role === 'lead' || role === 'cto';
 
-  let bookId = 'handbook';
+  let bookId: keyof typeof BOOK_CATALOG = 'handbook';
   let bookReason = {
     en: 'End-to-end engineering handbook covering the 6 stations, specs, verification oracles, and multi-tool setup.',
     pl: 'Kompletny podręcznik inżynierski obejmujący 6 stacji fabryki, specyfikacje, wyrocznie testowe i konfigurację narzędzi.',
@@ -398,7 +413,7 @@ export function buildRecommendations(params: {
     };
   }
 
-  const catalogEntry = BOOK_CATALOG[bookId] ?? BOOK_CATALOG['handbook']!;
+  const catalogEntry = BOOK_CATALOG[bookId];
   const book: BookRecommendation = {
     id: catalogEntry.id,
     title: catalogEntry.title,

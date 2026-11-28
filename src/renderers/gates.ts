@@ -1,5 +1,5 @@
-import { STATION_MAP, t, UI } from '../i18n.js';
-import type { AuditReport, Lang, StationId } from '../types.js';
+import { findStation, t, UI } from '../i18n.js';
+import type { AuditReport, Lang } from '../types.js';
 
 /**
  * One gate in plain words: `harness (<60)` becomes "Harness ≥ 60 (now 45)", a check id becomes
@@ -8,9 +8,9 @@ import type { AuditReport, Lang, StationId } from '../types.js';
 export function describeGate(id: string, report: AuditReport, lang: Lang): string {
   const station = /^(\w+) \(<(\d+)\)$/.exec(id);
   if (station) {
-    const meta = STATION_MAP[station[1] as StationId];
+    const meta = findStation(station[1] ?? '');
     const score = report.stations.find((s) => s.id === station[1])?.score;
-    const name = meta ? t(meta.name, lang) : station[1]!;
+    const name = meta ? t(meta.name, lang) : (station[1] ?? '');
     return lang === 'pl' ? `${name} ≥ ${station[2]} (teraz ${score ?? '?'})` : `${name} ≥ ${station[2]} (now ${score ?? '?'})`;
   }
   return lang === 'pl' ? `${id} musi przejść` : `${id} must pass`;

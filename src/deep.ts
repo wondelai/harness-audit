@@ -1,5 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import type { RepoContext } from './fs-scanner.js';
+import { isJsonObject, parseJson } from './json.js';
+import type { JsonValue } from './json.js';
 import type { CheckResult, DeepFinding, DeepReviewResult, Lang } from './types.js';
 
 const MAX_EXCERPT_CHARS = 5000;
@@ -16,11 +18,12 @@ function commandExists(cmd: string): boolean {
   }
 }
 
-export function buildDeepPromptPayload(
-  ctx: RepoContext,
-  checks: Array<CheckResult>,
-  lang: Lang,
-): { prompt: string; filesInspected: Array<string> } {
+export interface DeepPromptPayload {
+  prompt: string;
+  filesInspected: Array<string>;
+}
+
+export function buildDeepPromptPayload(ctx: RepoContext, checks: Array<CheckResult>, lang: Lang): DeepPromptPayload {
   const filesInspected: Array<string> = [];
   const excerpts: Array<string> = [];
 
@@ -43,8 +46,7 @@ export function buildDeepPromptPayload(
   }
 
   const failingSummary = checks
-    .filter((c) => c.status === 'fail' || c.status === 'warn')
-    .map((c) => `- [${c.status.toUpperCase()}] ${c.id}: ${c.evidence.join(' | ')}`)
+    .flatMap((c) => (c.status === 'fail' || c.status === 'warn' ? [`- [${c.status.toUpperCase()}] ${c.id}: ${c.evidence.join(' | ')}`] : []))
     .join('\n');
 
   const languageInstruction =
@@ -83,39 +85,53 @@ ${excerpts.join('\n\n') || '(no instruction or test files present)'}`;
   return { prompt, filesInspected };
 }
 
+function field(value: JsonValue | undefined, key: string): JsonValue | undefined {
+  return isJsonObject(value) ? value[key] : undefined;
+}
+
+function textOf(value: JsonValue | undefined): string {
+  return typeof value === 'string' ? value : '';
+}
+
+/** The `text` of every element of a provider's content array, one per line. */
+function joinTexts(items: JsonValue | undefined): string {
+  return Array.isArray(items) ? items.map((item) => textOf(field(item, 'text'))).join('\n') : '';
+}
+
+async function readJsonBody(res: Response): Promise<JsonValue | undefined> {
+  const body = parseJson(await res.text());
+  if (body === undefined) {throw new Error('Response was not JSON');}
+  return body;
+}
+
 function parseDeepJson(raw: string): { summary: string; findings: Array<DeepFinding> } | null {
   const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start === -1 || end === -1 || end <= start) {return null;}
-  try {
-    const parsed = JSON.parse(cleaned.slice(start, end + 1)) as {
-      summary?: unknown;
-      findings?: unknown;
-    };
-    if (typeof parsed.summary !== 'string' || !Array.isArray(parsed.findings)) {return null;}
-    const findings: Array<DeepFinding> = parsed.findings
-      .filter((f): f is Record<string, unknown> => Boolean(f && typeof f === 'object'))
-      .map((f) => ({
-        area:
-          f['area'] === 'instructions' ||
-          f['area'] === 'tests' ||
-          f['area'] === 'architecture' ||
-          f['area'] === 'harness'
-            ? f['area']
-            : 'harness',
-        severity:
-          f['severity'] === 'high' || f['severity'] === 'medium' || f['severity'] === 'low'
-            ? f['severity']
-            : 'medium',
-        title: String(f['title'] ?? 'Qualitative observation'),
-        detail: String(f['detail'] ?? ''),
-        suggestion: String(f['suggestion'] ?? ''),
-      }));
-    return { summary: parsed.summary, findings };
-  } catch {
-    return null;
-  }
+  const parsed = parseJson(cleaned.slice(start, end + 1));
+  if (!isJsonObject(parsed)) {return null;}
+  const { summary, findings: rawFindings } = parsed;
+  if (typeof summary !== 'string' || !Array.isArray(rawFindings)) {return null;}
+  const findings: Array<DeepFinding> = rawFindings
+    .filter(isJsonObject)
+    .map((f) => ({
+      area:
+        f['area'] === 'instructions' ||
+        f['area'] === 'tests' ||
+        f['area'] === 'architecture' ||
+        f['area'] === 'harness'
+          ? f['area']
+          : 'harness',
+      severity:
+        f['severity'] === 'high' || f['severity'] === 'medium' || f['severity'] === 'low'
+          ? f['severity']
+          : 'medium',
+      title: String(f['title'] ?? 'Qualitative observation'),
+      detail: String(f['detail'] ?? ''),
+      suggestion: String(f['suggestion'] ?? ''),
+    }));
+  return { summary, findings };
 }
 
 export async function runDeepReview(
@@ -144,8 +160,8 @@ export async function runDeepReview(
         }),
       });
       if (!res.ok) {throw new Error(`HTTP ${res.status}`);}
-      const json = (await res.json()) as { content?: Array<{ text?: string }> };
-      const text = json.content?.map((c) => c.text ?? '').join('\n') ?? '';
+      const json = await readJsonBody(res);
+      const text = joinTexts(field(json, 'content'));
       const parsed = parseDeepJson(text);
       if (parsed) {
         return { provider: 'Anthropic API', model, filesInspected, ...parsed };
@@ -185,8 +201,9 @@ export async function runDeepReview(
         }),
       });
       if (!res.ok) {throw new Error(`HTTP ${res.status}`);}
-      const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
-      const text = json.choices?.[0]?.message?.content ?? '';
+      const json = await readJsonBody(res);
+      const choices = field(json, 'choices');
+      const text = Array.isArray(choices) ? textOf(field(field(choices[0], 'message'), 'content')) : '';
       const parsed = parseDeepJson(text);
       if (parsed) {
         return { provider: 'OpenAI API', model, filesInspected, ...parsed };
@@ -223,10 +240,9 @@ export async function runDeepReview(
         }),
       });
       if (!res.ok) {throw new Error(`HTTP ${res.status}`);}
-      const json = (await res.json()) as {
-        candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
-      };
-      const text = json.candidates?.[0]?.content?.parts?.map((p) => p.text ?? '').join('\n') ?? '';
+      const json = await readJsonBody(res);
+      const candidates = field(json, 'candidates');
+      const text = Array.isArray(candidates) ? joinTexts(field(field(candidates[0], 'content'), 'parts')) : '';
       const parsed = parseDeepJson(text);
       if (parsed) {
         return { provider: 'Gemini API', model, filesInspected, ...parsed };

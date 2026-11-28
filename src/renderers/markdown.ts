@@ -1,4 +1,4 @@
-import { docsUrl, LEVELS, STATION_MAP, t, UI } from '../i18n.js';
+import { docsUrl, LEVELS, stationMeta, t, UI } from '../i18n.js';
 import type { AuditReport, RenderOptions } from '../types.js';
 import { branchNotes, describeGate, uncappedGates } from './gates.js';
 
@@ -9,8 +9,7 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
 
   const lines: Array<string> = [];
 
-  lines.push(`# ${t(UI.reportTitle, lang)}: \`${report.repoName}\``, '', `> ${t(UI.subtitle, lang)}`, '');
-  lines.push('| Metric | Value |', '| --- | --- |', `| **${t(UI.overallScore, lang)}** | **${report.overallScore}/100**${
+  lines.push(`# ${t(UI.reportTitle, lang)}: \`${report.repoName}\``, '', `> ${t(UI.subtitle, lang)}`, '', '| Metric | Value |', '| --- | --- |', `| **${t(UI.overallScore, lang)}** | **${report.overallScore}/100**${
       report.criticalPenalty.points > 0
         ? ` ${t(UI.penaltyLine, lang).replace('{stations}', String(report.stationScore)).replace('{points}', String(report.criticalPenalty.points)).replace('{checks}', report.criticalPenalty.checks.join(', '))}`
         : ''
@@ -48,10 +47,9 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
     }
   }
 
-  lines.push('', `## ${t(UI.stationsHeading, lang)}`, '', '| # | Station | Decision | Score | Pass / Warn / Fail |');
-  lines.push('| --- | --- | --- | --- | --- |');
+  lines.push('', `## ${t(UI.stationsHeading, lang)}`, '', '| # | Station | Decision | Score | Pass / Warn / Fail |', '| --- | --- | --- | --- | --- |');
   for (const st of report.stations) {
-    const meta = STATION_MAP[st.id];
+    const meta = stationMeta(st.id);
     lines.push(
       `| ${meta.order} | **${t(meta.name, lang)}** | ${t(meta.decision, lang)} | **${st.score}/100** | ${st.passed} / ${st.warned} / ${st.failed} |`,
     );
@@ -59,8 +57,7 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
 
   if (report.topPriorities.length > 0) {
     lines.push('', `## ${t(UI.topPrioritiesHeading, lang)}`, '');
-    for (let i = 0; i < report.topPriorities.length; i++) {
-      const c = report.topPriorities[i]!;
+    for (const [i, c] of report.topPriorities.entries()) {
       lines.push(
         `${i + 1}. **[${c.status.toUpperCase()}] \`${c.id}\` — ${t(c.title, lang)}**${c.impact ? ` (+${c.impact} ${t(UI.pts, lang)})` : ''}`,
        `   - **${t(UI.evidenceLabel, lang)}:** ${c.evidence.join(' ; ')}`, `   - **${t(UI.fixLabel, lang)}:** ${t(c.fix, lang)}`, `   - **${t(UI.docsLabel, lang)}:** ${docsUrl(lang, c.docsPath)}`);
@@ -69,9 +66,8 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
 
   lines.push('', `## ${t(UI.allChecksHeading, lang)}`);
   for (const st of report.stations) {
-    const meta = STATION_MAP[st.id];
-    lines.push('', `### ${meta.order}. ${t(meta.name, lang)} (${st.score}/100)`, '', '| Status | Check | Title | Evidence |');
-    lines.push('| --- | --- | --- | --- |');
+    const meta = stationMeta(st.id);
+    lines.push('', `### ${meta.order}. ${t(meta.name, lang)} (${st.score}/100)`, '', '| Status | Check | Title | Evidence |', '| --- | --- | --- | --- |');
     for (const c of st.checks) {
       const ev = c.evidence.join('; ').replaceAll('|', String.raw`\|`);
       lines.push(
@@ -100,8 +96,7 @@ export function renderMarkdown(report: AuditReport, options: RenderOptions = {})
   }
 
   if (!noPromo) {
-    lines.push('', '---', '', `## ${t(UI.nextStepsHeading, lang)}`);
-    lines.push('', `- **${t(UI.fixPromptHint, lang)}** \`npx harness-audit --prompt --out HARNESS-FIX-PROMPT.md\``, `- **${t(UI.deepDiveBook, lang)}:** [${t(report.recommendations.book.title, lang)}](${report.recommendations.book.url}) — ${t(report.recommendations.book.reason, lang)}`);
+    lines.push('', '---', '', `## ${t(UI.nextStepsHeading, lang)}`, '', `- **${t(UI.fixPromptHint, lang)}** \`npx harness-audit --prompt --out HARNESS-FIX-PROMPT.md\``, `- **${t(UI.deepDiveBook, lang)}:** [${t(report.recommendations.book.title, lang)}](${report.recommendations.book.url}) — ${t(report.recommendations.book.reason, lang)}`);
     if (report.recommendations.service.show) {
       lines.push(
         `- **${t(UI.forTeams, lang)}:** [${t(report.recommendations.service.headline, lang)}](${report.recommendations.service.url}) — ${t(report.recommendations.service.body, lang)}`,

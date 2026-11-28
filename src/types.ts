@@ -1,3 +1,5 @@
+import type { JsonObject } from './json.js';
+
 export type Lang = 'en' | 'pl';
 
 export type StationId =
@@ -46,7 +48,7 @@ export interface CheckResult {
   fix: LocalizedText;
   docsPath: string;
   /** Optional structured metadata useful for gating caps and prompt generation. */
-  meta?: Record<string, unknown>;
+  meta?: JsonObject;
   /**
    * Points the overall score gains when this check passes. Set by the scoring pass for every
    * failing or warning check; absent on passing and informational ones.

@@ -53,7 +53,7 @@ function parseArgs(argv: Array<string>): ParsedArgs {
   const positional: Array<string> = [];
 
   for (let i = 0; i < argv.length; i++) {
-    const token = argv[i]!;
+    const token = (argv[i] ?? '');
     if (token === '--help' || token === '-h') {
       args.help = true;
     } else if (token === '--version' || token === '-v') {
@@ -218,7 +218,9 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((error) => {
+try {
+  await main();
+} catch (error: unknown) {
   process.stderr.write(`harness-audit error: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 2;
-});
+}

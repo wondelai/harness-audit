@@ -138,7 +138,8 @@ export function scoreInterview(
 
   for (const q of INTERVIEW_QUESTIONS) {
     const score = selections[q.id] ?? 0;
-    const choice = q.choices.find((c) => c.score === score) ?? q.choices[0]!;
+    const choice = q.choices.find((c) => c.score === score) ?? q.choices[0];
+    if (!choice) {continue;}
     answers.push({
       id: q.id,
       question: q.question,
@@ -176,8 +177,7 @@ export async function runInteractiveInterview(
         : `\n=== Org & Workflow Interview (role: ${role}, 7 questions) ===\nEnter 1, 2, or 3 for each question.\n\n`,
     );
 
-    for (let i = 0; i < INTERVIEW_QUESTIONS.length; i++) {
-      const q = INTERVIEW_QUESTIONS[i]!;
+    for (const [i, q] of INTERVIEW_QUESTIONS.entries()) {
       stdout.write(`${i + 1}/${INTERVIEW_QUESTIONS.length}. ${t(q.question, lang)}\n`);
       q.choices.forEach((choice, idx) => {
         stdout.write(`   [${idx + 1}] ${t(choice.label, lang)}\n`);

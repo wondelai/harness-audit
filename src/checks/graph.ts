@@ -44,7 +44,7 @@ export function runGraphChecks(ctx: RepoContext): Array<CheckResult> {
     const helperScripts = wtScripts.filter((f) => f !== '.worktreeinclude');
     const includeOnly = helperScripts.length === 0 && pkgScripts.length === 0 && wtScripts.length > 0 && !briefMentionsWorktree;
     if (includeOnly) {evidence.push('.worktreeinclude lists what a new worktree needs, but no brief says that a second agent should work in one');}
-    let status: CheckResult['status'] = 'warn';
+    let status: CheckResult['status'];
     if (includeOnly) {
       status = 'warn';
     } else if (wtScripts.length > 0 || pkgScripts.length > 0) {
@@ -138,7 +138,7 @@ export function runGraphChecks(ctx: RepoContext): Array<CheckResult> {
 
     // A port written into the config or the dev script: two checkouts cannot both bind it.
     const fixedPort =
-      /\[dev\][^\[]*?\bport\s*=\s*(\d+)/.exec(ctx.readText('wrangler.toml') ?? '')?.[1] ??
+      /\[dev\][^[]*?\bport\s*=\s*(\d+)/.exec(ctx.readText('wrangler.toml') ?? '')?.[1] ??
       /--port[= ](\d{2,5})\b/.exec(devScripts.join('\n'))?.[1];
     // A literal `--port 8790` in the dev script is fixed even when an env template offers PORT: the script never reads it.
     const scriptPort = /--port[= ](\d{2,5})\b/.exec(devScripts.join('\n'))?.[1];
@@ -150,7 +150,7 @@ export function runGraphChecks(ctx: RepoContext): Array<CheckResult> {
     const killedPort = killed?.[1] ?? killed?.[2];
     if (killedPort) {evidence.push(`The dev script kills whatever holds port ${killedPort}: starting it in one checkout stops another checkout's server`);}
 
-    let status: CheckResult['status'] = 'warn';
+    let status: CheckResult['status'];
     if (portIsFixed || killedPort) {
       status = 'warn';
     } else if (hasPortEnv && hasEphemeralLocalState) {

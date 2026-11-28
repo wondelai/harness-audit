@@ -65,7 +65,6 @@ const OFF_PR = /github\.event_name\s*(?:!=\s*'pull_request'|==\s*'(?:push|schedu
  */
 function extractRunSteps(yaml: string): Array<Step> {
   const lines = yaml.split(/\r?\n/);
-  const indentOf = (line: string): number => line.length - line.trimStart().length;
   const offPr = new Array<boolean>(lines.length).fill(false);
   const nonBlocking = new Array<boolean>(lines.length).fill(false);
 
@@ -76,7 +75,7 @@ function extractRunSteps(yaml: string): Array<Step> {
   let jobOffPr = false;
   let jobNonBlocking = false;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
+    const line = (lines[i] ?? '');
     if (!line.trim()) {continue;}
     const indent = indentOf(line);
     if (/^jobs:\s*$/.test(line)) {
@@ -103,10 +102,10 @@ function extractRunSteps(yaml: string): Array<Step> {
 
   // Step level: the keys of one step, wherever they stand relative to its `run:`.
   for (let start = 0; start < lines.length; start++) {
-    const dash = /^(\s*)-\s+\w/.exec(lines[start]!);
+    const dash = /^(\s*)-\s+\w/.exec((lines[start] ?? ''));
     if (!dash) {continue;}
     let end = start + 1;
-    while (end < lines.length && (!lines[end]!.trim() || indentOf(lines[end]!) > dash[1]!.length)) {end++;}
+    while (end < lines.length && (!(lines[end] ?? '').trim() || indentOf((lines[end] ?? '')) > (dash[1] ?? '').length)) {end++;}
     const block = lines.slice(start, end);
     const stepOffPr = block.some((l) => /^\s*(?:-\s+)?if:/.test(l) && OFF_PR.test(l));
     const stepNonBlocking = block.some((l) => /^\s*(?:-\s+)?continue-on-error:\s*true\b/.test(l));
@@ -118,16 +117,16 @@ function extractRunSteps(yaml: string): Array<Step> {
 
   const steps: Array<Step> = [];
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
+    const line = (lines[i] ?? '');
     const m = /^(\s*)(?:-\s+)?run:\s*(.*)$/.exec(line);
     if (!m) {continue;}
     const runAt = i;
-    const indent = m[1]!.length + (/^\s*-\s+run:/.test(line) ? 2 : 0);
-    let body = m[2]!.trim();
+    const indent = (m[1] ?? '').length + (/^\s*-\s+run:/.test(line) ? 2 : 0);
+    let body = (m[2] ?? '').trim();
     if (/^[|>][+-]?\d*$/.test(body)) {
       const block: Array<string> = [];
       while (i + 1 < lines.length) {
-        const next = lines[i + 1]!;
+        const next = (lines[i + 1] ?? '');
         if (next.trim() !== '' && next.length - next.trimStart().length <= indent) {break;}
         block.push(next.trim());
         i++;
@@ -162,16 +161,15 @@ function extractLooseCommands(text: string): Array<Step> {
 function branchFiltersByEvent(yaml: string): Map<string, Array<string>> {
   const filters = new Map<string, Array<string>>();
   const lines = yaml.split(/\r?\n/);
-  const unquote = (b: string): string => b.trim().replaceAll(/^['"]|['"]$/g, '');
   let event: string | undefined;
   let eventIndent = -1;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!;
+    const line = (lines[i] ?? '');
     if (!line.trim()) {continue;}
     const indent = line.length - line.trimStart().length;
     const header = /^\s*(push|pull_request|pull_request_target)\s*:/.exec(line);
     if (header) {
-      event = header[1]!;
+      event = (header[1] ?? '');
       eventIndent = indent;
       continue;
     }
@@ -179,9 +177,9 @@ function branchFiltersByEvent(yaml: string): Map<string, Array<string>> {
     if (!event) {continue;}
     const found: Array<string> = [];
     const inline = /^\s*branches\s*:\s*\[([^\]]*)\]/.exec(line);
-    if (inline) {found.push(...inline[1]!.split(',').map(unquote).filter(Boolean));}
+    if (inline) {found.push(...(inline[1] ?? '').split(',').map(unquote).filter(Boolean));}
     else if (/^\s*branches\s*:\s*$/.test(line)) {
-      for (let j = i + 1; j < lines.length && /^\s*-\s+/.test(lines[j]!); j++) {found.push(unquote(lines[j]!.trim().replace(/^-\s+/, '')));}
+      for (let j = i + 1; j < lines.length && /^\s*-\s+/.test((lines[j] ?? '')); j++) {found.push(unquote((lines[j] ?? '').trim().replace(/^-\s+/, '')));}
     }
     if (found.length > 0) {filters.set(event, [...new Set([...(filters.get(event) ?? []), ...found])]);}
   }
@@ -209,7 +207,7 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
     const steps = isGh ? extractRunSteps(text) : extractLooseCommands(text);
     const calls: Array<string> = [];
     for (const m of text.matchAll(/uses:\s*\.\/(\.github\/(?:workflows\/[^\s@'"]+|actions\/[^\s@'"]+))/g)) {
-      const target = m[1]!;
+      const target = (m[1] ?? '');
       calls.push(/\.ya?ml$/.test(target) ? target : `${target.replace(/\/$/, '')}/action.yml`);
     }
     // Branch filters, per trigger. Pull requests into the default branch do not start a workflow
@@ -245,7 +243,8 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
     if (!wf.prTriggered) {continue;}
     const stack = [...wf.calls];
     while (stack.length > 0) {
-      const next = stack.pop()!;
+      const next = stack.pop();
+      if (next === undefined) {break;}
       if (calledByPr.has(next)) {continue;}
       calledByPr.add(next);
       stack.push(...(raw.get(next)?.calls ?? []));
@@ -264,7 +263,6 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
     const commands: Array<string> = [];
     const deployCommands: Array<string> = [];
 
-    const splitLines = (body: string): Array<string> => body.split(/\n|&&/).map((l) => l.trim()).filter(Boolean);
     // A workflow that never runs proves nothing, on a pull request or anywhere else.
     for (const step of deadBranches.has(path) ? [] : steps) {
       for (const cmd of splitLines(step.command)) {
@@ -290,12 +288,13 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
         if (onPullRequest) {prKinds.add(k);}
       }
     }
-    if (DEPLOY_ACTION.test(wf.text)) {deployCommands.push(DEPLOY_ACTION.exec(wf.text)![0].replace(/^uses:\s*/, ''));}
+    const deployUse = DEPLOY_ACTION.exec(wf.text);
+    if (deployUse) {deployCommands.push(deployUse[0].replace(/^uses:\s*/, ''));}
 
     const toolchainPins: Array<string> = [];
     for (const line of wf.text.split(/\r?\n/)) {
       const pin = TOOLCHAIN_PIN.exec(line);
-      if (pin && !pin[2]!.includes('${{') && !toolchainPins.includes(`${pin[1]} ${pin[2]}`)) {
+      if (pin && !(pin[2] ?? '').includes('${{') && !toolchainPins.includes(`${pin[1]} ${pin[2]}`)) {
         toolchainPins.push(`${pin[1]} ${pin[2]}`);
       }
     }
@@ -313,4 +312,16 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
   }
 
   return { files, workflows, prKinds, prCommands };
+}
+
+function indentOf(line: string): number {
+  return line.length - line.trimStart().length;
+}
+
+function splitLines(body: string): Array<string> {
+  return body.split(/\n|&&/).map((l) => l.trim()).filter(Boolean);
+}
+
+function unquote(b: string): string {
+  return b.trim().replaceAll(/^['"]|['"]$/g, '');
 }

@@ -7,6 +7,7 @@ import { readBrief } from './brief.js';
 import type { BriefFacts } from './brief.js';
 import { analyzeCi } from './ci.js';
 import type { CiFacts } from './ci.js';
+import { lookup } from './lookup.js';
 import type { GitStats, ScanInfo, StackInfo, SupportedTool } from './types.js';
 
 /**
@@ -82,7 +83,7 @@ function isIgnoredDir(name: string, rel: string, mode: ScanInfo['mode']): boolea
 function pathIsVendored(rel: string): boolean {
   const parts = rel.split('/');
   for (let i = 0; i < parts.length - 1; i++) {
-    if (VENDORED_DIRS.has(parts[i]!)) {return true;}
+    if (VENDORED_DIRS.has((parts[i] ?? ''))) {return true;}
   }
   return false;
 }
@@ -214,8 +215,13 @@ function depthOf(rel: string): number {
   return depth;
 }
 
+interface CappedFiles {
+  files: Array<string>;
+  truncated: boolean;
+}
+
 /** Shallow paths first, so a cap never drops the root manifests and agent config. */
-function capFiles(files: Array<string>): { files: Array<string>; truncated: boolean } {
+function capFiles(files: Array<string>): CappedFiles {
   if (files.length <= MAX_SCAN_FILES) {return { files, truncated: false };}
   const sorted = [...files].sort((a, b) => depthOf(a) - depthOf(b) || (a < b ? -1 : a > b ? 1 : 0));
   return { files: sorted.slice(0, MAX_SCAN_FILES), truncated: true };
@@ -268,7 +274,8 @@ function walkFiles(root: string): FileListing {
   const queue: Array<string> = [root];
 
   while (queue.length > 0 && !truncated) {
-    const dir = queue.shift()!;
+    const dir = queue.shift();
+    if (dir === undefined) {break;}
     let entries;
     try {
       entries = readdirSync(dir, { withFileTypes: true });
@@ -366,14 +373,14 @@ export class RepoContext {
         timeout: 20_000,
         maxBuffer: 64 * 1024 * 1024,
       });
-    let out = '';
+    let out: string;
     try {
       // One Perl-compatible pass: fast, and exact about word boundaries.
       out = run(['-P', '-e', pattern.pcre]);
     } catch (error) {
       // Exit 1 is "no match". Anything else: a git built without PCRE, or a repository without a
       // commit to search. Fixed strings need no regex engine; the caller confirms each hit.
-      if ((error as { status?: number }).status === 1) {return [];}
+      if (exitStatus(error) === 1) {return [];}
       try {
         out = run(['-F', ...pattern.fixed.flatMap((f) => ['-e', f])]);
       } catch {
@@ -383,7 +390,7 @@ export class RepoContext {
     const hits: Array<{ path: string; line: number; text: string }> = [];
     for (const row of out.split('\n')) {
       const m = /^(?:HEAD:)?(.+?):(\d+):(.*)$/.exec(row);
-      if (m) {hits.push({ path: m[1]!, line: Number(m[2]), text: m[3]!.slice(0, 2000) });}
+      if (m) {hits.push({ path: (m[1] ?? ''), line: Number(m[2]), text: (m[3] ?? '').slice(0, 2000) });}
     }
     return hits;
   }
@@ -482,17 +489,7 @@ export class RepoContext {
   readJson<T = unknown>(relPath: string): T | null {
     const raw = this.readText(relPath);
     if (!raw) {return null;}
-    try {
-      return JSON.parse(raw) as T;
-    } catch {
-      // Try stripping JSONC comments & trailing commas safely (e.g. tsconfig.json)
-      try {
-        const stripped = stripJsonComments(raw);
-        return JSON.parse(stripped) as T;
-      } catch {
-        return null;
-      }
-    }
+    return parseJsonc<T>(raw);
   }
 
   get packageJson(): PackageJsonShape | null {
@@ -575,7 +572,7 @@ export class RepoContext {
         return new Set(out.split('\n').filter(Boolean));
       } catch (error) {
         // Exit status 1: none of the paths is ignored.
-        if ((error as { status?: number }).status === 1) {return new Set();}
+        if (exitStatus(error) === 1) {return new Set();}
       }
     }
     const patterns = (this.readText('.gitignore') ?? '')
@@ -669,11 +666,33 @@ function gitignorePatternMatches(pattern: string, candidate: string): boolean {
     .map((piece) => piece.replaceAll(/[.+^$()|[\]{}?\\]/g, (ch) => `\\${ch}`))
     .join('[^/]*');
   const rx = new RegExp(`^${source}(?:/.*)?$`);
-  return rx.test(candidate) || rx.test(candidate.split('/').pop()!);
+  return rx.test(candidate) || rx.test(candidate.split('/').at(-1) ?? '');
 }
 
 function cleanRel(relPath: string): string {
   return relPath.replaceAll('\\', '/').replace(/^\.\//, '');
+}
+
+/** The exit status of a failed child process (`execFileSync` attaches it to the error), if any. */
+function exitStatus(error: unknown): number | undefined {
+  return typeof error === 'object' && error !== null && 'status' in error && typeof error.status === 'number' ? error.status : undefined;
+}
+
+/**
+ * Parse JSON, then JSONC (comments, trailing commas) when that fails, as the shape the caller names.
+ * The text is not validated against it: every caller reads the fields it needs defensively.
+ */
+export function parseJsonc<T>(raw: string): T | null {
+  const attempt = (text: string): T | null => {
+    try {
+      const parsed: unknown = JSON.parse(text);
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- the caller declares the shape it expects and reads it defensively; nothing here can know it
+      return parsed as T;
+    } catch {
+      return null;
+    }
+  };
+  return attempt(raw) ?? attempt(stripJsonComments(raw));
 }
 
 export function stripJsonComments(input: string): string {
@@ -719,7 +738,7 @@ export function stripJsonComments(input: string): string {
   return out.replaceAll(/,\s*([}\]])/g, '$1');
 }
 
-const LANGUAGE_BY_EXT: Record<string, string> = {
+const LANGUAGE_BY_EXT = {
   '.py': 'Python',
   '.js': 'JavaScript',
   '.mjs': 'JavaScript',
@@ -981,7 +1000,7 @@ function detectStack(ctx: RepoContext): StackInfo {
     const byExt = new Map<string, number>();
     for (const f of ctx.sourceFiles) {byExt.set(extname(f), (byExt.get(extname(f)) ?? 0) + 1);}
     const top = [...byExt.entries()].sort((a, b) => b[1] - a[1])[0];
-    const label = top && top[1] >= 2 ? LANGUAGE_BY_EXT[top[0]] : undefined;
+    const label = top && top[1] >= 2 ? lookup(LANGUAGE_BY_EXT, top[0]) : undefined;
     if (label) {languages.add(label);}
   }
 
@@ -1093,7 +1112,7 @@ function detectGitStats(root: string): GitStats {
     }
   }
 
-  let commits30d = 0;
+  let commits30d: number;
   try {
     const out = execFileSync('git', ['rev-list', '--count', '--since=30 days ago', 'HEAD'], {
       cwd: root, env: GIT_ENV,

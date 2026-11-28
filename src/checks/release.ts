@@ -28,7 +28,7 @@ export function runReleaseChecks(ctx: RepoContext): Array<CheckResult> {
     } else {
       evidence.push(`CI workflows (${allCiFiles.length}): ${allCiFiles.slice(0, 5).join(', ')}${allCiFiles.length > 5 ? ', …' : ''}`, `Pull requests are gated on — tests: ${mark('test')} · lint: ${mark('lint')} · typecheck: ${mark('typecheck')}`);
       for (const dead of ci.workflows.filter((w) => w.deadBranches)) {
-        evidence.push(`${dead.path} is filtered to ${dead.deadBranches!.map((b) => `\`${b}\``).join(', ')}, but the default branch is \`${ctx.git.defaultBranch}\`: pushes and pull requests to it never start this workflow`);
+        evidence.push(`${dead.path} is filtered to ${(dead.deadBranches ?? []).map((b) => `\`${b}\``).join(', ')}, but the default branch is \`${ctx.git.defaultBranch}\`: pushes and pull requests to it never start this workflow`);
       }
       // The commands that provide the gate, so the reading can be checked at a glance.
       const shown = new Set<string>();
@@ -107,7 +107,7 @@ export function runReleaseChecks(ctx: RepoContext): Array<CheckResult> {
       ctx.findFiles((f) => /^\.gitlab\/merge_request_templates\/.+\.md$/i.test(f))[0];
 
     const evidence: Array<string> = [];
-    let status: CheckResult['status'] = 'fail';
+    let status: CheckResult['status'];
 
     if (templatePath) {
       const content = ctx.readText(templatePath) ?? '';
@@ -302,7 +302,7 @@ export function runReleaseChecks(ctx: RepoContext): Array<CheckResult> {
       ctx.stack.packageManagers.includes('xcodebuild') ||
       ctx.hasFile('wrangler.toml') ||
       ctx.hasFile('Dockerfile');
-    let status: CheckResult['status'] = 'pass';
+    let status: CheckResult['status'];
     if (isApp && telemetrySignals === 0 && signals.length > 0) {
       // Migrations are versioned, but nothing reports an error from the running app.
       status = 'warn';
@@ -354,10 +354,10 @@ export function runReleaseChecks(ctx: RepoContext): Array<CheckResult> {
     const gated = deployWorkflows.filter((w) => w.deployGated);
     const ungated = deployWorkflows.filter((w) => !w.deployGated);
     for (const w of gated.slice(0, 3)) {
-      evidence.push(`${w.path}: deploys (\`${w.deployCommands[0]!.slice(0, 70)}\`) behind a job dependency, environment or branch/manual trigger`);
+      evidence.push(`${w.path}: deploys (\`${(w.deployCommands[0] ?? '').slice(0, 70)}\`) behind a job dependency, environment or branch/manual trigger`);
     }
     for (const w of ungated.slice(0, 3)) {
-      evidence.push(`${w.path}: deploys (\`${w.deployCommands[0]!.slice(0, 70)}\`) with no \`needs:\`, environment or branch condition in front of it`);
+      evidence.push(`${w.path}: deploys (\`${(w.deployCommands[0] ?? '').slice(0, 70)}\`) with no \`needs:\`, environment or branch condition in front of it`);
     }
 
     // The platform deploys from git only when someone wrote that down: "Workers Builds" (the
@@ -385,7 +385,6 @@ export function runReleaseChecks(ctx: RepoContext): Array<CheckResult> {
     // `bun run deploy` is covered by a rule naming the script under any runner; `npx wrangler deploy`
     // by one naming the CLI call. The rule has to be that command or a prefix of it: a rule for
     // `wrangler deploy --dry-run` or for the script `deploy:preview` denies neither.
-    const bare = (command: string): string => command.replace(/^(npx|bunx)\s+/, '').replace(/^(?:npm|pnpm|bun|yarn|vp)\s+(?:run\s+)?/, '').trim();
     const denyPatterns = claudeDeny
       .map((rule) => /^Bash\((.*)\)$/.exec(rule)?.[1])
       .filter((p): p is string => p !== undefined)
@@ -399,12 +398,11 @@ export function runReleaseChecks(ctx: RepoContext): Array<CheckResult> {
     const scriptGuards = deployScriptGuards(ctx);
     const selfGuarded = localDeploys.filter((c) => scriptGuards.has(c));
     const unguarded = guards.length > 0 ? [] : localDeploys.filter((c) => !denied(c) && !scriptGuards.has(c));
-    const code = (commands: Array<string>): string => commands.map((c) => `\`${c}\``).join(', ');
     if (localDeploys.length > 0 && guards.length > 0) {
       evidence.push(`A PreToolUse guard hook decides on deploy commands before they run: ${guards.join(', ')} (read it for what it allows from the main checkout)`);
     } else if (localDeploys.length > 0) {
       if (selfGuarded.length > 0) {
-        evidence.push(`${code(selfGuarded)} ${selfGuarded.length === 1 ? 'opens' : 'open'} with \`${scriptGuards.get(selfGuarded[0]!)}\`, a guard that decides whether this checkout may ship`);
+        evidence.push(`${code(selfGuarded)} ${selfGuarded.length === 1 ? 'opens' : 'open'} with \`${scriptGuards.get(selfGuarded[0] ?? '')}\`, a guard that decides whether this checkout may ship`);
       }
       const denyCovered = localDeploys.filter((c) => denied(c) && !scriptGuards.has(c));
       if (unguarded.length > 0) {
@@ -457,7 +455,7 @@ export function runReleaseChecks(ctx: RepoContext): Array<CheckResult> {
           mergeShipsUnchecked
             ? `A merge ships to production here, so add a pull-request workflow that runs ${minimalVerifySet(ctx.verify).length > 0 ? `\`${minimalVerifySet(ctx.verify).join('`, `')}\`` : 'your checks'} and require it before merging.`
             : ungated.length > 0
-            ? `Put the deploy job in ${ungated[0]!.path} behind the verify job (\`needs: [verify]\`) or a protected \`environment:\`${unguarded.length > 0 ? `, and deny local deploys in \`.claude/settings.json\` (${denyExample})` : ''}.`
+            ? `Put the deploy job in ${ungated[0]?.path ?? ''} behind the verify job (\`needs: [verify]\`) or a protected \`environment:\`${unguarded.length > 0 ? `, and deny local deploys in \`.claude/settings.json\` (${denyExample})` : ''}.`
             : unguarded.length > 0
               ? `Add to \`permissions.deny\` in \`.claude/settings.json\`: ${denyExample}.`
               : 'Keep the deny list in step with new deploy scripts.',
@@ -465,7 +463,7 @@ export function runReleaseChecks(ctx: RepoContext): Array<CheckResult> {
           mergeShipsUnchecked
             ? `Scalenie wdraża tu na produkcję, więc dodaj workflow na pull requestach uruchamiający ${minimalVerifySet(ctx.verify).length > 0 ? `\`${minimalVerifySet(ctx.verify).join('`, `')}\`` : 'sprawdzenia'} i wymagaj go przed scaleniem.`
             : ungated.length > 0
-            ? `Uzależnij zadanie deploy w ${ungated[0]!.path} od zadania weryfikacji (\`needs: [verify]\`) lub chronionego \`environment:\`${unguarded.length > 0 ? ` i zablokuj lokalny deploy w \`.claude/settings.json\` (${denyExample})` : ''}.`
+            ? `Uzależnij zadanie deploy w ${ungated[0]?.path ?? ''} od zadania weryfikacji (\`needs: [verify]\`) lub chronionego \`environment:\`${unguarded.length > 0 ? ` i zablokuj lokalny deploy w \`.claude/settings.json\` (${denyExample})` : ''}.`
             : unguarded.length > 0
               ? `Dodaj do \`permissions.deny\` w \`.claude/settings.json\`: ${denyExample}.`
               : 'Aktualizuj listę deny wraz z nowymi skryptami deploy.',
@@ -475,4 +473,12 @@ export function runReleaseChecks(ctx: RepoContext): Array<CheckResult> {
   }
 
   return results;
+}
+
+function bare(command: string): string {
+  return command.replace(/^(npx|bunx)\s+/, '').replace(/^(?:npm|pnpm|bun|yarn|vp)\s+(?:run\s+)?/, '').trim();
+}
+
+function code(commands: Array<string>): string {
+  return commands.map((c) => `\`${c}\``).join(', ');
 }

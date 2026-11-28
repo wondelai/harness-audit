@@ -50,11 +50,15 @@ export function createTempRepo(prefix = 'harness-audit-test-'): TempRepo {
       }
       git('add', '-A');
       // One name per address, as real people have; the audit counts people, not addresses.
-      const name = author.split('@')[0]!.replaceAll(/[^a-z0-9]+/gi, ' ').trim() || 'dev';
+      const name = (author.split('@')[0] ?? '').replaceAll(/[^a-z0-9]+/gi, ' ').trim() || 'dev';
+      const commitEnv = { ...env };
+      if (date) {
+        commitEnv.GIT_COMMITTER_DATE = date;
+      }
       execFileSync(
         'git',
         ['-c', `user.email=${author}`, '-c', `user.name=${name}`, '-c', 'commit.gpgsign=false', 'commit', '-q', '--allow-empty', '-m', 'snapshot', ...(date ? ['--date', date] : [])],
-        { cwd: dir, stdio: 'ignore', env: { ...env, ...(date ? { GIT_COMMITTER_DATE: date } : {}) } },
+        { cwd: dir, stdio: 'ignore', env: commitEnv },
       );
     },
     cleanup() {
@@ -405,4 +409,11 @@ test('health returns ok', async ({ request }) => {
   );
 
   return repo;
+}
+
+/** Parse JSON the test then reads as the shape it names; an assertion on a wrong shape fails the test. */
+export function parseJsonAs<T>(text: string): T {
+  const parsed: unknown = JSON.parse(text);
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- test helper: the test names the shape it asserts on, and a wrong one fails the assertion
+  return parsed as T;
 }

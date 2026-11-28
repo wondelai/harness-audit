@@ -10,12 +10,17 @@ const BOILERPLATE_PATTERNS: Array<{ label: string; regex: RegExp }> = [
   { label: 'generic "always test your changes"', regex: /\balways test your (changes|code)\b/i },
 ];
 
+export interface BareAgentsImport {
+  bare: boolean;
+  backticked: boolean;
+}
+
 /**
  * Checks whether a markdown file contains a bare `@AGENTS.md` import line
  * outside fenced code blocks and outside inline backticks (Claude Code only
  * imports bare `@AGENTS.md`).
  */
-export function hasBareAgentsImport(content: string): { bare: boolean; backticked: boolean } {
+export function hasBareAgentsImport(content: string): BareAgentsImport {
   const lines = content.split(/\r?\n/);
   let inFence = false;
   let bare = false;
@@ -68,7 +73,6 @@ export function runIntentChecks(ctx: RepoContext): Array<CheckResult> {
   const claudeLink = hasClaudeMd ? ctx.linkTarget('CLAUDE.md') : undefined;
   const agentsLink = hasAgentsMd ? ctx.linkTarget('AGENTS.md') : undefined;
   const sameFile = claudeLink === 'AGENTS.md' || agentsLink === 'CLAUDE.md';
-  const named = (file: string, link: string | undefined): string => (link ? `${file} → ${link}` : file);
   // On this machine but ignored by git: the author has a brief, a teammate or a CI agent does not.
   const localOnlyBriefs = ['AGENTS.md', 'CLAUDE.md'].filter((f) => ctx.isLocalOnly(f));
 
@@ -434,7 +438,7 @@ export function runIntentChecks(ctx: RepoContext): Array<CheckResult> {
       const text = ctx.readText(primaryFile) ?? '';
       const lines = countLines(text);
       const bytes = Buffer.byteLength(text, 'utf8');
-      const fillerHits = BOILERPLATE_PATTERNS.filter((p) => p.regex.test(text)).map((p) => p.label);
+      const fillerHits = BOILERPLATE_PATTERNS.flatMap((p) => (p.regex.test(text) ? [p.label] : []));
 
       const primaryLink = primaryFile === 'AGENTS.md' ? agentsLink : claudeLink;
       const evidence = [`${named(primaryFile, primaryLink)}: ${lines} lines (${(bytes / 1024).toFixed(1)} KiB)`];
@@ -646,4 +650,8 @@ export function runIntentChecks(ctx: RepoContext): Array<CheckResult> {
   }
 
   return results;
+}
+
+function named(file: string, link: string | undefined): string {
+  return link ? `${file} → ${link}` : file;
 }

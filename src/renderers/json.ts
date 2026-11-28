@@ -1,4 +1,4 @@
-import { docsUrl, LEVELS, STATION_MAP, t } from '../i18n.js';
+import { docsUrl, LEVELS, stationMeta, t } from '../i18n.js';
 import type { AuditReport, RenderOptions } from '../types.js';
 
 export function renderJson(report: AuditReport, options: RenderOptions = {}): string {
@@ -24,17 +24,16 @@ export function renderJson(report: AuditReport, options: RenderOptions = {}): st
       triggeredBy: cap.triggeredBy,
       reason: t(cap.reason, lang),
     })),
-    ...(report.nextLevel
+    // `undefined` drops the key from the JSON, in its place.
+    nextLevel: report.nextLevel
       ? {
-          nextLevel: {
-            level: report.nextLevel.level,
-            levelName: t(LEVELS[report.nextLevel.level].shortName, lang),
-            scoreNeeded: report.nextLevel.scoreNeeded,
-            pointsMissing: report.nextLevel.pointsMissing,
-            blockers: report.nextLevel.blockers.map((b) => ({ id: b.id, requirement: t(b.requirement, lang) })),
-          },
+          level: report.nextLevel.level,
+          levelName: t(LEVELS[report.nextLevel.level].shortName, lang),
+          scoreNeeded: report.nextLevel.scoreNeeded,
+          pointsMissing: report.nextLevel.pointsMissing,
+          blockers: report.nextLevel.blockers.map((b) => ({ id: b.id, requirement: t(b.requirement, lang) })),
         }
-      : {}),
+      : undefined,
     topPriorities: report.topPriorities.map((c) => c.id),
     scaffold: report.scaffold,
     scan: report.scan,
@@ -42,7 +41,7 @@ export function renderJson(report: AuditReport, options: RenderOptions = {}): st
     git: report.git,
     stations: report.stations.map((st) => ({
       id: st.id,
-      name: t(STATION_MAP[st.id].name, lang),
+      name: t(stationMeta(st.id).name, lang),
       weight: st.weight,
       score: st.score,
       passed: st.passed,
@@ -56,29 +55,27 @@ export function renderJson(report: AuditReport, options: RenderOptions = {}): st
       weight: c.weight,
       status: c.status,
       severity: c.severity,
-      ...(c.impact !== undefined ? { impact: c.impact } : {}),
+      impact: c.impact,
       title: t(c.title, lang),
       evidence: c.evidence,
       why: t(c.why, lang),
       fix: t(c.fix, lang),
       docsUrl: docsUrl(lang, c.docsPath),
     })),
-    ...(report.interview
+    interview: report.interview
       ? {
-          interview: {
-            role: report.interview.role,
-            score: report.interview.score,
-            answers: report.interview.answers.map((a) => ({
-              id: a.id,
-              question: t(a.question, lang),
-              choice: t(a.choiceLabel, lang),
-              score: a.score,
-            })),
-            gaps: report.interview.gaps.map((g) => t(g, lang)),
-          },
+          role: report.interview.role,
+          score: report.interview.score,
+          answers: report.interview.answers.map((a) => ({
+            id: a.id,
+            question: t(a.question, lang),
+            choice: t(a.choiceLabel, lang),
+            score: a.score,
+          })),
+          gaps: report.interview.gaps.map((g) => t(g, lang)),
         }
-      : {}),
-    ...(report.deepReview ? { deepReview: report.deepReview } : {}),
+      : undefined,
+    deepReview: report.deepReview,
   };
 
   return `${JSON.stringify(payload, null, 2)}\n`;

@@ -1,4 +1,4 @@
-import { docsUrl, LEVELS, STATION_MAP, t, UI } from '../i18n.js';
+import { docsUrl, LEVELS, stationMeta, t, UI } from '../i18n.js';
 import type { AuditReport, AutonomyLevel, CheckStatus, RenderOptions } from '../types.js';
 
 function escapeHtml(value: string): string {
@@ -73,8 +73,7 @@ export function renderHtml(report: AuditReport, options: RenderOptions = {}): st
     ...report.stack.packageManagers.map((pm) => `pm:${pm}`),
     report.stack.monorepo ? 'monorepo' : '',
   ]
-    .filter(Boolean)
-    .map((item) => `<span class="chip">${escapeHtml(item)}</span>`)
+    .flatMap((item) => (item ? [`<span class="chip">${escapeHtml(item)}</span>`] : []))
     .join('');
 
   const capsHtml =
@@ -99,7 +98,7 @@ export function renderHtml(report: AuditReport, options: RenderOptions = {}): st
 
   const stationsHtml = report.stations
     .map((st) => {
-      const meta = STATION_MAP[st.id];
+      const meta = stationMeta(st.id);
       const barClass = st.score >= 78 ? 'bar-ok' : st.score >= 50 ? 'bar-signal' : 'bar-err';
       return `<div class="station-card">
       <div class="station-head">
@@ -144,7 +143,7 @@ export function renderHtml(report: AuditReport, options: RenderOptions = {}): st
 
   const detailsHtml = report.stations
     .map((st) => {
-      const meta = STATION_MAP[st.id];
+      const meta = stationMeta(st.id);
       const rows = st.checks
         .map(
           (c) => `<tr>
