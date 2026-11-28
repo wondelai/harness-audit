@@ -109,29 +109,34 @@ function parseDeepJson(raw: string): { summary: string; findings: Array<DeepFind
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
   if (start === -1 || end === -1 || end <= start) {return null;}
-  const parsed = parseJson(cleaned.slice(start, end + 1));
-  if (!isJsonObject(parsed)) {return null;}
-  const { summary, findings: rawFindings } = parsed;
-  if (typeof summary !== 'string' || !Array.isArray(rawFindings)) {return null;}
-  const findings: Array<DeepFinding> = rawFindings
-    .filter(isJsonObject)
-    .map((f) => ({
-      area:
-        f['area'] === 'instructions' ||
-        f['area'] === 'tests' ||
-        f['area'] === 'architecture' ||
-        f['area'] === 'harness'
-          ? f['area']
-          : 'harness',
-      severity:
-        f['severity'] === 'high' || f['severity'] === 'medium' || f['severity'] === 'low'
-          ? f['severity']
-          : 'medium',
-      title: String(f['title'] ?? 'Qualitative observation'),
-      detail: String(f['detail'] ?? ''),
-      suggestion: String(f['suggestion'] ?? ''),
-    }));
-  return { summary, findings };
+  try {
+    const parsed = parseJson(cleaned.slice(start, end + 1));
+    if (!isJsonObject(parsed)) {return null;}
+    const { summary, findings: rawFindings } = parsed;
+    if (typeof summary !== 'string' || !Array.isArray(rawFindings)) {return null;}
+    const findings: Array<DeepFinding> = rawFindings
+      .filter(isJsonObject)
+      .map((f) => ({
+        area:
+          f['area'] === 'instructions' ||
+          f['area'] === 'tests' ||
+          f['area'] === 'architecture' ||
+          f['area'] === 'harness'
+            ? f['area']
+            : 'harness',
+        severity:
+          f['severity'] === 'high' || f['severity'] === 'medium' || f['severity'] === 'low'
+            ? f['severity']
+            : 'medium',
+        title: String(f['title'] ?? 'Qualitative observation'),
+        detail: String(f['detail'] ?? ''),
+        suggestion: String(f['suggestion'] ?? ''),
+      }));
+    return { summary, findings };
+  } catch {
+    // A field whose toString throws (`{"title":{"toString":null}}`) makes the whole reply unusable.
+    return null;
+  }
 }
 
 export async function runDeepReview(

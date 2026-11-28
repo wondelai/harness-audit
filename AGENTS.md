@@ -7,6 +7,8 @@ same version.
 
 ## Commands
 
+The package runs on Node >= 20, but developing it needs Node 22.18+ (or 24+): `oxlint.config.ts` loads only there.
+
 ```bash
 npm ci
 npm run verify       # lint + typecheck + build + tests: the gate, run it before you finish
