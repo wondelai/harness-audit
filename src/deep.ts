@@ -18,24 +18,24 @@ function commandExists(cmd: string): boolean {
 
 export function buildDeepPromptPayload(
   ctx: RepoContext,
-  checks: CheckResult[],
+  checks: Array<CheckResult>,
   lang: Lang,
-): { prompt: string; filesInspected: string[] } {
-  const filesInspected: string[] = [];
-  const excerpts: string[] = [];
+): { prompt: string; filesInspected: Array<string> } {
+  const filesInspected: Array<string> = [];
+  const excerpts: Array<string> = [];
 
   const addExcerpt = (relPath: string, limit = MAX_EXCERPT_CHARS): void => {
     const content = ctx.readText(relPath);
-    if (!content) return;
+    if (!content) {return;}
     filesInspected.push(relPath);
     const trimmed = content.length > limit ? `${content.slice(0, limit)}\n... [truncated]` : content;
     excerpts.push(`### FILE: ${relPath}\n\`\`\`\n${trimmed}\n\`\`\``);
   };
 
-  if (ctx.hasFile('AGENTS.md')) addExcerpt('AGENTS.md', 4500);
-  if (ctx.hasFile('CLAUDE.md')) addExcerpt('CLAUDE.md', 2500);
-  if (ctx.hasFile('.claude/settings.json')) addExcerpt('.claude/settings.json', 2000);
-  if (ctx.hasFile('.codex/config.toml')) addExcerpt('.codex/config.toml', 1500);
+  if (ctx.hasFile('AGENTS.md')) {addExcerpt('AGENTS.md', 4500);}
+  if (ctx.hasFile('CLAUDE.md')) {addExcerpt('CLAUDE.md', 2500);}
+  if (ctx.hasFile('.claude/settings.json')) {addExcerpt('.claude/settings.json', 2000);}
+  if (ctx.hasFile('.codex/config.toml')) {addExcerpt('.codex/config.toml', 1500);}
 
   // Sample up to 2 test files
   for (const tf of ctx.testFiles.slice(0, 2)) {
@@ -83,18 +83,18 @@ ${excerpts.join('\n\n') || '(no instruction or test files present)'}`;
   return { prompt, filesInspected };
 }
 
-function parseDeepJson(raw: string): { summary: string; findings: DeepFinding[] } | null {
+function parseDeepJson(raw: string): { summary: string; findings: Array<DeepFinding> } | null {
   const cleaned = raw.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) return null;
+  if (start === -1 || end === -1 || end <= start) {return null;}
   try {
     const parsed = JSON.parse(cleaned.slice(start, end + 1)) as {
       summary?: unknown;
       findings?: unknown;
     };
-    if (typeof parsed.summary !== 'string' || !Array.isArray(parsed.findings)) return null;
-    const findings: DeepFinding[] = parsed.findings
+    if (typeof parsed.summary !== 'string' || !Array.isArray(parsed.findings)) {return null;}
+    const findings: Array<DeepFinding> = parsed.findings
       .filter((f): f is Record<string, unknown> => Boolean(f && typeof f === 'object'))
       .map((f) => ({
         area:
@@ -120,7 +120,7 @@ function parseDeepJson(raw: string): { summary: string; findings: DeepFinding[] 
 
 export async function runDeepReview(
   ctx: RepoContext,
-  checks: CheckResult[],
+  checks: Array<CheckResult>,
   lang: Lang,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<DeepReviewResult> {
@@ -143,7 +143,7 @@ export async function runDeepReview(
           messages: [{ role: 'user', content: prompt }],
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {throw new Error(`HTTP ${res.status}`);}
       const json = (await res.json()) as { content?: Array<{ text?: string }> };
       const text = json.content?.map((c) => c.text ?? '').join('\n') ?? '';
       const parsed = parseDeepJson(text);
@@ -157,13 +157,13 @@ export async function runDeepReview(
         summary: text.slice(0, 600),
         findings: [],
       };
-    } catch (err) {
+    } catch (error) {
       return {
         provider: 'Anthropic API',
         filesInspected,
         summary: '',
         findings: [],
-        error: `Anthropic API call failed: ${err instanceof Error ? err.message : String(err)}`,
+        error: `Anthropic API call failed: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
@@ -184,7 +184,7 @@ export async function runDeepReview(
           messages: [{ role: 'user', content: prompt }],
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {throw new Error(`HTTP ${res.status}`);}
       const json = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
       const text = json.choices?.[0]?.message?.content ?? '';
       const parsed = parseDeepJson(text);
@@ -198,13 +198,13 @@ export async function runDeepReview(
         summary: text.slice(0, 600),
         findings: [],
       };
-    } catch (err) {
+    } catch (error) {
       return {
         provider: 'OpenAI API',
         filesInspected,
         summary: '',
         findings: [],
-        error: `OpenAI API call failed: ${err instanceof Error ? err.message : String(err)}`,
+        error: `OpenAI API call failed: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
@@ -222,7 +222,7 @@ export async function runDeepReview(
           generationConfig: { responseMimeType: 'application/json' },
         }),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {throw new Error(`HTTP ${res.status}`);}
       const json = (await res.json()) as {
         candidates?: Array<{ content?: { parts?: Array<{ text?: string }> } }>;
       };
@@ -238,13 +238,13 @@ export async function runDeepReview(
         summary: text.slice(0, 600),
         findings: [],
       };
-    } catch (err) {
+    } catch (error) {
       return {
         provider: 'Gemini API',
         filesInspected,
         summary: '',
         findings: [],
-        error: `Gemini API call failed: ${err instanceof Error ? err.message : String(err)}`,
+        error: `Gemini API call failed: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
@@ -267,13 +267,13 @@ export async function runDeepReview(
         summary: out.trim().slice(0, 600),
         findings: [],
       };
-    } catch (err) {
+    } catch (error) {
       return {
         provider: 'local claude CLI',
         filesInspected,
         summary: '',
         findings: [],
-        error: `Local claude CLI failed: ${err instanceof Error ? err.message : String(err)}`,
+        error: `Local claude CLI failed: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }
@@ -296,13 +296,13 @@ export async function runDeepReview(
         summary: out.trim().slice(0, 600),
         findings: [],
       };
-    } catch (err) {
+    } catch (error) {
       return {
         provider: 'local codex CLI',
         filesInspected,
         summary: '',
         findings: [],
-        error: `Local codex CLI failed: ${err instanceof Error ? err.message : String(err)}`,
+        error: `Local codex CLI failed: ${error instanceof Error ? error.message : String(error)}`,
       };
     }
   }

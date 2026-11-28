@@ -5,21 +5,22 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { auditRepo, initHarness } from '../src/index.js';
 import type { AuditReport, CheckResult } from '../src/types.js';
 import { branchNotes } from '../src/renderers/gates.js';
-import { createTempRepo, type TempRepo } from './fixtures.js';
+import { createTempRepo } from './fixtures.js';
+import type { TempRepo } from './fixtures.js';
 
-const repos: TempRepo[] = [];
+const repos: Array<TempRepo> = [];
 const temp = (prefix: string): TempRepo => {
   const r = createTempRepo(prefix);
   repos.push(r);
   return r;
 };
 afterEach(() => {
-  while (repos.length > 0) repos.pop()!.cleanup();
+  while (repos.length > 0) {repos.pop()!.cleanup();}
 });
 
 const check = (report: AuditReport, id: string): CheckResult => {
   const found = report.checks.find((c) => c.id === id);
-  if (!found) throw new Error(`no check ${id}`);
+  if (!found) {throw new Error(`no check ${id}`);}
   return found;
 };
 const evidence = (report: AuditReport, id: string): string => check(report, id).evidence.join('\n');
@@ -81,8 +82,8 @@ describe('scan: what git shows a teammate is what gets audited', () => {
     const repo = temp('ha-walk-');
     repo.write('AGENTS.md', '# App\nRun `swift test`.\nMore.\nMore.\nMore.\n');
     repo.write('Package.swift', '// swift-tools-version: 6.0\n');
-    for (let i = 0; i < 30; i++) repo.write(`.build/checkouts/dep/File${i}.swift`, 'x\n');
-    for (let i = 0; i < 30; i++) repo.write(`.derivedData-signed/Build/Thing${i}.swift`, 'x\n');
+    for (let i = 0; i < 30; i++) {repo.write(`.build/checkouts/dep/File${i}.swift`, 'x\n');}
+    for (let i = 0; i < 30; i++) {repo.write(`.derivedData-signed/Build/Thing${i}.swift`, 'x\n');}
     repo.write('Sources/App/Main.swift', 'print("hi")\n');
 
     const report = auditRepo(repo.dir);
@@ -141,7 +142,7 @@ describe('instruction files', () => {
     repo.write('migrations/CLAUDE.md', '# Migration rules\n');
     repo.write('.cursor/rules/README.md', '# How these rules are organised\n');
     repo.write('.cursor/rules/api.mdc', '---\nglobs: "src/api/**"\n---\nKeep handlers thin.\n');
-    for (let i = 0; i < 45; i++) repo.write(`src/mod${i}.ts`, 'export {};\n');
+    for (let i = 0; i < 45; i++) {repo.write(`src/mod${i}.ts`, 'export {};\n');}
 
     const report = auditRepo(repo.dir);
     expect(check(report, 'intent.scoped-rules').status).toBe('pass');
@@ -369,7 +370,7 @@ describe('init', () => {
     expect(agents).not.toContain('run typecheck');
 
     initHarness(repo.dir, { tools: ['claude-code'] });
-    const settings = JSON.parse(readFileSync(join(repo.dir, '.claude/settings.json'), 'utf8')) as { permissions: { allow: string[]; deny: string[] } };
+    const settings = JSON.parse(readFileSync(join(repo.dir, '.claude/settings.json'), 'utf8')) as { permissions: { allow: Array<string>; deny: Array<string> } };
     expect(settings.permissions.allow).toContain('Bash(bun run test:*)');
     expect(settings.permissions.deny).toContain('Bash(bun run deploy:*)');
     expect(settings.permissions.deny).toContain('Bash(wrangler deploy:*)');
@@ -427,8 +428,8 @@ describe('what a command proves', () => {
     repo.write('package.json', JSON.stringify({ name: 'mono', workspaces: ['client', 'api'] }));
     repo.write('client/tsconfig.json', '{ "compilerOptions": { "strict": true } }');
     repo.write('packages/data/tsconfig.json', '{ "compilerOptions": { "strict": true } }');
-    for (let i = 0; i < 12; i++) repo.write(`client/src/c${i}.tsx`, 'export {};\n');
-    for (let i = 0; i < 4; i++) repo.write(`api/server/s${i}.js`, 'module.exports = {};\n');
+    for (let i = 0; i < 12; i++) {repo.write(`client/src/c${i}.tsx`, 'export {};\n');}
+    for (let i = 0; i < 4; i++) {repo.write(`api/server/s${i}.js`, 'module.exports = {};\n');}
     const report = auditRepo(repo.dir);
     expect(report.stack.languages).toContain('TypeScript');
     const types = check(report, 'loop.static-types');
@@ -477,7 +478,7 @@ describe('people, briefs and boundaries', () => {
       'CLAUDE.md',
       '# App\n\n| Before touching | Read |\n| --- | --- |\n| `src/billing/` | `docs/billing.md` |\n| `src/auth/` | `docs/auth.md` |\n| `migrations/` | `docs/migrations.md` |\n',
     );
-    for (const d of ['billing', 'auth', 'migrations']) repo.write(`docs/${d}.md`, '# Rules\n');
+    for (const d of ['billing', 'auth', 'migrations']) {repo.write(`docs/${d}.md`, '# Rules\n');}
     const map = check(auditRepo(repo.dir), 'graph.workspace-boundaries');
     expect(map.status).toBe('pass');
     expect(map.evidence[0]).toContain('CLAUDE.md maps areas to 3 doc(s)');
@@ -656,7 +657,7 @@ describe('weak evidence is no claim', () => {
     repo.write('package.json', JSON.stringify({ name: 'site', scripts: { test: 'bun scripts/url-fixtures/run.ts && bun scripts/tracking-fixtures/run.ts' } }));
     repo.write('scripts/url-fixtures/run.ts', 'if (slug("A b") !== "a-b") process.exit(1);\n');
     repo.write('scripts/tracking-fixtures/run.ts', 'if (!event) process.exit(1);\n');
-    for (let i = 0; i < 12; i++) repo.write(`src/page${i}.ts`, 'export {};\n');
+    for (let i = 0; i < 12; i++) {repo.write(`src/page${i}.ts`, 'export {};\n');}
     const report = auditRepo(repo.dir);
     const tests = check(report, 'verification.unit-tests');
     expect(tests.status).not.toBe('fail');
@@ -737,7 +738,7 @@ describe('weak evidence is no claim', () => {
     const repo = temp('ha-nested-');
     repo.write('micro/package.json', JSON.stringify({ name: 'micro', scripts: { test: 'vitest run', lint: 'eslint .' }, dependencies: { hono: '^5.0.0' }, devDependencies: { typescript: '^6.0.0' } }));
     repo.write('micro/package-lock.json', '{}\n');
-    for (let i = 0; i < 8; i++) repo.write(`micro/src/m${i}.tsx`, 'export {};\n');
+    for (let i = 0; i < 8; i++) {repo.write(`micro/src/m${i}.tsx`, 'export {};\n');}
     const report = auditRepo(repo.dir);
     expect(report.stack.languages).toContain('TypeScript');
     expect(report.stack.frameworks).toContain('Hono');
@@ -765,7 +766,7 @@ describe('weak evidence is no claim', () => {
     app.write('package.json', JSON.stringify({ name: 'app', dependencies: { next: '^16.0.0' } }));
     // A handful of files: a second checkout is a rare need, so the gap is advice.
     expect(check(auditRepo(app.dir), 'graph.worktree-isolation').status).toBe('warn');
-    for (let i = 0; i < 20; i++) app.write(`src/page${i}.ts`, 'export const page = 1;\n');
+    for (let i = 0; i < 20; i++) {app.write(`src/page${i}.ts`, 'export const page = 1;\n');}
     expect(check(auditRepo(app.dir), 'graph.worktree-isolation').status).toBe('fail');
   });
 
@@ -825,7 +826,7 @@ describe('levels rest on what is certain', () => {
     repo.write('package.json', JSON.stringify({ name: 'plugins', scripts: { check: 'bun check', lint: 'oxlint' }, devDependencies: { oxlint: '^1.0.0', typescript: '^6.0.0' } }));
     repo.write('tsconfig.json', '{ "compilerOptions": { "strict": true } }');
     repo.write('CLAUDE.md', '# Plugins\n\nRun `bun test` before finishing. No tests yet.\nRun `bun run check` and `bun run lint`.\nA\nB\n');
-    for (let i = 0; i < 12; i++) repo.write(`src/plugin${i}.ts`, 'export {};\n');
+    for (let i = 0; i < 12; i++) {repo.write(`src/plugin${i}.ts`, 'export {};\n');}
     const report = auditRepo(repo.dir);
     const tests = check(report, 'verification.unit-tests');
     expect(tests.status).toBe('fail');
@@ -1203,7 +1204,7 @@ describe('the repository\'s own words and guards', () => {
     const repo = temp('ha-behind-');
     repo.write('package.json', JSON.stringify({ name: 'app', scripts: { test: 'vitest run' } }));
     repo.commit();
-    const git = (...args: string[]): void => void execFileSync('git', args, { cwd: repo.dir, stdio: 'ignore' });
+    const git = (...args: Array<string>): void => void execFileSync('git', args, { cwd: repo.dir, stdio: 'ignore' });
     git('branch', '-m', 'main');
     git('branch', 'fix/geo');
     repo.write('.github/workflows/ci.yml', 'on: [pull_request]\njobs:\n  t:\n    runs-on: ubuntu-latest\n    steps:\n      - run: npm test\n');
@@ -1270,25 +1271,25 @@ describe('robustness: no input makes the audit hang', () => {
     const blob = [
       `packages:\n${'  Kit:\n    path: Packages/Kit\n'.repeat(400)}`,
       '  - name: value   \n'.repeat(3000),
-      `${' '.repeat(20000)}\n`,
+      `${' '.repeat(20_000)}\n`,
       `${'\`a\` '.repeat(4000)}\n`,
       '---\n'.repeat(1500),
       `${'never deploy production only '.repeat(2500)}\n`,
       `${'A=B '.repeat(4000)}\n`,
       `[dev]\n${'port  \n'.repeat(2000)}`,
       `${'"remote" : tru '.repeat(3000)}\n`,
-      `sk-ant-${'a'.repeat(30000)}\n`,
+      `sk-ant-${'a'.repeat(30_000)}\n`,
       `(${'docs/'.repeat(3000)}x\n`,
-      `${'\t'.repeat(15000)}x\n`,
+      `${'\t'.repeat(15_000)}x\n`,
     ].join('');
     const files = ['AGENTS.md', 'CLAUDE.md', 'README.md', 'project.yml', 'wrangler.toml', 'wrangler.jsonc', '.github/workflows/ci.yml', 'Makefile', 'pyproject.toml', 'Package.swift', 'build.gradle.kts', '.cursor/rules/x.mdc', '.claude/settings.json', 'playwright.config.ts', 'vite.config.ts', 'tsconfig.json', 'src/index.ts', 'tests/a.test.ts', '.env.example', 'Dockerfile', '.mcp.json', '.github/pull_request_template.md', 'App.xcodeproj/project.pbxproj', 'justfile', 'docs/architecture.md', '.claude/rules/a.md'];
-    for (const f of files) repo.write(f, blob);
-    repo.write('package.json', JSON.stringify({ name: 'x', scripts: { dev: `${'A=B '.repeat(3000)}vite`, test: `vitest run ${' && echo x'.repeat(2000)}`, deploy: `${' '.repeat(10000)}wrangler deploy` } }));
+    for (const f of files) {repo.write(f, blob);}
+    repo.write('package.json', JSON.stringify({ name: 'x', scripts: { dev: `${'A=B '.repeat(3000)}vite`, test: `vitest run ${' && echo x'.repeat(2000)}`, deploy: `${' '.repeat(10_000)}wrangler deploy` } }));
     const started = Date.now();
     const report = auditRepo(repo.dir);
-    expect(Date.now() - started).toBeLessThan(10000);
+    expect(Date.now() - started).toBeLessThan(10_000);
     expect(report.checks.length).toBe(30);
-  }, 60000);
+  }, 60_000);
 });
 
 describe('claims about the running app', () => {
@@ -1539,7 +1540,7 @@ describe('what the last fresh panel still got past the audit', () => {
     const repo = temp('ha-forbidden-');
     repo.write('package.json', JSON.stringify({ name: 'mono', scripts: { test: 'vitest run', check: 'tsc --noEmit' }, dependencies: { vite: '^8.0.0' }, devDependencies: { typescript: '^6.0.0' } }));
     repo.write('AGENTS.md', '# Mono\n\n- Never run `npm test` from the root; run the package you changed.\n- Multiple agents may work on different files in the same worktree simultaneously.\n- After code changes run `npm run check`.\nA\n');
-    for (let i = 0; i < 20; i++) repo.write(`src/m${i}.ts`, 'export const m = 1;\n');
+    for (let i = 0; i < 20; i++) {repo.write(`src/m${i}.ts`, 'export const m = 1;\n');}
     const settings = initHarness(repo.dir, { dryRun: true, tools: ['claude-code'] }).actions.find((a) => a.path === '.claude/settings.json')!.content;
     expect(settings).toContain('Bash(npm run check:*)');
     expect(settings).not.toContain('Bash(npm test:*)');

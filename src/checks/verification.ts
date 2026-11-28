@@ -1,8 +1,8 @@
 import type { RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
 
-export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
-  const results: CheckResult[] = [];
+export function runVerificationChecks(ctx: RepoContext): Array<CheckResult> {
+  const results: Array<CheckResult> = [];
 
   // A test command that comes from a manifest, a build tool or a checked-in script. Never from the
   // brief alone: "run `bun test`" above the words "no tests yet" is not a suite.
@@ -16,13 +16,13 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     const srcCount = ctx.sourceFiles.length;
     const ratio = srcCount > 0 ? testCount / srcCount : testCount > 0 ? 1 : 0;
 
-    const evidence: string[] = [
+    const evidence: Array<string> = [
       `Detected ${testCount} test file(s) vs ${srcCount} source file(s) (ratio: ${srcCount > 0 ? (ratio * 100).toFixed(1) + '%' : 'n/a'})`,
     ];
     if (testCount > 0) {
       evidence.push(`Sample: ${allTestFiles.slice(0, 4).join(', ')}`);
     }
-    if (commandTargets.length > 0) evidence.push(`${commandTargets.length} of them are run by the test command without a test-style name (${commandTargets.slice(0, 2).join(', ')})`);
+    if (commandTargets.length > 0) {evidence.push(`${commandTargets.length} of them are run by the test command without a test-style name (${commandTargets.slice(0, 2).join(', ')})`);}
 
     let status: CheckResult['status'] = 'fail';
     if (testCount >= 3 && (ratio >= 0.12 || testCount >= 15)) {
@@ -64,12 +64,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
 
   // 2. verification.e2e-tests
   {
-    const e2eSignals: string[] = [];
+    const e2eSignals: Array<string> = [];
     if (ctx.hasAnyFile(['playwright.config.ts', 'playwright.config.js', 'playwright.config.mjs']) || ctx.hasDependency('@playwright/test') || ctx.hasDependency('playwright')) {
       e2eSignals.push('Playwright');
     }
     const e2eNamed = ctx.findFiles((f) => /(^|\/)[\w.-]*e2e[\w.-]*\//i.test(f) || /\.e2e(-spec)?\.[jt]sx?$/.test(f)).length;
-    if (e2eNamed > 0) e2eSignals.push(`e2e suites (${e2eNamed} files in *e2e* paths)`);
+    if (e2eNamed > 0) {e2eSignals.push(`e2e suites (${e2eNamed} files in *e2e* paths)`);}
     // Rendered-UI tiers that run without a device: screenshot and Compose/SwiftUI snapshot tests.
     const buildText = ['gradle/libs.versions.toml', 'build.gradle.kts', 'Package.swift', 'project.yml'].map((f) => ctx.readText(f) ?? '').join('\n');
     // A declared library is not a test: look for sources that use it.
@@ -77,7 +77,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       .filter((f) => /\.(kt|java|swift)$/.test(f))
       .slice(0, 400)
       .filter((f) => /captureRoboImage|Paparazzi|createComposeRule|createAndroidComposeRule|RobolectricTestRunner|assertSnapshot|XCUIApplication/.test(ctx.readText(f) ?? '')).length;
-    if (uiTestSources > 0) e2eSignals.push(`Rendered-UI tests (${uiTestSources} files using Compose rules, Robolectric, Roborazzi/Paparazzi or snapshot assertions)`);
+    if (uiTestSources > 0) {e2eSignals.push(`Rendered-UI tests (${uiTestSources} files using Compose rules, Robolectric, Roborazzi/Paparazzi or snapshot assertions)`);}
     const uiLibsOnly = uiTestSources === 0 && /roborazzi|paparazzi|robolectric|ui-test-junit4|swift-snapshot-testing/i.test(buildText);
     if (ctx.hasAnyFile(['cypress.config.ts', 'cypress.config.js', 'cypress.json']) || ctx.hasDependency('cypress')) {
       e2eSignals.push('Cypress');
@@ -101,12 +101,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       e2eSignals.push(`e2e/integration files (${e2eDirs.length})`);
     }
     const androidUi = ctx.findFiles((f) => /\/androidTest\//.test(f)).length;
-    if (androidUi > 0) e2eSignals.push(`Android instrumented tests (${androidUi} files in androidTest/)`);
+    if (androidUi > 0) {e2eSignals.push(`Android instrumented tests (${androidUi} files in androidTest/)`);}
     const xcUi = ctx.findFiles((f) => /UITests\/[^/]+\.swift$/.test(f)).length;
-    if (xcUi > 0) e2eSignals.push(`XCUITest UI tests (${xcUi} files)`);
-    if (ctx.findFiles((f) => /^\.maestro\//.test(f)).length > 0) e2eSignals.push('Maestro flows');
-    if (ctx.hasDependency('detox')) e2eSignals.push('Detox');
-    if (ctx.findFiles((f) => /(^|\/)integration_test\/.+\.dart$/.test(f)).length > 0) e2eSignals.push('Flutter integration tests');
+    if (xcUi > 0) {e2eSignals.push(`XCUITest UI tests (${xcUi} files)`);}
+    if (ctx.findFiles((f) => /^\.maestro\//.test(f)).length > 0) {e2eSignals.push('Maestro flows');}
+    if (ctx.hasDependency('detox')) {e2eSignals.push('Detox');}
+    if (ctx.findFiles((f) => /(^|\/)integration_test\/.+\.dart$/.test(f)).length > 0) {e2eSignals.push('Flutter integration tests');}
 
     const isMobileApp = ctx.stack.frameworks.some((fw) => ['Android', 'SwiftUI', 'Flutter', 'Expo'].includes(fw)) || ctx.stack.packageManagers.includes('xcodebuild');
     const isWebOrService =
@@ -127,7 +127,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     const e2eInVerify = ['verify', 'check', 'ci', 'validate', 'test'].some((n) => /playwright|cypress|e2e/i.test(scripts[n] ?? ''));
     const neverRun = browserSuite.length > 0 && ctx.ci.files.length > 0 && !e2eInCi && !e2eInVerify && !liveOnly;
     const otherTiers = e2eSignals.filter((s) => /runtime tests|contract tests|instrumented|XCUITest|Maestro|Detox|Flutter|Rendered-UI/.test(s)).length;
-    if (neverRun) e2eSignals.push(`${browserSuite.join(' / ')} is set up, but no CI job and no verify script runs it`);
+    if (neverRun) {e2eSignals.push(`${browserSuite.join(' / ')} is set up, but no CI job and no verify script runs it`);}
 
     let status: CheckResult['status'] = 'pass';
     if (liveOnly) {
@@ -180,7 +180,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
 
   // 3. verification.oracle-protection
   {
-    const evidence: string[] = [];
+    const evidence: Array<string> = [];
     const codeownersPath = ctx.hasAnyFile(['.github/CODEOWNERS', 'CODEOWNERS', 'docs/CODEOWNERS']);
     let protectsOracle = false;
 
@@ -206,12 +206,12 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
           ? `${codeownersPath} covers ${covered.join(', ')}`
           : `${codeownersPath} exists but covers neither tests nor .github/workflows (${patterns.length} rule(s): ${patterns.slice(0, 3).join(', ')}${patterns.length > 3 ? ', …' : ''})`,
       );
-      if (guardsTests || guardsCi) protectsOracle = true;
+      if (guardsTests || guardsCi) {protectsOracle = true;}
     }
 
     // Also check if .claude/settings.json denies editing tests or CI workflows
     // Only a deny rule restricts: `Edit(tests/**)` under `allow` grants the very thing.
-    const editDenies = ctx.readJson<{ permissions?: { deny?: string[] } }>('.claude/settings.json')?.permissions?.deny ?? [];
+    const editDenies = ctx.readJson<{ permissions?: { deny?: Array<string> } }>('.claude/settings.json')?.permissions?.deny ?? [];
     if (editDenies.some((rule) => /^(?:Edit|Write|MultiEdit)\([^)]*(?:tests?\b|\.github|playwright|vitest|e2e)/i.test(rule))) {
       evidence.push('.claude/settings.json restricts agent edits to test/CI paths');
       protectsOracle = true;
@@ -274,10 +274,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
 
   // 4. verification.test-quality-scan
   {
-    const onlyHits: string[] = [];
-    const skipHits: string[] = [];
-    const emptyTestHits: string[] = [];
-    const tautologyHits: string[] = [];
+    const onlyHits: Array<string> = [];
+    const skipHits: Array<string> = [];
+    const emptyTestHits: Array<string> = [];
+    const tautologyHits: Array<string> = [];
     let tsIgnoreCount = 0;
     let eslintDisableCount = 0;
     const tsIgnoreFiles: Array<{ file: string; count: number }> = [];
@@ -286,14 +286,14 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     const sampleTests = allTestFiles.slice(0, 1500);
     for (const tf of sampleTests) {
       const content = ctx.readText(tf);
-      if (!content) continue;
+      if (!content) {continue;}
       // Skip fixtures or test files that explicitly test our own scanner or regex literals if they mention tautology?
       // No — check line by line accurately outside comments!
       const lines = content.split(/\r?\n/);
       for (let idx = 0; idx < lines.length; idx++) {
         const line = lines[idx] ?? '';
         const trimmed = line.trim();
-        if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('#')) continue;
+        if (trimmed.startsWith('//') || trimmed.startsWith('*') || trimmed.startsWith('#')) {continue;}
 
         // Matchers are anchored to the start of the statement: the same call quoted inside a
         // string (a fixture a test writes to disk) is data, not a test.
@@ -328,7 +328,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     const sampleSources = ctx.sourceFiles.slice(0, 5000);
     for (const sf of sampleSources) {
       const content = ctx.readText(sf);
-      if (!content) continue;
+      if (!content) {continue;}
       // A suppression only works as the start of a comment; the same words inside a string or a
       // regular expression (a linter's own source, a prompt) suppress nothing.
       const tsMatches = content.match(/(?:\/\/|\/\*)\s*@ts-(?:ignore|nocheck)\b/g);
@@ -337,7 +337,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         tsIgnoreFiles.push({ file: sf, count: tsMatches.length });
       }
       const esMatches = content.match(/(?:\/\/|\/\*)\s*(?:eslint|oxlint|biome)-(?:disable|ignore)(?:-next-line|-line)?\b|#\s*type:\s*ignore\b|@Suppress(?:Warnings)?\(|\/\/\s*swiftlint:disable\b/g);
-      if (esMatches) eslintDisableCount += esMatches.length;
+      if (esMatches) {eslintDisableCount += esMatches.length;}
     }
 
     const suppressionRate = sampleSources.length > 0 ? (tsIgnoreCount + eslintDisableCount) / sampleSources.length : 0;
@@ -348,7 +348,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     const placeholders = tautologyHits.length + emptyTestHits.length;
     const tsIgnoreFail = tsIgnoreCount >= 15 && tsIgnoreCount / Math.max(sampleSources.length, 1) > 0.02;
 
-    const evidence: string[] = [];
+    const evidence: Array<string> = [];
     const nothingToTest =
       sampleTests.length === 0 && (ctx.sourceFiles.length === 0 || (ctx.sourceFiles.length < 3 && ctx.stack.languages.length === 0));
     // A test command runs, but its files could not be identified: nothing to scan, and no verdict.
@@ -363,10 +363,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
       const of = (read: number, total: number): string => (read < total ? `${read} of ${total}` : String(read));
       evidence.push(`Scanned ${of(sampleTests.length, allTestFiles.length)} test file(s) and ${of(sampleSources.length, ctx.sourceFiles.length)} source file(s)`);
     }
-    if (onlyHits.length > 0) evidence.push(`.only() left in tests (${onlyHits.length}): ${onlyHits.slice(0, 3).join(', ')}`);
-    if (emptyTestHits.length > 0) evidence.push(`Empty test blocks (${emptyTestHits.length}): ${emptyTestHits.slice(0, 3).join(', ')}`);
-    if (tautologyHits.length > 0) evidence.push(`Constant-to-constant tautology assertions (${tautologyHits.length}): ${tautologyHits.slice(0, 3).join(', ')}`);
-    if (skipHits.length > 0) evidence.push(`Skipped tests (${skipHits.length}): ${skipHits.slice(0, 3).join(', ')}`);
+    if (onlyHits.length > 0) {evidence.push(`.only() left in tests (${onlyHits.length}): ${onlyHits.slice(0, 3).join(', ')}`);}
+    if (emptyTestHits.length > 0) {evidence.push(`Empty test blocks (${emptyTestHits.length}): ${emptyTestHits.slice(0, 3).join(', ')}`);}
+    if (tautologyHits.length > 0) {evidence.push(`Constant-to-constant tautology assertions (${tautologyHits.length}): ${tautologyHits.slice(0, 3).join(', ')}`);}
+    if (skipHits.length > 0) {evidence.push(`Skipped tests (${skipHits.length}): ${skipHits.slice(0, 3).join(', ')}`);}
     if (tsIgnoreCount > 0 || eslintDisableCount > 0) {
       evidence.push(`Suppressions in ${sampleSources.length} source file(s): ${tsIgnoreCount} @ts-ignore/@ts-nocheck, ${eslintDisableCount} lint/type suppressions`);
     }
@@ -388,7 +388,7 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
     }
 
     // One sentence per kind of finding, so the fix never talks about something the scan did not see.
-    const qualityFix = { en: [] as string[], pl: [] as string[] };
+    const qualityFix = { en: [] as Array<string>, pl: [] as Array<string> };
     if (onlyHits.length > 0) {
       qualityFix.en.push('Remove the `.only()` calls listed above (they silently drop every other test from the run).');
       qualityFix.pl.push('Usuń wymienione wyżej wywołania `.only()` (po cichu wyłączają pozostałe testy).');
@@ -438,10 +438,10 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
 
   // 5. verification.automated-pr-review
   {
-    const reviewConfigs: string[] = [];
-    if (ctx.hasFile('.cursor/BUGBOT.md')) reviewConfigs.push('.cursor/BUGBOT.md');
-    if (ctx.hasAnyFile(['.coderabbit.yaml', '.coderabbit.yml'])) reviewConfigs.push('CodeRabbit config');
-    if (ctx.hasAnyFile(['dangerfile.ts', 'dangerfile.js', '.reviewdog.yml'])) reviewConfigs.push('Danger/reviewdog');
+    const reviewConfigs: Array<string> = [];
+    if (ctx.hasFile('.cursor/BUGBOT.md')) {reviewConfigs.push('.cursor/BUGBOT.md');}
+    if (ctx.hasAnyFile(['.coderabbit.yaml', '.coderabbit.yml'])) {reviewConfigs.push('CodeRabbit config');}
+    if (ctx.hasAnyFile(['dangerfile.ts', 'dangerfile.js', '.reviewdog.yml'])) {reviewConfigs.push('Danger/reviewdog');}
 
     const workflows = ctx.findFiles((f) => /^\.github\/workflows\/.+\.ya?ml$/.test(f));
     for (const wf of workflows) {
@@ -481,27 +481,27 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
 
   // 6. verification.fitness-functions
   {
-    const fitnessSignals: string[] = [];
-    if (ctx.hasAnyFile(['lighthouserc.json', 'lighthouserc.js', '.lighthouserc.json'])) fitnessSignals.push('Lighthouse CI');
-    if (ctx.hasAnyFile(['.dependency-cruiser.js', '.dependency-cruiser.cjs', '.dependency-cruiser.mjs'])) fitnessSignals.push('dependency-cruiser');
-    if (ctx.hasAnyFile(['stryker.config.mjs', 'stryker.config.json', 'stryker.conf.json'])) fitnessSignals.push('Stryker mutation testing');
-    if (ctx.hasAnyFile(['.size-limit.json', '.size-limit.cjs']) || ctx.hasDependency('size-limit')) fitnessSignals.push('size-limit bundle budget');
+    const fitnessSignals: Array<string> = [];
+    if (ctx.hasAnyFile(['lighthouserc.json', 'lighthouserc.js', '.lighthouserc.json'])) {fitnessSignals.push('Lighthouse CI');}
+    if (ctx.hasAnyFile(['.dependency-cruiser.js', '.dependency-cruiser.cjs', '.dependency-cruiser.mjs'])) {fitnessSignals.push('dependency-cruiser');}
+    if (ctx.hasAnyFile(['stryker.config.mjs', 'stryker.config.json', 'stryker.conf.json'])) {fitnessSignals.push('Stryker mutation testing');}
+    if (ctx.hasAnyFile(['.size-limit.json', '.size-limit.cjs']) || ctx.hasDependency('size-limit')) {fitnessSignals.push('size-limit bundle budget');}
 
     const pkg = ctx.packageJson;
-    const unwiredChecks: string[] = [];
+    const unwiredChecks: Array<string> = [];
     if (pkg?.scripts) {
       // An invariant check counts when the loop runs it: another script calls it, or CI does. A
       // script someone runs by hand to look at production jobs is a monitor, not a fitness function.
       const ciText = ctx.ci.files.map((f) => ctx.readText(f) ?? '').join('\n');
       const unwired = unwiredChecks;
       const wired = (name: string): boolean => {
-        const call = new RegExp(`(?:^|[\\s"'])${name.replace(/[.*+?^$()|[\]{}\\]/g, '\\$&')}(?:$|[\\s"'&;])`, 'm');
+        const call = new RegExp(`(?:^|[\\s"'])${name.replaceAll(/[.*+?^$()|[\]{}\\]/g, String.raw`\$&`)}(?:$|[\\s"'&;])`, 'm');
         // Called by name, or the program it runs is also run by another script or by CI.
         const programs = (pkg.scripts?.[name] ?? '').match(/\bscripts?\/[\w./-]+/g) ?? [];
         // The scripts that make up the loop: an alias that runs the same program is not one of them.
         const loop = Object.entries(pkg.scripts ?? {}).filter(([other]) => other !== name && /^(?:pre[\w:-]*|lint|check|verify|test|ci|validate|build|deploy)$/.test(other)).map(([, body]) => body);
         const runs = /^(lint|check|verify|test|ci|validate)$/.test(name) || call.test(ciText) || loop.some((body) => call.test(body) || programs.some((p) => body.includes(p))) || programs.some((p) => ciText.includes(p));
-        if (!runs && /^(check|lint|verify|guard|validate)[:-]/.test(name) && !unwired.includes(name)) unwired.push(name);
+        if (!runs && /^(check|lint|verify|guard|validate)[:-]/.test(name) && !unwired.includes(name)) {unwired.push(name);}
         return runs;
       };
       for (const [k, v] of Object.entries(pkg.scripts)) {
@@ -513,23 +513,23 @@ export function runVerificationChecks(ctx: RepoContext): CheckResult[] {
         }
         // A repository's own invariant checks: `check:design`, or a lint script that runs scripts/check-*.mjs.
         const ownChecks = wired(k) ? v.match(/\bscripts\/check-[\w.-]+/g) : null;
-        if (ownChecks) fitnessSignals.push(`invariant checks in \`${k}\`: ${[...new Set(ownChecks)].slice(0, 3).join(', ')}`);
+        if (ownChecks) {fitnessSignals.push(`invariant checks in \`${k}\`: ${[...new Set(ownChecks)].slice(0, 3).join(', ')}`);}
         // `check:design`, `lint:design`, `verify:deps`: a named check that runs the repository's own program.
         else if (wired(k) && /^(check|lint|verify|guard|validate):(?!types?$|ts$|fix$)[\w-]+$/.test(k) && /\b(node|bun|tsx|deno|python3?)\s+\S*scripts?\//.test(v)) {
           fitnessSignals.push(`invariant check: \`${k}\``);
-        } else if (wired(k) && /^check:(?!types?$|ts$)[\w-]+$/.test(k)) fitnessSignals.push(`script: ${k}`);
+        } else if (wired(k) && /^check:(?!types?$|ts$)[\w-]+$/.test(k)) {fitnessSignals.push(`script: ${k}`);}
       }
     }
-    if (ctx.hasAnyFile(['knip.json', 'knip.jsonc', 'knip.ts', '.knip.json'])) fitnessSignals.push('Knip (unused code and dependencies)');
+    if (ctx.hasAnyFile(['knip.json', 'knip.jsonc', 'knip.ts', '.knip.json'])) {fitnessSignals.push('Knip (unused code and dependencies)');}
     // A lint rule that fences one layer off from another is an architecture test that runs on every lint.
     const lintConfig = ['eslint.config.js', 'eslint.config.mjs', 'eslint.config.cjs', 'eslint.config.ts', '.eslintrc.json', '.eslintrc.js', '.eslintrc.cjs', '.oxlintrc.json', 'oxlint.json', 'biome.json', 'biome.jsonc', 'vite.config.ts'].find((f) =>
       /no-restricted-imports|no-restricted-paths|noRestrictedImports|boundaries\/element-types|import\/no-cycle/.test(ctx.readText(f) ?? ''),
     );
-    if (lintConfig) fitnessSignals.push(`Import-boundary lint rule in ${lintConfig}`);
-    if (ctx.hasFile('.periphery.yml')) fitnessSignals.push('Periphery (unused Swift code)');
+    if (lintConfig) {fitnessSignals.push(`Import-boundary lint rule in ${lintConfig}`);}
+    if (ctx.hasFile('.periphery.yml')) {fitnessSignals.push('Periphery (unused Swift code)');}
     const gradleCatalog = `${ctx.readText('gradle/libs.versions.toml') ?? ''}\n${ctx.readText('build.gradle.kts') ?? ''}`;
-    if (/kover|jacoco/i.test(gradleCatalog)) fitnessSignals.push('JVM coverage tooling (Kover/JaCoCo)');
-    if (/dependency-?guard|dependencyAnalysis/i.test(gradleCatalog)) fitnessSignals.push('Gradle dependency guard');
+    if (/kover|jacoco/i.test(gradleCatalog)) {fitnessSignals.push('JVM coverage tooling (Kover/JaCoCo)');}
+    if (/dependency-?guard|dependencyAnalysis/i.test(gradleCatalog)) {fitnessSignals.push('Gradle dependency guard');}
 
     // Coverage thresholds in vitest/jest/pyproject
     const testConfigs = ['vitest.config.ts', 'vite.config.ts', 'jest.config.ts', 'jest.config.js', 'pyproject.toml'];

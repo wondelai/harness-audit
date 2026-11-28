@@ -26,12 +26,12 @@ interface ParsedArgs {
   dryRun: boolean;
   force: boolean;
   verbose: boolean;
-  tools?: SupportedTool[];
+  tools?: Array<SupportedTool>;
   help: boolean;
   version: boolean;
 }
 
-function parseArgs(argv: string[]): ParsedArgs {
+function parseArgs(argv: Array<string>): ParsedArgs {
   const args: ParsedArgs = {
     command: 'audit',
     targetPath: '.',
@@ -50,7 +50,7 @@ function parseArgs(argv: string[]): ParsedArgs {
     version: false,
   };
 
-  const positional: string[] = [];
+  const positional: Array<string> = [];
 
   for (let i = 0; i < argv.length; i++) {
     const token = argv[i]!;
@@ -83,7 +83,7 @@ function parseArgs(argv: string[]): ParsedArgs {
       }
     } else if (token === '--out' || token.startsWith('--out=')) {
       const val = token.includes('=') ? token.split('=')[1] : argv[++i];
-      if (!val) throw new Error('Missing value for --out');
+      if (!val) {throw new Error('Missing value for --out');}
       args.out = val;
     } else if (token === '--lang' || token.startsWith('--lang=')) {
       const val = token.includes('=') ? token.split('=')[1] : argv[++i];
@@ -108,9 +108,9 @@ function parseArgs(argv: string[]): ParsedArgs {
       }
     } else if (token === '--tools' || token.startsWith('--tools=')) {
       const val = token.includes('=') ? token.split('=')[1] : argv[++i];
-      if (!val) throw new Error('Missing value for --tools');
+      if (!val) {throw new Error('Missing value for --tools');}
       const list = val.split(',').map((s) => s.trim()).filter(Boolean);
-      const valid: SupportedTool[] = [];
+      const valid: Array<SupportedTool> = [];
       for (const item of list) {
         if (item === 'claude-code' || item === 'cursor' || item === 'codex') {
           valid.push(item);
@@ -218,7 +218,7 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err) => {
-  process.stderr.write(`harness-audit error: ${err instanceof Error ? err.message : String(err)}\n`);
+main().catch((error) => {
+  process.stderr.write(`harness-audit error: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 2;
 });

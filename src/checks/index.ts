@@ -7,7 +7,7 @@ import { runLoopChecks } from './loop.js';
 import { runReleaseChecks } from './release.js';
 import { runVerificationChecks } from './verification.js';
 
-export function runAllChecks(ctx: RepoContext): CheckResult[] {
+export function runAllChecks(ctx: RepoContext): Array<CheckResult> {
   return [
     ...runIntentChecks(ctx),
     ...runHarnessChecks(ctx),

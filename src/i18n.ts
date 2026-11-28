@@ -23,7 +23,7 @@ export interface StationMeta {
   docsPath: string;
 }
 
-export const STATIONS: readonly StationMeta[] = [
+export const STATIONS: ReadonlyArray<StationMeta> = [
   {
     id: 'intent',
     order: 1,

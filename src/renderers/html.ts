@@ -3,11 +3,11 @@ import type { AuditReport, AutonomyLevel, CheckStatus, RenderOptions } from '../
 
 function escapeHtml(value: string): string {
   return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;');
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll('\'', '&#39;');
 }
 
 function statusClass(status: CheckStatus): string {
@@ -37,7 +37,7 @@ function statusLabel(status: CheckStatus, lang: 'en' | 'pl'): string {
 }
 
 function renderLadderRuler(current: AutonomyLevel, raw: AutonomyLevel, lang: 'en' | 'pl'): string {
-  const rungs: AutonomyLevel[] = [0, 1, 2, 3, 4, 5];
+  const rungs: Array<AutonomyLevel> = [0, 1, 2, 3, 4, 5];
   return `<div class="ladder-grid" role="list" aria-label="${escapeHtml(t(UI.autonomyLevel, lang))}">
 ${rungs
   .map((lvl) => {

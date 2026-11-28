@@ -9,7 +9,7 @@ export interface BriefLine {
 /** What the root agent instructions say, read once and shared by every check that asks. */
 export interface BriefFacts {
   /** Root brief files that exist, in reading order: AGENTS.md, CLAUDE.md. */
-  files: string[];
+  files: Array<string>;
   /** The file that holds the brief's substance: where a fix should be written and what a budget measures. */
   primary: string;
   /** A short AGENTS.md (or CLAUDE.md) whose job is to send the reader to the other file. */
@@ -21,17 +21,17 @@ export interface BriefFacts {
   stub: { file: string; lines: number; real: string } | undefined;
   text: string;
   /** Docs inside the repository that the brief sends agents to. */
-  routedDocs: string[];
+  routedDocs: Array<string>;
   /** AGENTS.md / CLAUDE.md files below the root, outside vendored skill and plugin folders. */
-  nestedBriefs: string[];
+  nestedBriefs: Array<string>;
   /** Sentences that forbid or reserve an action on a production or shared resource. */
-  boundaryRules: BriefLine[];
+  boundaryRules: Array<BriefLine>;
   /** Sentences that say local work reaches production (`wrangler dev --remote`, "talks to production"). */
-  productionReach: BriefLine[];
+  productionReach: Array<BriefLine>;
   /** A section or table that maps areas of the codebase to rules or docs. */
   hasModuleMap: boolean;
   /** Commands the brief tells agents not to run ("Never run `npm test` from the root"), as quoted. */
-  forbiddenCommands: string[];
+  forbiddenCommands: Array<string>;
 }
 
 // A boundary is one sentence that forbids or reserves an action on production: the production
@@ -55,7 +55,7 @@ const REACHES_PRODUCTION = /\b(?:local\w*|dev(?:elopment)?|wrangler dev)\b[\s\S]
 // "An example that was never deployed" reports the past; it forbids nothing.
 const PAST_STATE = /\b(?:was|were|had|has|have|hasn't|haven't)\s+(?:\w+\s+)?never\s+(?:been\s+)?\w+/gi;
 /** Markdown and emoji carry no meaning for a rule: "🚨 **PRODUCTION DEPLOYS — ONE WAY ONLY**" reads as its words. */
-const plain = (text: string): string => text.replace(/\*+|~~|(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])|[^\x00-\x7F -ɏ‐-―]/g, '').replace(/\s+/g, ' ').trim();
+const plain = (text: string): string => text.replaceAll(/\*+|~~|(?<![A-Za-z0-9])_+|_+(?![A-Za-z0-9])|[^\u0000-\u007F -ɏ‐-―]/g, '').replaceAll(/\s+/g, ' ').trim();
 const MAP_HEADING = /^#{2,4}\s+(architecture|directory|structure|project structure|layout|modules?|key paths|where things live|read before (you )?touch(ing)?|ownership|architektura|struktura(?: projektu| katalog[óo]w)?|modu[łl]y)(?![\p{L}])/imu;
 
 /** Whether a document has a section that maps the code: "Architecture", "Project structure", "Struktura". */
@@ -67,7 +67,7 @@ export function hasMapSection(markdown: string): boolean {
 /** How plainly a rule forbids, and whether it names production: the clearest rule is the one to quote. */
 export function ruleStrength(text: string): number {
   // An instruction: "Never …" / "Do not …" opening a sentence, or a modal prohibition anywhere.
-  const words = text.replace(/[*_`>]/g, '');
+  const words = text.replaceAll(/[*_`>]/g, '');
   const forbids =
     /(?:^|[.:;!?—–]\s+|^[-\d.\s]+)(?:never|do not|don't)\b/im.test(words) ||
     /\b(?:must not|mustn't|must never|should never|may not|forbidden|not allowed|off-limits)\b|nigdy|nie wolno|zabronion|zakaz/i.test(words);
@@ -79,17 +79,17 @@ export function ruleStrength(text: string): number {
  * Sentences in a document that forbid or reserve an action on production (`rules`), and sentences
  * that say local work reaches production (`reach`). Rules come strongest first.
  */
-export function scanBoundaries(file: string, markdown: string): { rules: BriefLine[]; reach: BriefLine[] } {
-  const rules: BriefLine[] = [];
-  const reach: BriefLine[] = [];
+export function scanBoundaries(file: string, markdown: string): { rules: Array<BriefLine>; reach: Array<BriefLine> } {
+  const rules: Array<BriefLine> = [];
+  const reach: Array<BriefLine> = [];
   let inFence = false;
   markdown.split(/\r?\n/).forEach((raw, index) => {
-    if (/^\s*(```|~~~)/.test(raw)) inFence = !inFence;
-    if (inFence || !raw.trim() || /^\s*#/.test(raw)) return;
+    if (/^\s*(```|~~~)/.test(raw)) {inFence = !inFence;}
+    if (inFence || !raw.trim() || /^\s*#/.test(raw)) {return;}
     // Sentence by sentence: two unrelated words at opposite ends of a long line are not a rule.
     // Matching ignores markdown and emoji; the quote is the line as its author wrote it.
     for (const sentence of plain(raw).split(/(?<=[.!?;])\s+(?=[\p{Lu}`("'-])/u)) {
-      const claim = sentence.replace(PAST_STATE, '');
+      const claim = sentence.replaceAll(PAST_STATE, '');
       const limits = BOUNDARY.test(claim);
       if (REACHES_PRODUCTION.test(claim) && !limits) {
         reach.push({ file, line: index + 1, text: quote(raw) });
@@ -112,7 +112,7 @@ export function repoPathsIn(text: string, exists: (path: string) => boolean): bo
   return [...new Set(candidates)].slice(0, 200).some((p) => p.length > 3 && exists(p));
 }
 
-export function repoDocLinks(markdown: string, exists: (path: string) => boolean): string[] {
+export function repoDocLinks(markdown: string, exists: (path: string) => boolean): Array<string> {
   const paths = [...markdown.matchAll(/[`(]((?:[\w.@-]+\/)+[\w.@-]+\.mdx?)[`)#]/g)].map((m) => m[1]!.replace(/^(?:\.\/)+/, ''));
   return [...new Set(paths)].filter(exists);
 }
@@ -136,9 +136,9 @@ export function readBrief(ctx: RepoContext): BriefFacts {
       const lineCount = body.split(/\r?\n/).filter((l) => l.trim()).length;
       // A real pointer: an import line of its own, or the file named in prose. `@AGENTS.md` inside
       // backticks is an example, and Claude Code imports nothing from it.
-      const name = to.replace('.', '\\.');
+      const name = to.replace('.', String.raw`\.`);
       const pointsThere = new RegExp(`^@${name}\\s*$`, 'm').test(body) || new RegExp(`(^|[^\`@])${name}`, 'm').test(body);
-      if (lineCount <= 8 && pointsThere && contents.get(to)!.length > body.length * 2) pointer = { from, to };
+      if (lineCount <= 8 && pointsThere && contents.get(to)!.length > body.length * 2) {pointer = { from, to };}
     }
   }
   let stub: BriefFacts['stub'];
@@ -146,13 +146,13 @@ export function readBrief(ctx: RepoContext): BriefFacts {
     for (const [small, big] of [['AGENTS.md', 'CLAUDE.md'], ['CLAUDE.md', 'AGENTS.md']] as const) {
       const smallLines = contents.get(small)!.split(/\r?\n/).filter((l) => l.trim()).length;
       const importsBig = small === 'CLAUDE.md' && /^@AGENTS\.md\s*$/m.test(contents.get(small)!);
-      if (smallLines <= 20 && !importsBig && contents.get(big)!.length > contents.get(small)!.length * 4) stub = { file: small, lines: smallLines, real: big };
+      if (smallLines <= 20 && !importsBig && contents.get(big)!.length > contents.get(small)!.length * 4) {stub = { file: small, lines: smallLines, real: big };}
     }
   }
   const primary = pointer?.to ?? stub?.real ?? files[0] ?? 'AGENTS.md';
 
-  const boundaryRules: BriefLine[] = [];
-  const productionReach: BriefLine[] = [];
+  const boundaryRules: Array<BriefLine> = [];
+  const productionReach: Array<BriefLine> = [];
   for (const file of files) {
     const found = scanBoundaries(file, contents.get(file)!);
     boundaryRules.push(...found.rules);
@@ -162,11 +162,11 @@ export function readBrief(ctx: RepoContext): BriefFacts {
 
   // "Never run `npm run build`", "Do NOT run `npm test` unless asked": the backticked commands of
   // a sentence that forbids running something.
-  const forbiddenCommands: string[] = [];
+  const forbiddenCommands: Array<string> = [];
   for (const line of text.split(/\r?\n/)) {
     for (const sentence of line.split(/(?<=[.!?;])\s+/)) {
-      if (!/\b(?:never|do not|don't|must not)\b[^`.]{0,30}\b(?:run|execute|invoke|call|use)\b/i.test(sentence)) continue;
-      for (const m of sentence.matchAll(/`([^`\n]{3,80})`/g)) forbiddenCommands.push(m[1]!.trim());
+      if (!/\b(?:never|do not|don't|must not)\b[^`.]{0,30}\b(?:run|execute|invoke|call|use)\b/i.test(sentence)) {continue;}
+      for (const m of sentence.matchAll(/`([^`\n]{3,80})`/g)) {forbiddenCommands.push(m[1]!.trim());}
     }
   }
 

@@ -41,7 +41,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('computes exact station scores excluding info checks', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('a', 'intent', 'pass', 40),
       makeCheck('b', 'intent', 'warn', 40), // 20 earned out of 40
       makeCheck('c', 'intent', 'fail', 20), // 0 earned out of 20
@@ -72,7 +72,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps a high raw score at Level 3 when Verification is weak or test quality fails', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),
       makeCheck('harness.permissions-policy', 'harness', 'pass', 100),
       makeCheck('loop.single-command-verify', 'loop', 'pass', 100),
@@ -93,7 +93,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps a 90+ score at Level 3 while the harness station is below 60', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),
       makeCheck('harness.permissions-policy', 'harness', 'fail', 50),
       makeCheck('harness.secret-hygiene', 'harness', 'pass', 50),
@@ -120,7 +120,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps at Level 3 without a permission policy even when hygiene checks carry the harness station', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),
       makeCheck('harness.permissions-policy', 'harness', 'fail', 25),
       makeCheck('harness.secret-hygiene', 'harness', 'pass', 75),
@@ -138,7 +138,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps at Level 2 when there is no project brief, whatever the rest scores', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'fail', 10),
       makeCheck('intent.skills-and-specs', 'intent', 'pass', 90),
       makeCheck('harness.permissions-policy', 'harness', 'pass', 100),
@@ -178,7 +178,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps at Level 2 while local development reaches production', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),
       makeCheck('harness.permissions-policy', 'harness', 'pass', 85),
       makeCheck('harness.sandbox-readiness', 'harness', 'fail', 15, { localDevReachesProduction: true }),
@@ -195,7 +195,7 @@ describe('scoring engine & level gating caps', () => {
   });
 
   it('caps a 95+ score at Level 4 when oracle protection is missing', () => {
-    const checks: CheckResult[] = [
+    const checks: Array<CheckResult> = [
       makeCheck('intent.instructions-file', 'intent', 'pass', 100),
       makeCheck('harness.permissions-policy', 'harness', 'pass', 100),
       makeCheck('loop.single-command-verify', 'loop', 'pass', 100),

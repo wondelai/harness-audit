@@ -1,4 +1,5 @@
-import { CommandClassifier, sortKinds, type VerifyKind } from './capabilities.js';
+import { CommandClassifier, sortKinds } from './capabilities.js';
+import type { VerifyKind } from './capabilities.js';
 import type { RepoContext } from './fs-scanner.js';
 
 export interface WorkflowFacts {
@@ -6,25 +7,25 @@ export interface WorkflowFacts {
   /** Runs for pull requests / merge requests, directly or because a PR workflow calls it. */
   onPullRequest: boolean;
   /** Verify commands the workflow runs on any trigger. */
-  commands: string[];
+  commands: Array<string>;
   kinds: Set<VerifyKind>;
   /** Commands that publish or deploy for real (`--dry-run` invocations are not deploys). */
-  deployCommands: string[];
+  deployCommands: Array<string>;
   /** A deploy job waits for other jobs, an environment approval, or a manual/branch trigger. */
   deployGated: boolean;
   /** Toolchain versions the workflow pins, e.g. `java-version: 17`. */
-  toolchainPins: string[];
+  toolchainPins: Array<string>;
   /** Branches the workflow is filtered to when none of them is the default branch: nothing done there starts it. */
-  deadBranches: string[] | undefined;
+  deadBranches: Array<string> | undefined;
 }
 
 export interface CiFacts {
-  files: string[];
-  workflows: WorkflowFacts[];
+  files: Array<string>;
+  workflows: Array<WorkflowFacts>;
   /** What a pull request has to pass before merge, across every PR-triggered workflow. */
   prKinds: Set<VerifyKind>;
   /** The PR-triggered commands that provide `prKinds`, for evidence. */
-  prCommands: Array<{ path: string; command: string; kinds: VerifyKind[] }>;
+  prCommands: Array<{ path: string; command: string; kinds: Array<VerifyKind> }>;
 }
 
 const DEPLOY_ACTION =
@@ -35,7 +36,7 @@ const TOOLCHAIN_PIN = /^\s*(java-version|node-version|python-version|go-version|
 const PR_TRIGGER = /(^|\n)\s*(?:-\s*)?pull_request(?:_target)?\s*:?|on:\s*\[?[^\n]*\bpull_request\b|merge_request_event|\bmerge_requests\b/;
 
 /** `uses:` actions that are a check in themselves. */
-const ACTION_KINDS: ReadonlyArray<readonly [RegExp, VerifyKind[]]> = [
+const ACTION_KINDS: ReadonlyArray<readonly [RegExp, Array<VerifyKind>]> = [
   [/golangci\/golangci-lint-action|super-linter|reviewdog\/|oxsecurity\/megalinter|norio-nomura\/action-swiftlint/i, ['lint']],
   [/pre-commit\/action/i, ['lint', 'format']],
   [/cypress-io\/github-action/i, ['test']],
@@ -62,7 +63,7 @@ const OFF_PR = /github\.event_name\s*(?:!=\s*'pull_request'|==\s*'(?:push|schedu
  * marked `continue-on-error: true` cannot fail the run, so its commands gate nothing; one whose
  * `if:` excludes pull requests is not part of what a pull request has to pass.
  */
-function extractRunSteps(yaml: string): Step[] {
+function extractRunSteps(yaml: string): Array<Step> {
   const lines = yaml.split(/\r?\n/);
   const indentOf = (line: string): number => line.length - line.trimStart().length;
   const offPr = new Array<boolean>(lines.length).fill(false);
@@ -76,25 +77,25 @@ function extractRunSteps(yaml: string): Step[] {
   let jobNonBlocking = false;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (!line.trim()) continue;
+    if (!line.trim()) {continue;}
     const indent = indentOf(line);
     if (/^jobs:\s*$/.test(line)) {
       jobsAt = i;
       jobIndent = -1;
       continue;
     }
-    if (jobsAt === -1) continue;
-    if (jobIndent === -1) jobIndent = indent;
+    if (jobsAt === -1) {continue;}
+    if (jobIndent === -1) {jobIndent = indent;}
     if (indent === jobIndent && /^\s*[\w.-]+:\s*$/.test(line)) {
       keyIndent = -1;
       jobOffPr = false;
       jobNonBlocking = false;
       continue;
     }
-    if (keyIndent === -1 && indent > jobIndent) keyIndent = indent;
+    if (keyIndent === -1 && indent > jobIndent) {keyIndent = indent;}
     if (indent === keyIndent) {
-      if (/^\s*if:/.test(line) && OFF_PR.test(line)) jobOffPr = true;
-      if (/^\s*continue-on-error:\s*true\b/.test(line)) jobNonBlocking = true;
+      if (/^\s*if:/.test(line) && OFF_PR.test(line)) {jobOffPr = true;}
+      if (/^\s*continue-on-error:\s*true\b/.test(line)) {jobNonBlocking = true;}
     }
     offPr[i] = jobOffPr;
     nonBlocking[i] = jobNonBlocking;
@@ -103,9 +104,9 @@ function extractRunSteps(yaml: string): Step[] {
   // Step level: the keys of one step, wherever they stand relative to its `run:`.
   for (let start = 0; start < lines.length; start++) {
     const dash = /^(\s*)-\s+\w/.exec(lines[start]!);
-    if (!dash) continue;
+    if (!dash) {continue;}
     let end = start + 1;
-    while (end < lines.length && (!lines[end]!.trim() || indentOf(lines[end]!) > dash[1]!.length)) end++;
+    while (end < lines.length && (!lines[end]!.trim() || indentOf(lines[end]!) > dash[1]!.length)) {end++;}
     const block = lines.slice(start, end);
     const stepOffPr = block.some((l) => /^\s*(?:-\s+)?if:/.test(l) && OFF_PR.test(l));
     const stepNonBlocking = block.some((l) => /^\s*(?:-\s+)?continue-on-error:\s*true\b/.test(l));
@@ -115,19 +116,19 @@ function extractRunSteps(yaml: string): Step[] {
     }
   }
 
-  const steps: Step[] = [];
+  const steps: Array<Step> = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
     const m = /^(\s*)(?:-\s+)?run:\s*(.*)$/.exec(line);
-    if (!m) continue;
+    if (!m) {continue;}
     const runAt = i;
     const indent = m[1]!.length + (/^\s*-\s+run:/.test(line) ? 2 : 0);
     let body = m[2]!.trim();
     if (/^[|>][+-]?\d*$/.test(body)) {
-      const block: string[] = [];
+      const block: Array<string> = [];
       while (i + 1 < lines.length) {
         const next = lines[i + 1]!;
-        if (next.trim() !== '' && next.length - next.trimStart().length <= indent) break;
+        if (next.trim() !== '' && next.length - next.trimStart().length <= indent) {break;}
         block.push(next.trim());
         i++;
       }
@@ -135,21 +136,21 @@ function extractRunSteps(yaml: string): Step[] {
     } else {
       body = body.replace(/^(['"])(.*)\1$/, '$2');
     }
-    if (nonBlocking[runAt]) continue;
+    if (nonBlocking[runAt]) {continue;}
     // An inline `${{ event != 'pull_request' && 'lint' || '' }}` adds its argument only off PRs.
     const offPrExpr = /\$\{\{[^}]*github\.event_name\s*!=\s*'pull_request'[^}]*\}\}/g;
     // Off a PR the expression yields its quoted argument; keep that word so the full command reads right.
-    const full = body.replace(offPrExpr, (expr) => /&&\s*'([^']*)'/.exec(expr)?.[1] ?? '');
-    steps.push({ command: full, prCommand: offPr[runAt] ? '' : body.replace(offPrExpr, '') });
+    const full = body.replaceAll(offPrExpr, (expr) => /&&\s*'([^']*)'/.exec(expr)?.[1] ?? '');
+    steps.push({ command: full, prCommand: offPr[runAt] ? '' : body.replaceAll(offPrExpr, '') });
   }
   return steps;
 }
 
 /** Commands from CI systems that are not GitHub Actions: every line that could be a command. */
-function extractLooseCommands(text: string): Step[] {
+function extractLooseCommands(text: string): Array<Step> {
   return text
     .split(/\r?\n/)
-    .map((l) => l.trim().replace(/^-\s+/, '').replace(/^(?:run|script|command|bash|sh)\s*:?\s*/, '').replace(/^['"]|['"]\)?$/g, ''))
+    .map((l) => l.trim().replace(/^-\s+/, '').replace(/^(?:run|script|command|bash|sh)\s*:?\s*/, '').replaceAll(/^['"]|['"]\)?$/g, ''))
     .filter((l) => l.length > 2 && l.length < 300)
     .map((command) => ({ command, prCommand: command }));
 }
@@ -158,15 +159,15 @@ function extractLooseCommands(text: string): Step[] {
  * The `branches:` filter of each trigger that has one, by event. A workflow can filter pushes to a
  * release branch and still run for every pull request: the two are separate questions.
  */
-function branchFiltersByEvent(yaml: string): Map<string, string[]> {
-  const filters = new Map<string, string[]>();
+function branchFiltersByEvent(yaml: string): Map<string, Array<string>> {
+  const filters = new Map<string, Array<string>>();
   const lines = yaml.split(/\r?\n/);
-  const unquote = (b: string): string => b.trim().replace(/^['"]|['"]$/g, '');
+  const unquote = (b: string): string => b.trim().replaceAll(/^['"]|['"]$/g, '');
   let event: string | undefined;
   let eventIndent = -1;
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i]!;
-    if (!line.trim()) continue;
+    if (!line.trim()) {continue;}
     const indent = line.length - line.trimStart().length;
     const header = /^\s*(push|pull_request|pull_request_target)\s*:/.exec(line);
     if (header) {
@@ -174,21 +175,21 @@ function branchFiltersByEvent(yaml: string): Map<string, string[]> {
       eventIndent = indent;
       continue;
     }
-    if (event && indent <= eventIndent) event = undefined;
-    if (!event) continue;
-    const found: string[] = [];
+    if (event && indent <= eventIndent) {event = undefined;}
+    if (!event) {continue;}
+    const found: Array<string> = [];
     const inline = /^\s*branches\s*:\s*\[([^\]]*)\]/.exec(line);
-    if (inline) found.push(...inline[1]!.split(',').map(unquote).filter(Boolean));
+    if (inline) {found.push(...inline[1]!.split(',').map(unquote).filter(Boolean));}
     else if (/^\s*branches\s*:\s*$/.test(line)) {
-      for (let j = i + 1; j < lines.length && /^\s*-\s+/.test(lines[j]!); j++) found.push(unquote(lines[j]!.trim().replace(/^-\s+/, '')));
+      for (let j = i + 1; j < lines.length && /^\s*-\s+/.test(lines[j]!); j++) {found.push(unquote(lines[j]!.trim().replace(/^-\s+/, '')));}
     }
-    if (found.length > 0) filters.set(event, [...new Set([...(filters.get(event) ?? []), ...found])]);
+    if (found.length > 0) {filters.set(event, [...new Set([...(filters.get(event) ?? []), ...found])]);}
   }
   return filters;
 }
 
 function branchMatches(pattern: string, branch: string): boolean {
-  const rx = new RegExp(`^${pattern.split('*').map((p) => p.replace(/[.+^$()|[\]{}?\\]/g, '\\$&')).join('.*')}$`);
+  const rx = new RegExp(`^${pattern.split('*').map((p) => p.replaceAll(/[.+^$()|[\]{}?\\]/g, String.raw`\$&`)).join('.*')}$`);
   return rx.test(branch);
 }
 
@@ -200,13 +201,13 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
   );
   const files = [...ghWorkflows, ...otherCi];
 
-  const raw = new Map<string, { text: string; steps: Step[]; calls: string[]; prTriggered: boolean }>();
-  const deadBranches = new Map<string, string[]>();
+  const raw = new Map<string, { text: string; steps: Array<Step>; calls: Array<string>; prTriggered: boolean }>();
+  const deadBranches = new Map<string, Array<string>>();
   for (const path of files) {
     const text = stripComments(ctx.readText(path) ?? '');
     const isGh = path.startsWith('.github/workflows/');
     const steps = isGh ? extractRunSteps(text) : extractLooseCommands(text);
-    const calls: string[] = [];
+    const calls: Array<string> = [];
     for (const m of text.matchAll(/uses:\s*\.\/(\.github\/(?:workflows\/[^\s@'"]+|actions\/[^\s@'"]+))/g)) {
       const target = m[1]!;
       calls.push(/\.ya?ml$/.test(target) ? target : `${target.replace(/\/$/, '')}/action.yml`);
@@ -214,7 +215,7 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
     // Branch filters, per trigger. Pull requests into the default branch do not start a workflow
     // whose `pull_request` filter leaves that branch out; when its pushes are filtered away too (or
     // it has no push trigger), nothing done on the default branch ever starts it.
-    const byEvent = isGh ? branchFiltersByEvent(text) : new Map<string, string[]>();
+    const byEvent = isGh ? branchFiltersByEvent(text) : new Map<string, Array<string>>();
     const defaultBranch = ctx.git.defaultBranch;
     const excludes = (event: string): boolean => {
       const filter = byEvent.get(event);
@@ -225,34 +226,34 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
     const deadForPr = prTrigger && (excludes('pull_request') || excludes('pull_request_target'));
     const hasPush = /(^|\n)\s*push\s*:|\bon:\s*\[?[^\n]*\bpush\b/.test(text);
     const dead = deadForPr && (!hasPush || excludes('push'));
-    if (dead) deadBranches.set(path, [...new Set([...(byEvent.get('pull_request') ?? byEvent.get('pull_request_target') ?? []), ...(byEvent.get('push') ?? [])])]);
+    if (dead) {deadBranches.set(path, [...new Set([...(byEvent.get('pull_request') ?? byEvent.get('pull_request_target') ?? []), ...(byEvent.get('push') ?? [])])]);}
     raw.set(path, { text, steps, calls, prTriggered: !deadForPr && prTrigger });
   }
 
   // Composite actions a workflow calls contribute their steps to the caller.
-  const calledSteps = (path: string, seen: Set<string>): Step[] => {
-    if (seen.has(path)) return [];
+  const calledSteps = (path: string, seen: Set<string>): Array<Step> => {
+    if (seen.has(path)) {return [];}
     seen.add(path);
     const known = raw.get(path);
-    if (known) return [...known.steps, ...known.calls.flatMap((c) => calledSteps(c, seen))];
+    if (known) {return [...known.steps, ...known.calls.flatMap((c) => calledSteps(c, seen))];}
     const text = ctx.readText(path) ?? ctx.readText(path.replace(/\.yml$/, '.yaml'));
     return text ? extractRunSteps(stripComments(text)) : [];
   };
 
   const calledByPr = new Set<string>();
   for (const [path, wf] of raw) {
-    if (!wf.prTriggered) continue;
+    if (!wf.prTriggered) {continue;}
     const stack = [...wf.calls];
     while (stack.length > 0) {
       const next = stack.pop()!;
-      if (calledByPr.has(next)) continue;
+      if (calledByPr.has(next)) {continue;}
       calledByPr.add(next);
       stack.push(...(raw.get(next)?.calls ?? []));
     }
     void path;
   }
 
-  const workflows: WorkflowFacts[] = [];
+  const workflows: Array<WorkflowFacts> = [];
   const prKinds = new Set<VerifyKind>();
   const prCommands: CiFacts['prCommands'] = [];
 
@@ -260,38 +261,38 @@ export function analyzeCi(ctx: RepoContext): CiFacts {
     const onPullRequest = wf.prTriggered || calledByPr.has(path);
     const steps = [...wf.steps, ...wf.calls.flatMap((c) => calledSteps(c, new Set([path])))];
     const kinds = new Set<VerifyKind>();
-    const commands: string[] = [];
-    const deployCommands: string[] = [];
+    const commands: Array<string> = [];
+    const deployCommands: Array<string> = [];
 
-    const splitLines = (body: string): string[] => body.split(/\n|&&/).map((l) => l.trim()).filter(Boolean);
+    const splitLines = (body: string): Array<string> => body.split(/\n|&&/).map((l) => l.trim()).filter(Boolean);
     // A workflow that never runs proves nothing, on a pull request or anywhere else.
     for (const step of deadBranches.has(path) ? [] : steps) {
       for (const cmd of splitLines(step.command)) {
         // Through the script it calls, too: `npm run ship` deploys when `ship` does.
-        if (classifier.deploys(cmd)) deployCommands.push(cmd);
+        if (classifier.deploys(cmd)) {deployCommands.push(cmd);}
         const cmdKinds = sortKinds(classifier.classify(cmd));
-        if (cmdKinds.length === 0) continue;
+        if (cmdKinds.length === 0) {continue;}
         commands.push(cmd);
-        for (const k of cmdKinds) kinds.add(k);
+        for (const k of cmdKinds) {kinds.add(k);}
       }
-      if (!onPullRequest) continue;
+      if (!onPullRequest) {continue;}
       for (const cmd of splitLines(step.prCommand)) {
         const cmdKinds = sortKinds(classifier.classify(cmd));
-        if (cmdKinds.length === 0) continue;
-        prCommands.push({ path, command: cmd.replace(/\s{2,}/g, ' '), kinds: cmdKinds });
-        for (const k of cmdKinds) prKinds.add(k);
+        if (cmdKinds.length === 0) {continue;}
+        prCommands.push({ path, command: cmd.replaceAll(/\s{2,}/g, ' '), kinds: cmdKinds });
+        for (const k of cmdKinds) {prKinds.add(k);}
       }
     }
     for (const [pattern, actionKinds] of ACTION_KINDS) {
-      if (!pattern.test(wf.text)) continue;
+      if (!pattern.test(wf.text)) {continue;}
       for (const k of actionKinds) {
         kinds.add(k);
-        if (onPullRequest) prKinds.add(k);
+        if (onPullRequest) {prKinds.add(k);}
       }
     }
-    if (DEPLOY_ACTION.test(wf.text)) deployCommands.push(DEPLOY_ACTION.exec(wf.text)![0].replace(/^uses:\s*/, ''));
+    if (DEPLOY_ACTION.test(wf.text)) {deployCommands.push(DEPLOY_ACTION.exec(wf.text)![0].replace(/^uses:\s*/, ''));}
 
-    const toolchainPins: string[] = [];
+    const toolchainPins: Array<string> = [];
     for (const line of wf.text.split(/\r?\n/)) {
       const pin = TOOLCHAIN_PIN.exec(line);
       if (pin && !pin[2]!.includes('${{') && !toolchainPins.includes(`${pin[1]} ${pin[2]}`)) {

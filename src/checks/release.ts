@@ -3,8 +3,8 @@ import { guardHooks } from './harness.js';
 import type { RepoContext } from '../fs-scanner.js';
 import type { CheckResult } from '../types.js';
 
-export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
-  const results: CheckResult[] = [];
+export function runReleaseChecks(ctx: RepoContext): Array<CheckResult> {
+  const results: Array<CheckResult> = [];
 
   const ci = ctx.ci;
   const allCiFiles = ci.files;
@@ -18,7 +18,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     const anywhere = (kind: 'test' | 'lint' | 'typecheck'): boolean => ci.workflows.some((w) => w.kinds.has(kind));
     const mark = (kind: 'test' | 'lint' | 'typecheck'): string => (gates(kind) ? 'yes' : anywhere(kind) ? 'not on PRs' : 'no');
 
-    const evidence: string[] = [];
+    const evidence: Array<string> = [];
     if (allCiFiles.length === 0) {
       evidence.push('No CI pipeline found (.github/workflows/*.yml, .gitlab-ci.yml, .circleci/config.yml, etc.)');
       const onDefault = (ctx.git.defaultBranchOnly ?? []).filter((f) => f.startsWith('.github/workflows/'));
@@ -26,8 +26,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
         evidence.push(`${ctx.git.defaultBranch} has ${onDefault.slice(0, 3).join(', ')}: this branch is ${ctx.git.behindDefault} commit(s) behind it, so re-run the audit there for what ships`);
       }
     } else {
-      evidence.push(`CI workflows (${allCiFiles.length}): ${allCiFiles.slice(0, 5).join(', ')}${allCiFiles.length > 5 ? ', …' : ''}`);
-      evidence.push(`Pull requests are gated on — tests: ${mark('test')} · lint: ${mark('lint')} · typecheck: ${mark('typecheck')}`);
+      evidence.push(`CI workflows (${allCiFiles.length}): ${allCiFiles.slice(0, 5).join(', ')}${allCiFiles.length > 5 ? ', …' : ''}`, `Pull requests are gated on — tests: ${mark('test')} · lint: ${mark('lint')} · typecheck: ${mark('typecheck')}`);
       for (const dead of ci.workflows.filter((w) => w.deadBranches)) {
         evidence.push(`${dead.path} is filtered to ${dead.deadBranches!.map((b) => `\`${b}\``).join(', ')}, but the default branch is \`${ctx.git.defaultBranch}\`: pushes and pull requests to it never start this workflow`);
       }
@@ -107,7 +106,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       ctx.findFiles((f) => /^\.github\/PULL_REQUEST_TEMPLATE\/.+\.md$/i.test(f))[0] ??
       ctx.findFiles((f) => /^\.gitlab\/merge_request_templates\/.+\.md$/i.test(f))[0];
 
-    const evidence: string[] = [];
+    const evidence: Array<string> = [];
     let status: CheckResult['status'] = 'fail';
 
     if (templatePath) {
@@ -119,12 +118,12 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
         /(test|verif|weryfik|evidence|dow[oó]d|screenshot|zrzut|risk|ryzyk|rollback|wycofan|migration|migrac|command|komend|output|wynik|pr[uü]f|prueba|preuve)/i.test(content) ||
         /`[^`\n]{3,}`/.test(content);
       evidence.push(`${templatePath} found`);
-      if (hasChecklist) evidence.push('Includes verification checklist');
-      if (hasEvidenceTerms) evidence.push('Prompts for verification evidence / risk notes');
+      if (hasChecklist) {evidence.push('Includes verification checklist');}
+      if (hasEvidenceTerms) {evidence.push('Prompts for verification evidence / risk notes');}
 
       status = hasChecklist && hasEvidenceTerms ? 'pass' : 'warn';
-      if (!hasChecklist) evidence.push('No checklist items (`- [ ]`) for the author or agent to tick');
-      if (!hasEvidenceTerms) evidence.push('Does not ask for verification commands, results, risk or rollback notes');
+      if (!hasChecklist) {evidence.push('No checklist items (`- [ ]`) for the author or agent to tick');}
+      if (!hasEvidenceTerms) {evidence.push('Does not ask for verification commands, results, risk or rollback notes');}
     } else {
       // Nobody else reads a solo repo's pull requests, so the missing template is a gap, not a failure.
       status = solo ? 'warn' : 'fail';
@@ -208,7 +207,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
 
   // 4. release.observability-and-safety
   {
-    const signals: string[] = [];
+    const signals: Array<string> = [];
     const depsToCheck: Array<[string, string]> = [
       ['@sentry/node', 'Sentry'],
       ['@sentry/nextjs', 'Sentry'],
@@ -223,7 +222,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       ['prisma', 'Prisma migrations'],
     ];
     for (const [dep, label] of depsToCheck) {
-      if (ctx.hasDependency(dep) && !signals.includes(label)) signals.push(label);
+      if (ctx.hasDependency(dep) && !signals.includes(label)) {signals.push(label);}
     }
     // SDK families by name, in the root package and its workspace members: `@sentry/react-native`,
     // `posthog-react-native`, `@opentelemetry/sdk-node`, `langsmith`.
@@ -238,7 +237,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       [/^langsmith$/, 'LangSmith tracing'],
     ];
     for (const [family, label] of depFamilies) {
-      if (depNames.some((d) => family.test(d)) && !signals.includes(label)) signals.push(label);
+      if (depNames.some((d) => family.test(d)) && !signals.includes(label)) {signals.push(label);}
     }
 
     // Manifests of the non-Node stacks, where telemetry is a line in a build file.
@@ -262,7 +261,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
       [/alembic/i, 'Alembic migrations'],
     ];
     for (const [pattern, label] of manifestSignals) {
-      if (pattern.test(manifestText) && !signals.includes(label)) signals.push(label);
+      if (pattern.test(manifestText) && !signals.includes(label)) {signals.push(label);}
     }
 
     // Workers Logs and Traces switched on in the Worker config are structured telemetry.
@@ -272,7 +271,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     }
     // The repository's own telemetry module (`src/posthog.ts`, `lib/logger.ts`) when no SDK is a dependency.
     const telemetryModule = ctx.sourceFiles.find((f) => /(^|\/)(posthog|sentry|telemetry|otel|tracing|logger|logging)\.[a-z]+$/i.test(f));
-    if (telemetryModule && !signals.some((s) => /Sentry|PostHog|OpenTelemetry|logging/i.test(s))) signals.push(`Telemetry module (${telemetryModule})`);
+    if (telemetryModule && !signals.some((s) => /Sentry|PostHog|OpenTelemetry|logging/i.test(s))) {signals.push(`Telemetry module (${telemetryModule})`);}
     // Migration tooling says how the schema changes, not what the running app reports.
     const telemetrySignals = signals.filter((s) => !/migration|schema export/i.test(s)).length;
     if (ctx.findFiles((f) => /(^|\/)migrations\//.test(f)).length > 0) {
@@ -284,9 +283,9 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     // A health route: a file named for it, or the path in the code that serves requests.
     const HEALTH_ROUTE = /['"`]\/(?:api\/)?(?:health|healthz|healthcheck|readyz|livez)['"`/]/;
     // A server, not a client that calls one: a mobile app's `fetch('/health')` is not its own endpoint.
-    const SERVER_FRAMEWORKS = ['Express', 'Fastify', 'Hono', 'NestJS', 'FastAPI', 'Django', 'Flask', 'Rails', 'Laravel', 'Phoenix', 'Spring Boot', 'Cloudflare Workers', 'Next.js', 'Nuxt', 'SvelteKit', 'Astro'];
+    const SERVER_FRAMEWORKS = new Set(['Express', 'Fastify', 'Hono', 'NestJS', 'FastAPI', 'Django', 'Flask', 'Rails', 'Laravel', 'Phoenix', 'Spring Boot', 'Cloudflare Workers', 'Next.js', 'Nuxt', 'SvelteKit', 'Astro']);
     const isMobileClient = ctx.stack.frameworks.some((fw) => ['Expo', 'Android', 'SwiftUI', 'Flutter'].includes(fw));
-    const servesRequests = !isMobileClient && (ctx.stack.frameworks.some((fw) => SERVER_FRAMEWORKS.includes(fw)) || workerConfigs.length > 0 || ctx.hasFile('Dockerfile'));
+    const servesRequests = !isMobileClient && (ctx.stack.frameworks.some((fw) => SERVER_FRAMEWORKS.has(fw)) || workerConfigs.length > 0 || ctx.hasFile('Dockerfile'));
     const servesHealth =
       servesRequests &&
       (ctx.findFiles((f) => /(^|\/)health(\.[a-z]+)?$/.test(f)).length > 0 ||
@@ -349,7 +348,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
 
   // 5. release.deploy-safety
   {
-    const evidence: string[] = [];
+    const evidence: Array<string> = [];
     // A deploy is a command that ships; `wrangler deploy --dry-run` in a verify job is a build check.
     const deployWorkflows = ci.workflows.filter((w) => w.deployCommands.length > 0);
     const gated = deployWorkflows.filter((w) => w.deployGated);
@@ -382,7 +381,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
 
     // What can ship from a laptop, and which of it a committed deny rule stops.
     const localDeploys = localDeployCommands(ctx);
-    const claudeDeny = ctx.readJson<{ permissions?: { deny?: string[] } }>('.claude/settings.json')?.permissions?.deny ?? [];
+    const claudeDeny = ctx.readJson<{ permissions?: { deny?: Array<string> } }>('.claude/settings.json')?.permissions?.deny ?? [];
     // `bun run deploy` is covered by a rule naming the script under any runner; `npx wrangler deploy`
     // by one naming the CLI call. The rule has to be that command or a prefix of it: a rule for
     // `wrangler deploy --dry-run` or for the script `deploy:preview` denies neither.
@@ -400,7 +399,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
     const scriptGuards = deployScriptGuards(ctx);
     const selfGuarded = localDeploys.filter((c) => scriptGuards.has(c));
     const unguarded = guards.length > 0 ? [] : localDeploys.filter((c) => !denied(c) && !scriptGuards.has(c));
-    const code = (commands: string[]): string => commands.map((c) => `\`${c}\``).join(', ');
+    const code = (commands: Array<string>): string => commands.map((c) => `\`${c}\``).join(', ');
     if (localDeploys.length > 0 && guards.length > 0) {
       evidence.push(`A PreToolUse guard hook decides on deploy commands before they run: ${guards.join(', ')} (read it for what it allows from the main checkout)`);
     } else if (localDeploys.length > 0) {
@@ -421,7 +420,7 @@ export function runReleaseChecks(ctx: RepoContext): CheckResult[] {
 
     // Merging is the deploy, and nothing checks a pull request first: every merge ships untested.
     const mergeShipsUnchecked = platform && deployWorkflows.length === 0 && ci.prKinds.size === 0;
-    if (mergeShipsUnchecked) evidence.push('Merges deploy to production and no pull-request check runs first');
+    if (mergeShipsUnchecked) {evidence.push('Merges deploy to production and no pull-request check runs first');}
 
     let status: CheckResult['status'];
     if (mergeShipsUnchecked) {

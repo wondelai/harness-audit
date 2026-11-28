@@ -17,15 +17,15 @@ export function describeGate(id: string, report: AuditReport, lang: Lang): strin
 }
 
 /** The gates of the next level that the caps already printed do not cover. */
-export function uncappedGates(report: AuditReport): string[] {
+export function uncappedGates(report: AuditReport): Array<string> {
   const capped = new Set(report.levelCaps.flatMap((cap) => cap.triggeredBy));
   return [...new Set((report.nextLevel?.blockers ?? []).map((b) => b.id))].filter((id) => !capped.has(id));
 }
 
 /** Notes for a checkout that is behind the default branch: the audit is of the checkout, and says so. */
-export function branchNotes(report: AuditReport, lang: Lang): string[] {
+export function branchNotes(report: AuditReport, lang: Lang): Array<string> {
   const { branch, defaultBranch, behindDefault, defaultBranchOnly } = report.git;
-  if (!branch || !defaultBranch || !behindDefault) return [];
+  if (!branch || !defaultBranch || !behindDefault) {return [];}
   const fill = (text: string): string =>
     text.replace('{branch}', branch).replace('{n}', String(behindDefault)).replace('{default}', defaultBranch).replace('{files}', (defaultBranchOnly ?? []).slice(0, 4).join(', '));
   return [fill(t(UI.branchBehind, lang)), ...(defaultBranchOnly?.length ? [fill(t(UI.branchLacks, lang))] : [])];

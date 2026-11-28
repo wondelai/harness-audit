@@ -5,12 +5,13 @@ import { afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { runDeepReview } from '../src/deep.js';
 import { RepoContext } from '../src/fs-scanner.js';
 import { auditRepo, generateFixPrompt, initHarness, INTERVIEW_QUESTIONS, scoreInterview } from '../src/index.js';
-import { createAntiPatternRepo, createLevel0BareRepo, createWellHarnessedRepo, type TempRepo } from './fixtures.js';
+import { createAntiPatternRepo, createLevel0BareRepo, createWellHarnessedRepo } from './fixtures.js';
+import type { TempRepo } from './fixtures.js';
 
 const PACKAGE_ROOT = resolve(import.meta.dirname, '..');
 const CLI_PATH = join(PACKAGE_ROOT, 'dist', 'cli.js');
 
-const repos: TempRepo[] = [];
+const repos: Array<TempRepo> = [];
 const track = (r: TempRepo): TempRepo => {
   repos.push(r);
   return r;
@@ -23,7 +24,7 @@ beforeAll(() => {
 });
 
 afterEach(() => {
-  while (repos.length > 0) repos.pop()!.cleanup();
+  while (repos.length > 0) {repos.pop()!.cleanup();}
 });
 
 describe('CLI modes, --prompt, init, interview, and --deep', () => {

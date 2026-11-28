@@ -5,13 +5,13 @@ import type { CheckResult } from '../types.js';
 /** A long-running local server or local runtime state: what parallel checkouts collide on. */
 function hasDevServer(ctx: RepoContext): boolean {
   const serverDeps = ['next', 'astro', 'express', 'fastify', 'hono', 'vite', '@nestjs/core', 'nuxt', '@sveltejs/kit', '@remix-run/dev', 'react-router', 'expo'];
-  if (serverDeps.some((d) => ctx.hasDependency(d))) return true;
-  if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'manage.py']) !== undefined) return true;
+  if (serverDeps.some((d) => ctx.hasDependency(d))) {return true;}
+  if (ctx.hasAnyFile(['wrangler.toml', 'wrangler.jsonc', 'wrangler.json', 'docker-compose.yml', 'docker-compose.yaml', 'compose.yml', 'manage.py']) !== undefined) {return true;}
   return ctx.stack.frameworks.some((f) => ['FastAPI', 'Django', 'Flask', 'Rails', 'Laravel', 'Phoenix', 'Spring Boot'].includes(f));
 }
 
-export function runGraphChecks(ctx: RepoContext): CheckResult[] {
-  const results: CheckResult[] = [];
+export function runGraphChecks(ctx: RepoContext): Array<CheckResult> {
+  const results: Array<CheckResult> = [];
   const brief = `${ctx.readText('AGENTS.md') ?? ''}\n${ctx.readText('CLAUDE.md') ?? ''}`;
 
   // 1. graph.worktree-isolation
@@ -29,12 +29,12 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
       !/\b(?:own|separate|dedicated|new|fresh|isolated|per[- ]task)\s+(?:git\s+)?worktree|git worktree add|--worktree\b|\bbin\/wt\b/i.test(brief);
     const briefMentionsWorktree = /\bworktree\b/i.test(brief) && !sharesOneTree;
 
-    const evidence: string[] = [];
-    if (wtScripts.length > 0) evidence.push(`Worktree tooling: ${wtScripts.join(', ')}`);
-    if (pkgScripts.length > 0) evidence.push(`Package scripts: ${pkgScripts.join(', ')}`);
-    if (wtLocalOnly.length > 0) evidence.push(`Not committed yet, so no other checkout has it: ${wtLocalOnly.join(', ')}`);
-    if (briefMentionsWorktree) evidence.push('Worktree workflow documented in root instructions');
-    if (sharesOneTree) evidence.push('The brief has several agents work in the same worktree: their edits, builds and test runs share one directory');
+    const evidence: Array<string> = [];
+    if (wtScripts.length > 0) {evidence.push(`Worktree tooling: ${wtScripts.join(', ')}`);}
+    if (pkgScripts.length > 0) {evidence.push(`Package scripts: ${pkgScripts.join(', ')}`);}
+    if (wtLocalOnly.length > 0) {evidence.push(`Not committed yet, so no other checkout has it: ${wtLocalOnly.join(', ')}`);}
+    if (briefMentionsWorktree) {evidence.push('Worktree workflow documented in root instructions');}
+    if (sharesOneTree) {evidence.push('The brief has several agents work in the same worktree: their edits, builds and test runs share one directory');}
 
     // Two agents in one tree collide hardest on ports and local state. A repository with neither
     // (a CLI, a library, a mobile app) risks overlapping edits only, which a one-line convention covers.
@@ -43,7 +43,7 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     // copies: without a word in the brief, nothing tells a second agent to make one.
     const helperScripts = wtScripts.filter((f) => f !== '.worktreeinclude');
     const includeOnly = helperScripts.length === 0 && pkgScripts.length === 0 && wtScripts.length > 0 && !briefMentionsWorktree;
-    if (includeOnly) evidence.push('.worktreeinclude lists what a new worktree needs, but no brief says that a second agent should work in one');
+    if (includeOnly) {evidence.push('.worktreeinclude lists what a new worktree needs, but no brief says that a second agent should work in one');}
     let status: CheckResult['status'] = 'warn';
     if (includeOnly) {
       status = 'warn';
@@ -87,7 +87,7 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
 
   // 2. graph.port-and-state-isolation
   {
-    const evidence: string[] = [];
+    const evidence: Array<string> = [];
     const envFiles = ['.env.example', '.env.test.example', '.dev.vars.example', '.wt-env'];
     let hasPortEnv = false;
     for (const ef of envFiles) {
@@ -144,11 +144,11 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
     const scriptPort = /--port[= ](\d{2,5})\b/.exec(devScripts.join('\n'))?.[1];
     const literalPort = scriptPort !== undefined && !devScripts.some((b) => /\$\{?(?:[A-Z0-9]+_)*PORT\b/.test(b));
     const portIsFixed = literalPort || Boolean(fixedPort && !hasPortEnv);
-    if (portIsFixed) evidence.push(`Dev server port ${scriptPort ?? fixedPort} is fixed in the config: parallel checkouts collide on it`);
+    if (portIsFixed) {evidence.push(`Dev server port ${scriptPort ?? fixedPort} is fixed in the config: parallel checkouts collide on it`);}
     // A dev script that frees its port by force takes it from whoever holds it, another checkout included.
     const killed = devScripts.map((b) => /lsof\s+-ti\s*:?\s*(\d{2,5})[^|]*\|\s*xargs\s+kill|kill-port\s+(\d{2,5})/.exec(b)).find(Boolean);
     const killedPort = killed?.[1] ?? killed?.[2];
-    if (killedPort) evidence.push(`The dev script kills whatever holds port ${killedPort}: starting it in one checkout stops another checkout's server`);
+    if (killedPort) {evidence.push(`The dev script kills whatever holds port ${killedPort}: starting it in one checkout stops another checkout's server`);}
 
     let status: CheckResult['status'] = 'warn';
     if (portIsFixed || killedPort) {
@@ -200,9 +200,9 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
       /^(docs\/agents\/|scripts\/workflows\/)/i.test(f),
     );
 
-    const evidence: string[] = [];
-    if (agentFiles.length > 0) evidence.push(`Agent/loop definitions: ${agentFiles.slice(0, 6).join(', ')}`);
-    if (orchestrationDocs.length > 0) evidence.push(`Agent docs/workflows: ${orchestrationDocs.slice(0, 5).join(', ')}`);
+    const evidence: Array<string> = [];
+    if (agentFiles.length > 0) {evidence.push(`Agent/loop definitions: ${agentFiles.slice(0, 6).join(', ')}`);}
+    if (orchestrationDocs.length > 0) {evidence.push(`Agent docs/workflows: ${orchestrationDocs.slice(0, 5).join(', ')}`);}
 
     const status: CheckResult['status'] =
       // Docs about orchestration are not definitions, and having them must not read worse than having nothing.
@@ -236,16 +236,16 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
 
   // 4. graph.workspace-boundaries
   {
-    const boundaryArtifacts: string[] = [];
+    const boundaryArtifacts: Array<string> = [];
     for (const f of ['pnpm-workspace.yaml', 'turbo.json', 'nx.json', 'go.work', 'ARCHITECTURE.md']) {
-      if (ctx.hasFile(f)) boundaryArtifacts.push(f);
+      if (ctx.hasFile(f)) {boundaryArtifacts.push(f);}
     }
-    if (ctx.packageJson?.workspaces) boundaryArtifacts.push('package.json workspaces');
-    if (/\[workspace\]/.test(ctx.readText('Cargo.toml') ?? '')) boundaryArtifacts.push('Cargo.toml [workspace]');
+    if (ctx.packageJson?.workspaces) {boundaryArtifacts.push('package.json workspaces');}
+    if (/\[workspace\]/.test(ctx.readText('Cargo.toml') ?? '')) {boundaryArtifacts.push('Cargo.toml [workspace]');}
     const gradleModules = (`${ctx.readText('settings.gradle.kts') ?? ''}\n${ctx.readText('settings.gradle') ?? ''}`.match(/["']:[\w:-]+["']/g) ?? []).length;
-    if (gradleModules >= 2) boundaryArtifacts.push(`Gradle modules (${gradleModules} in settings.gradle)`);
+    if (gradleModules >= 2) {boundaryArtifacts.push(`Gradle modules (${gradleModules} in settings.gradle)`);}
     const swiftTargets = (ctx.readText('Package.swift') ?? '').match(/\.(?:target|testTarget|executableTarget)\(/g)?.length ?? 0;
-    if (swiftTargets >= 2) boundaryArtifacts.push(`Swift package targets (${swiftTargets})`);
+    if (swiftTargets >= 2) {boundaryArtifacts.push(`Swift package targets (${swiftTargets})`);}
     // The same routing a scoped-context check credits: a map section, a path table, or nested briefs.
     const facts = ctx.brief;
     if (facts.hasModuleMap) {
@@ -255,8 +255,8 @@ export function runGraphChecks(ctx: RepoContext): CheckResult[] {
           : `Module map section in ${facts.primary}`,
       );
     }
-    if (facts.nestedBriefs.length >= 2) boundaryArtifacts.push(`Nested briefs per area (${facts.nestedBriefs.length})`);
-    if (ctx.findFiles((f) => /^docs\/[^/]*architecture[^/]*\.mdx?$/i.test(f)).length > 0) boundaryArtifacts.push('docs/ architecture doc');
+    if (facts.nestedBriefs.length >= 2) {boundaryArtifacts.push(`Nested briefs per area (${facts.nestedBriefs.length})`);}
+    if (ctx.findFiles((f) => /^docs\/[^/]*architecture[^/]*\.mdx?$/i.test(f)).length > 0) {boundaryArtifacts.push('docs/ architecture doc');}
 
     // An architecture section in the README is the map, written where no agent brief loads it.
     const readmeMap = boundaryArtifacts.length === 0 && hasMapSection(ctx.readText('README.md') ?? '');

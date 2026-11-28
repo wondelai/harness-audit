@@ -13,7 +13,7 @@ export interface InterviewQuestion {
   }>;
 }
 
-export const INTERVIEW_QUESTIONS: readonly InterviewQuestion[] = [
+export const INTERVIEW_QUESTIONS: ReadonlyArray<InterviewQuestion> = [
   {
     id: 'org.daily-adoption',
     question: {
@@ -132,8 +132,8 @@ export function scoreInterview(
   role: InterviewRole,
   selections: Record<string, 0 | 1 | 2>,
 ): InterviewResult {
-  const answers: InterviewAnswer[] = [];
-  const gaps: LocalizedText[] = [];
+  const answers: Array<InterviewAnswer> = [];
+  const gaps: Array<LocalizedText> = [];
   let sum = 0;
 
   for (const q of INTERVIEW_QUESTIONS) {
@@ -186,9 +186,9 @@ export async function runInteractiveInterview(
       let picked: 0 | 1 | 2 | null = null;
       while (picked === null) {
         const raw = (await rl.question(lang === 'pl' ? 'Twój wybór (1-3): ' : 'Choice (1-3): ')).trim();
-        if (raw === '1') picked = 0;
-        else if (raw === '2') picked = 1;
-        else if (raw === '3') picked = 2;
+        if (raw === '1') {picked = 0;}
+        else if (raw === '2') {picked = 1;}
+        else if (raw === '3') {picked = 2;}
         else {
           stdout.write(lang === 'pl' ? 'Wpisz 1, 2 lub 3.\n' : 'Please enter 1, 2, or 3.\n');
         }
