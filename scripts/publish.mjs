@@ -26,13 +26,16 @@ const capture = (cmd, args, cwd = root) => {
 const onRegistry = (name) => capture('npm', ['view', `${name}@${pkg.version}`, 'version']) === pkg.version;
 
 if (mode === 'check') {
-  // The registry needs a moment after a publish; npx is what a user runs, so npx is what is asked.
+  // The registry needs a while after a publish (the 0.2.0 release took over two minutes to serve the
+  // second name); npx is what a user runs, so npx is what is asked, for up to six minutes a name.
   for (const name of NAMES) {
     let served = '';
-    for (let attempt = 0; attempt < 12 && served !== pkg.version; attempt++) {
+    for (let attempt = 0; attempt < 36 && served !== pkg.version; attempt++) {
       // From a neutral directory: inside this checkout npx finds a package.json with the same name
       // and version and may resolve the request to it instead of the registry.
-      served = capture('npx', ['-y', `${name}@${pkg.version}`, '--version'], tmpdir());
+      // --prefer-online: the `npm view` before the publish cached this package's version list, and a
+      // cached list that predates the release must not answer for it.
+      served = capture('npx', ['-y', '--prefer-online', `${name}@${pkg.version}`, '--version'], tmpdir());
       if (served !== pkg.version) await new Promise((r) => setTimeout(r, 10_000));
     }
     if (served !== pkg.version) {
