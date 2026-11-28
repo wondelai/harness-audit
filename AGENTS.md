@@ -33,6 +33,7 @@ Try a change on a real repository: `node dist/cli.js /path/to/repo` (add `--verb
   `src/capabilities.ts` (verify commands) and the stack-aware branches of the loop and harness checks.
 - **Every user-facing string exists in `en` and `pl`.**
 - **Zero runtime dependencies.** Parsing YAML, TOML or JSONC stays hand-rolled and line-based.
+- **No lint rule is switched off** (`oxlint.config.ts`, `@cloudflare/oxlint-config`); fix the code. `no-console` is off only in `scripts/`. Two single-line `oxlint-disable-next-line` casts exist, each with its reason: `parseJsonc` in `src/fs-scanner.ts` and `parseJsonAs` in `tests/fixtures.ts`. Untyped input is read through `src/json.ts` (`parseJson`, `isJsonObject`) and `lookup()` in `src/lookup.ts`, not cast.
 
 ## Read before you touch
 

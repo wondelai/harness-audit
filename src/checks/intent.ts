@@ -10,7 +10,7 @@ const BOILERPLATE_PATTERNS: Array<{ label: string; regex: RegExp }> = [
   { label: 'generic "always test your changes"', regex: /\balways test your (changes|code)\b/i },
 ];
 
-export interface BareAgentsImport {
+interface BareAgentsImport {
   bare: boolean;
   backticked: boolean;
 }

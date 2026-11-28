@@ -126,7 +126,7 @@ function sandboxEnabled(settings: unknown): boolean {
 /** Bindings that are a remote service with no local emulator and no stored data: running them remotely is the only way. */
 const SERVICE_BINDINGS = new Set(['ai', 'browser', 'images', 'send_email', 'version_metadata']);
 
-export interface RemoteBindings {
+interface RemoteBindings {
   stores: Array<string>;
   services: Array<string>;
 }
