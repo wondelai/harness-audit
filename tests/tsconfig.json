@@ -1,0 +1,15 @@
+{
+  // The test files, type-checked with the sources they import. The root tsconfig.json
+  // builds src/ only; this one is what `npm run typecheck` and oxlint's type-aware rules
+  // (which use the nearest tsconfig.json) read for tests/ and vitest.config.ts.
+  "extends": "../tsconfig.json",
+  "include": ["./**/*.ts", "../src/**/*.ts", "../vitest.config.ts"],
+  "exclude": ["../node_modules", "../dist"],
+  "compilerOptions": {
+    "rootDir": "..",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
+  }
+}

@@ -218,13 +218,14 @@ describe('scoring engine & level gating caps', () => {
     const soloEn = buildRecommendations({
       lang: 'en',
       level: 2,
-      git: { isGitRepo: true, gitAuthors90d: 1, commits30d: 12 },
+      git: { isGitRepo: true, gitAuthors90d: 1, authorsAllTime: 1, commits30d: 12, commits90d: 36 },
       stack: {
         languages: ['TypeScript'],
         frameworks: [],
         packageManagers: ['npm'],
         monorepo: false,
         verifyScripts: [],
+        verifyCommands: [],
         detectedTools: ['claude-code'],
         sourceFileCount: 10,
         testFileCount: 2,
@@ -237,13 +238,14 @@ describe('scoring engine & level gating caps', () => {
     const teamPl = buildRecommendations({
       lang: 'pl',
       level: 3,
-      git: { isGitRepo: true, gitAuthors90d: 6, commits30d: 90 },
+      git: { isGitRepo: true, gitAuthors90d: 6, authorsAllTime: 6, commits30d: 90, commits90d: 270 },
       stack: {
         languages: ['TypeScript'],
         frameworks: ['Next.js'],
         packageManagers: ['pnpm'],
         monorepo: true,
         verifyScripts: ['test'],
+        verifyCommands: ['pnpm test (test)'],
         detectedTools: ['claude-code', 'cursor'],
         sourceFileCount: 100,
         testFileCount: 20,

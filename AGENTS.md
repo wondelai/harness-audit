@@ -9,8 +9,9 @@ same version.
 
 ```bash
 npm ci
-npm run verify       # typecheck + build + tests: the gate, run it before you finish
-npm run typecheck    # tsc --noEmit
+npm run verify       # lint + typecheck + build + tests: the gate, run it before you finish
+npm run lint         # oxlint with @cloudflare/oxlint-config (oxlint.config.ts); --fix applies the safe fixes only
+npm run typecheck    # tsc --noEmit for src/, tsc -p tests for the tests
 npm run build        # esbuild bundles into dist/, then tsc emits the .d.ts files
 npm test             # vitest; the CLI tests run the built dist/cli.js, so build first
 ```
